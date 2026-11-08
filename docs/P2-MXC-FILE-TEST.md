@@ -1,5 +1,26 @@
 # P2.8 MXC 합성 파일 인수 시험
 
+## 재시험용 최소 환경 수정안
+
+기준 `fe1f1e2dc145833398ee2ffe9ceed11648ca362d`. 이전 런처가 자식 환경을 비운 뒤 명시적으로 복원한 목록에 `SystemDrive`가 없었다. 설치 CLI `0.167.0-alpha.3.2`의 준비 오류가 이 변수의 필요성을 직접 보여 준다. OpenAI Windows 문서는 시작 진단과 장치 요구사항을 안내하며, 검토한 문서에는 이 빌드의 최소 호스트 환경 변수 목록이 없다. 아래 수정안의 부팅 성공 여부는 미검증이다. [OpenAI Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+
+기존 합성 루트와 `codex-home`은 해당 경로 및 직계 항목의 메타데이터만 읽어 확인했다. 두 디렉터리는 reparse point가 아니었고 각각 하위 디렉터리 한 개가 있었다. 내부 파일 내용 열기, 삭제, 변경은 하지 않았다. 기존 자료는 별도 정리 승인까지 보존한다.
+
+새 승인 후 런처는 Windows가 보고한 시스템 디렉터리에서 시스템 드라이브를 구한다. 로컬 드라이브 문자이고 호스트 `SystemRoot`의 드라이브 및 호스트 `SystemDrive`와 일치하는지 검사한다. 확인된 호스트 값은 세 경로가 일치했다. 새 합성 루트는 운영 저장소 밖의 새 GUID 경로만 허용하고 상위 경로, reparse point, 기존 파일 및 다른 프로젝트 루트와의 중첩을 다시 확인한다. 이전 시험 폴더는 재사용하지 않는다.
+
+```powershell
+$systemDirectory = [IO.Path]::GetFullPath([Environment]::SystemDirectory)
+$systemDrive = [IO.Path]::GetPathRoot($systemDirectory).TrimEnd('\')
+if ($systemDrive -notmatch '^[A-Za-z]:$' -or
+    $systemDrive -ne [IO.Path]::GetPathRoot($env:SystemRoot).TrimEnd('\') -or
+    $systemDrive -ne $env:SystemDrive) { throw 'Host SystemDrive evidence mismatch' }
+$info.Environment['SystemDrive'] = $systemDrive
+```
+
+`SystemDrive`만 새 변수로 추가한다. 기존 런처의 `SystemRoot`·`WINDIR`는 Windows 구성요소 경로, `ProgramData`는 관리 정책 경로, `PATH`는 확인된 System32, `TEMP`·`TMP`·`CODEX_HOME`은 새 합성 루트의 경로로 제한한다. 실제 `LOCALAPPDATA`, `USERPROFILE`, 자격증명·토큰 등 사용자 환경은 전달하지 않는다. 이 목록은 보수적인 시험 런처 계약이며 각 변수의 제품 요구사항이 모두 입증됐다는 뜻은 아니다. 호스트 양성 대조의 Python에는 Codex 전용 변수를 전달하지 않는다.
+
+이번에는 읽기 전용 점검과 수정안 문서화만 했다. 새 승인에는 합성 루트 준비, 양성 대조 1회, 복원, MXC 시험 1회와 종료 후 해시·junction 확인 및 검증된 새 자료만의 정리가 포함돼야 한다. 준비 오류가 재발하면 메시지와 종료 코드만 기록하고 종료한다. 새 변수를 자동 추가하거나 재시도하지 않는다. 불완전한 대상 결과나 불명확한 오류는 NOT VERIFIED다. 기존 A 증거와 C 합성 검역은 유지하며 B 파일 경계 및 C의 MXC 원장 보호는 NOT VERIFIED, P3와 실제 Codex 연결은 BLOCKED다.
+
 ## 2026-11-09 실행 결과
 
 시험 기준 `96125464afb62848999647e1aaa5fa578c1dfcef`. 새 합성 루트와 내부·외부 junction을 확인했다. 동일 Python의 호스트 양성 대조 1회에서 일곱 경로 모두 읽기·쓰기 성공, 종료 코드 0을 관측했다. 초기 바이트와 해시를 복원한 후 MXC 시험을 1회 실행했다.
