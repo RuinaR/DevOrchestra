@@ -5,6 +5,15 @@ import re
 MAX_STREAM_BYTES = 16_384
 MARKER = b"MXC_NATIVE_OK"
 
+
+def diagnostic_unresolved(events):
+    latest = next((event for event in reversed(events) if event["kind"] in (
+        "mxc_diagnostic_intent", "mxc_diagnostic_result",
+    )), None)
+    return latest is not None and (
+        latest["kind"] == "mxc_diagnostic_intent" or latest.get("owned_tree") != "NOT_CREATED"
+    )
+
 # Exact phrases from prior observations or upstream source. A match is a
 # reported failure, not independently verified backend telemetry.
 KNOWN_LINES = {
@@ -112,5 +121,5 @@ def native_probe_receipt(*, preflight, cli_started, cli_exit, streams_complete, 
     return {
         "schema_version": 1, "scope": "NATIVE_SELF_TEST_ONLY", "result": result,
         "stages": stages, "cli_exit_code": cli_exit, "marker_observed": marker,
-        "error_type": error, "reported_error_code": code,
+        "error_type": error, "reported_error_code": code, "capture_complete": streams_complete,
     }

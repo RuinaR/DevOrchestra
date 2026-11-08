@@ -14,6 +14,7 @@ from .event_journal import EventJournal, OPEN_ROLE_EVENTS
 
 from .lease import Blocked, execution_slot
 from .ledger import digest
+from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
 from .shutdown import HELD, UNKNOWN, checkpoint, shutdown_state, transition
 
@@ -91,13 +92,16 @@ ROLE_TOKENS = 1
 def last_run(events):
     for index in range(len(events) - 1, -1, -1):
         if events[index]["kind"] == "run_started":
-            return [e for e in events[index:] if not e["kind"].startswith(("session_", "shutdown_"))]
+            return [e for e in events[index:]
+                    if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_"))]
     return []
 
 
 def require_admission(events):
     if shutdown_state(events)["state"] in HELD:
         raise Blocked("Shutdown has closed admission")
+    if diagnostic_unresolved(events):
+        raise Blocked("Diagnostic process ownership requires recovery")
 
 
 def mock_role(phase, scenario, history):
@@ -193,7 +197,7 @@ class Runner:
             events, tail = self.ledger.snapshot(recover_journal=True)
             current = shutdown_state(events)
             run = last_run(events)
-            unresolved = (abandoned or any(event["kind"] in UNKNOWN for event in run[-1:])
+            unresolved = (abandoned or diagnostic_unresolved(events) or any(event["kind"] in UNKNOWN for event in run[-1:])
                           or any(event["kind"] == "recovery" for event in run))
             if current.get("abandoned"):
                 unresolved = True
