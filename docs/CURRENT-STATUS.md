@@ -1,6 +1,8 @@
 # 현재 상태
 
-P2.30에서 Codex 기본 셸의 패키지별 LOCALAPPDATA와 사용자 세션 경로 차이를 확인했다. P2.28의 Oracle 패키지 무결성 증거는 Codex 도구에서 읽은 파일에 한정한다. 사용자 호스트 다운로드 상태는 `HOST_FILE_NOT_VERIFIED`, 수동 설치 및 P2 A/B/C·P3는 BLOCKED다. [재확인 절차](P2-VM-VALIDATION.md#p230-사용자-세션의-설치-파일-접근-확인)
+P2.31 사용자 수동 설치 후 VirtualBox 7.2.22 본체 버전·Oracle 서명, VBoxSup 등록·서명 PASS. 미재부팅 상태이며 로드·재부팅 필요성 UNKNOWN. USB·브리지·Host-only 드라이버가 등록돼 최소 구성과 다르다. VM 생성·부팅 및 P2 A/B/C·P3는 BLOCKED다. [설치 후 검증](P2-VM-VALIDATION.md#p231-사용자-수동-설치-후-읽기-전용-검증)
+
+P2.30 당시 Codex 기본 셸과 사용자 세션의 경로 관측 차이로 P2.28 호스트 다운로드를 `HOST_FILE_NOT_VERIFIED`로 기록했다. [당시 재확인 절차](P2-VM-VALIDATION.md#p230-사용자-세션의-설치-파일-접근-확인)
 
 P2.29 VirtualBox 7.2.22 패키지 재검증 PASS. 최소 설치는 두 실행 요청의 Windows 경로 오류로 BLOCKED다. 기본 본체·지정 드라이버 서비스 등록 미발견, 설치기 종료 코드와 재부팅 요구 NOT VERIFIED. P2 A/B/C 및 P3는 BLOCKED다. [설치 시도](P2-VM-VALIDATION.md#p229-승인된-최소-설치-시도)
 

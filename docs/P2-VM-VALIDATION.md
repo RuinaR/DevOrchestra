@@ -1,5 +1,21 @@
 # P2.5 격리 실행 환경과 인수 시험
 
+## P2.31 사용자 수동 설치 후 읽기 전용 검증
+
+기준 `b2277ccfd3ea6e4b4f55261b940461b3482522c1`. 사용자는 P2.30 이후 직접 받은 설치 파일의 SHA-256과 Oracle America, Inc. 서명을 검증해 설치했으며, 본인 PowerShell에서 `VBoxManage.exe --version`의 `7.2.22r175245`를 확인했다. 설치 후 재부팅하지 않았다는 사용자 확인을 받았다. P2.30의 당시 호스트 파일 판정은 이력으로 보존한다.
+
+| 항목 | 읽기 전용 증거 및 판정 |
+| --- | --- |
+| 본체 설치 | PASS. `VirtualBox.exe`, `VBoxManage.exe`, `VBoxHeadless.exe`, `VBoxSVC.exe`, `VBoxC.dll`의 파일 버전은 모두 `7.2.22.175245`, Authenticode는 유효하며 Oracle America, Inc. 서명이다. 검증 과정에서 제품을 실행하지 않았다. |
+| 필수 호스트 드라이버 | 등록 및 서명 PASS. `VBoxSup`은 `VBoxSup.sys`를 가리키며 등록된 시작 유형은 SYSTEM이다. 설치된 드라이버 버전은 `7.2.22.175245`, 드라이버 파일과 배포 카탈로그의 Authenticode는 유효하며 Microsoft Windows Hardware Compatibility Publisher 서명이다. |
+| 로드 및 재부팅 | NOT VERIFIED. `sc.exe query VBoxSup`는 접근 거부(5)였고 대상 한정 CIM 조회도 상태를 반환하지 않았다. 로드 여부와 재부팅 필요성은 UNKNOWN이다. SYSTEM 시작 유형과 설치 후 미재부팅 사실만으로 현재 로드 여부를 판정할 수 없다. |
+| 최소 구성 | BLOCKED. USB 모니터 `VBoxUSBMon`, 브리지 필터 `VBoxNetLwf`, Host-only `VBoxNetAdp`(이미지 `VBoxNetAdp6.sys`)의 서비스 등록과 드라이버 파일이 확인됐다. 동작 상태나 네트워크 바인딩은 확인하지 않았다. 기본 Extension Pack 경로 및 확인한 Python SDK 표식은 없었으나 설치 기능 전체 판정은 UNKNOWN이다. Guest Additions ISO 파일이 있으며 게스트 설치 여부는 확인하지 않았다. |
+| 보안 및 하이퍼바이저 | NOT VERIFIED. HVCI 레지스트리 설정 값은 활성(1)이다. 하이퍼바이저 현재 상태, WHP/Hyper-V 선택적 기능 및 VBS/HVCI 런타임 조회 결과는 UNKNOWN이다. Oracle은 WHP가 실행 중인 경우 Hyper-V 백엔드와 성능 저하 가능성을 문서화한다. [Oracle Hyper-V 공존](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html) |
+
+다음 입장 조건은 사용자가 직접 연 Windows PowerShell에서 `sc.exe query VBoxSup`로 해당 드라이버 상태만 확인하고, 최소 구성 불일치에 대한 별도 결정을 받는 것이다. 조회 권한이 없거나 상태가 불명확하면 VM 생성·부팅을 차단한다. 수정 설치·제거·재부팅은 각각 별도 승인 대상이다.
+
+조건 충족 후에도 Microsoft 공식 Windows x64 이미지 확보·무결성 확인, 적합한 게스트 라이선스 확보, 합성 VM 생성 및 최초 부팅은 각각 범위를 정해 별도 승인받는다. 최초 시험 기준은 2 vCPU, 실행 캡 50%, 게스트 RAM 4 GiB, 고정 OS 디스크 64 GiB, 반출 디스크 16 MiB, 20분이다. 시작 직전 가용 RAM 12 GiB, 커밋 여유 16 GiB, 대상 볼륨 여유 100 GiB 및 이미지·로그 공간, CPU 여유를 확인한다. 자원 충족 여부는 이번 단계에서 판정하지 않았다. 지정 VM UUID만 제어하고 NIC·호스트 통합을 끈다. P2 A/B/C 및 P3는 BLOCKED다.
+
 ## P2.30 사용자 세션의 설치 파일 접근 확인
 
 기준 `64f786ae8a20390461bff5511f62d13cc54180e2`. 사용자가 직접 연 Windows PowerShell에서는 다운로드 폴더가 발견되지 않았다. Codex의 기본 Windows 셸은 패키지별 `LOCALAPPDATA`를 사용했고, 해당 변수로 구성한 경로에서도 파일이 발견되지 않았다. 같은 셸에 사용자가 알려준 절대 경로를 지정하면 EXE가 보였다. 별도의 승인된 읽기 전용 명령에서도 같은 절대 경로의 EXE와 SHA256SUMS가 보였고, EXE 크기와 SHA-256은 아래 기준에 일치했다.
