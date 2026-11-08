@@ -102,3 +102,7 @@ run_one(project, task):
 ## 8. 문서 규칙
 
 최신 작업 단계가 착수되면 `docs/CURRENT-STATUS.md`, `docs/WORKLOG.md`, `docs/AI-HANDOFF.md`를 생성·갱신하고, 검증된 구현/합성/실행 환경/실서비스를 구분한다. 원시 에이전트 로그, 실계정 정보, 로컬 디렉터리 구조, 비밀 프롬프트는 Git 추적 대상이 아니다. 자세한 규칙은 [GLOBAL-SAFETY-POLICY](GLOBAL-SAFETY-POLICY.md)와 [AGENTS](../AGENTS.md).
+
+## 게임형 UI 확정 설계 (2026-11-08)
+
+[GAME-UI-DESIGN](GAME-UI-DESIGN.md)은 P1 원장 기반 게임형 대시보드와 역할 카드, 정직한 진행도, 상태 드릴다운, 가벼운 효과와 GUI 안전 게이트를 규정한다. P1.5에서 순수 읽기 모델/Mock 시각화, P2에서 OS 격리 검증을 우선, P2.5에서 네이티브 GUI 완성도를 향상한다. UI가 잠금·상태·권한의 소유자가 되어서는 안 된다. GUI 자체가 아직 구현되었다고 주장하지 않는다.
