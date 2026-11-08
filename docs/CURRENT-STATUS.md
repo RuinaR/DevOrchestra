@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.25 독립 프로필 초안과 PowerShell 정적 검사 추가. 정확한 Windows 런타임 허용 목록 및 유효 정책 증거가 없어 PROFILE_UNSUPPORTED/BLOCKED다. 실제 실행 0회, Python 회귀 미실행. P2 전체와 P3는 BLOCKED다. [독립 프로필 계약](P2-MXC-VALIDATION.md#p225-독립-자기-점검-프로필의-정적-계약)
+
 P2.24 고정 태그에서 루트 거부 삭제 시 상속 루트 읽기가 복원됨을 확인했다. 공개 공유 위반 사례와 P2.23 원인의 일치는 미확정이다. 독립 좁은 프로필은 설계만 검토했으며 실행 0회, P2/P3는 BLOCKED다. [프로필 분석](P2-MXC-VALIDATION.md#p224-루트-권한-및-초기화-가설)
 
 P2.23 고정 MXC 자기 점검 1회는 종료 1, 표식 미관측, UNRECOGNIZED_STDERR로 FAIL이다. 사전검사·소유 CLI 시작·종료만 CONFIRMED다. 내부 단계와 트리 회수는 UNKNOWN이며 P2/P3는 BLOCKED다. [정제 영수증](P2-MXC-VALIDATION.md#p223-승인된-수집기-실측)

@@ -1,5 +1,23 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.25 독립 자기 점검 프로필의 정적 계약
+
+기준 `98fca687baadcd130725554c257a992ec056ccb2`. 고정 태그 `rust-v0.167.0-alpha.3.2`의 named profile 컴파일은 제한된 빈 파일 정책과 제한된 네트워크 정책에서 시작한다. 부모가 없고 매칭되는 경로 규칙이 없으면 파일 접근은 기본 거부다. 더 구체적인 경로가 상위 경로에 우선하고 동일 경로 충돌에서는 거부가 우선한다. 새 초안은 충돌 우선순위에 의존하지 않고 중복·허용/거부 충돌을 전부 거부한다. 절대 Windows 경로를 TOML 문자열 키로 사용할 수 있다. 경로 구분 문자는 TOML에서 이스케이프한다. [고정 태그 프로필 컴파일](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/core/src/config/permissions.rs) · [고정 태그 경로 우선순위](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/protocol/src/permissions.rs) · [OpenAI 권한 프로필](https://learn.chatgpt.com/docs/permissions)
+
+`tools/mxc-probe/independent-profile.ps1`은 `mxc-native-minimal` 이름으로 메모리 내 초안을 생성한다. 상속·루트 규칙·`:minimal`·추가 루트·glob·쓰기 없이, 새 GUID 합성 work의 정확한 EXE만 읽기 대상으로 표현한다. 승인 요청과 네트워크는 차단한다. Controller·원장·보호 표식·사용자 파일에는 권한을 선언하지 않는다. 결정적 검사기는 허용한 한 가지 직렬화만 비교하므로 추가·중복·충돌·미지원 구문을 모두 거부한다. 작업 루트·EXE 경로·두 바이너리 핀과 관리 정책 증거를 대조하며 개인 경로를 코드에 넣지 않는다. 이 검사는 호스트가 제공한 값의 정합성을 확인하며 파일을 열어 해시를 다시 재거나 실제 객체·reparse 여부를 확인하지 않는다.
+
+### 실행 입장 판정
+
+**PROFILE_UNSUPPORTED · BLOCKED.** 이 판정은 필수 런타임 허용 목록을 확인하지 못한 현재 시험 계약에 해당한다. EXE의 직접 PE import가 KERNEL32.dll 하나라는 P2.17 증거로는 Windows 로더·API set·전이 DLL·SDK가 실제로 요구할 경로 전부를 확정할 수 없다. 고정 태그 프로필에 독립적인 EXE 실행 허용 키도 확인되지 않았다. 파일 읽기 규칙, 실행 명령·이미지 고정, OS 프로세스 생성과 초기화는 서로 다른 검증이다. `:minimal`이나 System32·ProgramData 전체 읽기를 추정으로 부여하지 않는다. [고정 태그 MXC 변환](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/policy.rs) · [Microsoft CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw)
+
+관리 계층은 같은 이름의 프로필에 규칙과 workspace roots를 추가할 수 있으며, Windows 정책은 요구 파일 위치를 재지정할 수 있다. 검사기의 VerifiedAbsent는 신뢰 호스트가 전달하는 증거의 입력 자리이며 실제 PC의 관리 정책을 조회하거나 증명하지 않는다. 미확인·충돌은 BLOCKED다. 합성 비교가 성공해도 Codex의 최종 구성, OS 집행이나 비간섭 PASS로 승격하지 않는다. [OpenAI 권한 프로필](https://learn.chatgpt.com/docs/permissions) · [Windows 관리 배포](https://learn.chatgpt.com/docs/enterprise/windows-deployment)
+
+진단 전용 프로필은 네이티브 자기 점검만 대상으로 한다. 향후 개발용 계약은 검증된 복제본 하나에만 쓰기를 부여하고 고정 컴파일러·런타임만 사용한다. 원본·다른 프로젝트·사용자 자료는 기본 거부하며 네트워크·외부 도구는 별도 승인하고, 생성 코드·빌드·테스트에도 같은 경계를 적용해야 한다. 개발용 실행과 프로필은 미연결이다.
+
+P2.23 원인은 UNKNOWN이다. 기존의 광범위한 루트 읽기 충돌 가설은 약한 상태를 유지하며, 구성 해석·MXC 초기화·이미지 준비·프로세스 생성·알파 빌드 문제를 구분하지 못했다. 이번에는 새 프로필을 런처에 연결하거나 적용하지 않았다. 우선 정확한 런타임 목록과 유효 정책 증거가 필요하다. 이를 확보하기 전에는 실제 시험 승인을 제안하지 않는다. 이후 범위는 고정 CLI·EXE, 새 합성 원장·작업 루트, 검증된 독립 프로필 및 `--self-test` 1회이며 이미지 시작만 판정한다.
+
+PowerShell 합성 정적 검사와 `git diff --check`는 통과했다. Python 실행 금지에 따라 전체 Windows Python 회귀는 미실행이다. Python·MXC·네이티브 EXE·Codex 실행은 0회다. 기존 P2.20/P2.22 경로를 변경하지 않았다. P2 A/B/C 전체와 P3 실제 자동 개발·커밋은 BLOCKED다.
+
 ## P2.24 루트 권한 및 초기화 가설
 
 기준 `e75234b36d70aaca77b4c80f6bf99f8b81e8890c`. P2.23은 사전검사·소유 CLI 시작·종료만 CONFIRMED이며 종료 1, 표식 없음, UNRECOGNIZED_STDERR다. HRESULT와 원문은 남아 있지 않다.
