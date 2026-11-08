@@ -1,5 +1,22 @@
 # P2.5 격리 실행 환경과 인수 시험
 
+## P2.28 승인된 Oracle 패키지 다운로드 및 검증
+
+기준 `67a447b8af3662652623ec590f4125b9bf141edc`. 다운로드 직전 Oracle의 안정 채널은 7.2.22를 가리켰으며, 10월 보안 공지에는 7.2.16과 7.2.20이 영향 버전으로 기록돼 있다. 공식 7.2.22 디렉터리에서 별도 승인된 Windows x64 기본 설치 파일과 SHA256SUMS 두 개만 저장소 밖 DevOrchestra-Lab 다운로드 폴더에 저장했다. 기존 파일을 덮어쓰지 않았다. [Oracle 안정 채널](https://download.oracle.com/virtualbox/LATEST-STABLE.TXT) · [배포 인덱스](https://download.oracle.com/virtualbox/7.2.22/) · [Oracle 10월 보안 공지](https://www.oracle.com/security-alerts/cpuoct2026.html)
+
+| 항목 | 검증 결과 |
+| --- | --- |
+| 설치 파일 | VirtualBox-7.2.22-175245-Win.exe |
+| 파일 및 제품 버전 | 7.2.22.175245 |
+| 설치 파일 크기 | 178101352 bytes |
+| SHA256SUMS 크기 | 2959 bytes |
+| SHA-256 | `afd0ff1656cbe04ed88ce619594ae021419d97cce89fa9bdc443e9a963f1713f` |
+| Authenticode | 캐시 전용 Windows 신뢰 검증 유효, 서명자 Oracle America, Inc. |
+
+공식 목록과 해시가 일치해 패키지 무결성 PASS다. 캐시 전용 서명 검증은 실시간 인증서 폐기 조회를 포함하지 않는다. 두 파일은 로컬에 보존했다. 설치 호환성, 드라이버 로드와 P2 격리는 별도다.
+
+다음 승인 후보는 지정 유지보수 시간에 `VBoxApplication` 본체와 필수 서명 가상화 드라이버만 설치하는 범위다. 관리자 작업과 드라이버·서비스 변경을 명시한다. 네트워크 변경·재부팅 요구가 나타나면 별도 승인 전 중단한다. 게스트 이미지·라이선스, VM 생성·부팅과 A/B/C 시험도 별도 승인이다. 이번에는 EXE 실행, 관리자 요청, 시스템 변경 또는 VM 생성·실행을 수행하지 않았다. P2 A/B/C와 P3는 BLOCKED다.
+
 ## P2.26 격리 백엔드 결정
 
 기준 `416d041b8d95dd1b28b91b93d9cba7920ba47d95`. **주력은 호스트 통합 기능을 끈 전용 VirtualBox Windows x64 게스트, 대체 후보는 명시적 네이티브 MXC**다. 주력 선정은 구현·인수 순서를 정한 것이다. 현재 두 후보 모두 실제 개발에는 BLOCKED이고 자동 전환은 없다. 이전 MXC 우선순위는 이력으로 유지한다.
