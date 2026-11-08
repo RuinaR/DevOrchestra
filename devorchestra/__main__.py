@@ -23,6 +23,7 @@ def main():
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
+    shutdown.add_argument("--generation", type=int)
     preflight = commands.add_parser("live-preflight", help="Check declared capabilities without running anything")
     preflight.add_argument("--requires", action="append", default=[], metavar="CAPABILITY")
     start = commands.add_parser("start")
@@ -65,7 +66,8 @@ def main():
             raise Blocked("Windows LOCALAPPDATA required")
         ledger = Ledger(Path(os.environ["LOCALAPPDATA"]) / "DevOrchestra" / "p1.sqlite3")
         if args.action == "shutdown":
-            print(canonical(Runner(ledger).shutdown(args.transition, args.request_id)))
+            print(canonical(Runner(ledger).shutdown(args.transition, args.request_id,
+                                                    expected_generation=args.generation)))
             return
         if args.action == "session-start":
             print(canonical(Runner(ledger).development(

@@ -79,14 +79,35 @@ class Ledger:
     def read(self):
         return self.snapshot()[0]
 
-    def append(self, expected_count, expected_tail, event):
+    def update(self, choose_event):
+        """Choose and append at most one event in a verified write transaction."""
         with closing(self.connect("rw")) as db, db:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
             events, tail = self.verified(db)
-            if (len(events), tail) != (expected_count, expected_tail):
-                raise Blocked("Execution fence changed")
+            event = choose_event(events, tail)
+            if event is None:
+                return len(events), tail
             seq = len(events) + 1
             current = digest([seq, tail, event])
             db.execute("INSERT INTO events VALUES (?, ?, ?)", (seq, canonical(event), current))
             db.execute("UPDATE anchor SET seq=?, hash=?", (seq, current))
+            return seq, current
+
+    def append(self, expected_count, expected_tail, event, *, allow_shutdown=False, admission=None):
+        def choose(events, tail):
+            if (len(events), tail) != (expected_count, expected_tail):
+                suffix = events[expected_count:]
+                if (not allow_shutdown or not suffix or
+                        any(item["kind"] != "shutdown_scheduled" for item in suffix)):
+                    raise Blocked("Execution fence changed")
+                prefix_hash = ""
+                for sequence, item in enumerate(events[:expected_count], 1):
+                    prefix_hash = digest([sequence, prefix_hash, item])
+                if prefix_hash != expected_tail:
+                    raise Blocked("Execution fence changed")
+            if admission is not None:
+                admission(events)
+            return event
+
+        return self.update(choose)

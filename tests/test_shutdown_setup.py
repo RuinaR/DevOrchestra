@@ -1,10 +1,13 @@
 from contextlib import closing
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from devorchestra.catalog import Catalog, new_project
+from devorchestra.gui import CommandCenter
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger
 from devorchestra.projection import ProjectionReader
@@ -112,7 +115,7 @@ class ShutdownTests(unittest.TestCase):
             self.start()
         self.assertEqual("READY", Runner(self.ledger).shutdown("finalize", key)["state"])
 
-    def test_busy_role_does_not_acknowledge_request_before_safe_boundary(self):
+    def test_busy_role_acknowledges_intent_without_releasing_execution_slot(self):
         run = self.start()
         self.step(run)
         self.runner.command("approve", expected_run=run)
@@ -120,14 +123,62 @@ class ShutdownTests(unittest.TestCase):
         from devorchestra.runtime import mock_role
 
         def attempt_reserve(*args):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                key = pool.submit(self.reserve).result(timeout=3)
+            self.assertEqual(key, self.reserve())
             with self.assertRaisesRegex(Blocked, "Execution slot busy"):
-                self.reserve()
+                self.runner.shutdown("finalize", key)
             return mock_role(*args)
 
         with patch("devorchestra.runtime.mock_role", side_effect=attempt_reserve):
             self.step(run)
         key = self.reserve()
+        with self.assertRaisesRegex(Blocked, "closed admission"):
+            self.step(run)
         self.assertEqual("READY", self.runner.shutdown("finalize", key)["state"])
+
+    def test_role_admission_rechecks_intent_inside_write_transaction(self):
+        run = self.start()
+        self.step(run)
+        self.runner.command("approve", expected_run=run)
+        self.step(run)
+        append = self.ledger.append
+
+        def race(count, tail, event, **options):
+            if event["kind"] == "role_started":
+                self.reserve()
+            return append(count, tail, event, **options)
+
+        with patch.object(self.ledger, "append", side_effect=race), patch("devorchestra.runtime.mock_role") as role:
+            with self.assertRaisesRegex(Blocked, "closed admission"):
+                self.step(run)
+            role.assert_not_called()
+
+    def test_request_commit_failure_rolls_back_and_generation_replay_is_rejected(self):
+        key = "b" * 32
+        with closing(self.ledger.connect("rw")) as db, db:
+            db.execute("CREATE TRIGGER fail_anchor BEFORE UPDATE ON anchor "
+                       "BEGIN SELECT RAISE(ABORT, 'injected'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.runner.shutdown("request", key, expected_generation=0)
+        self.assertEqual([], self.ledger.read())
+        with closing(self.ledger.connect("rw")) as db, db:
+            db.execute("DROP TRIGGER fail_anchor")
+        reopened = Runner(Ledger(self.ledger.path))
+        self.assertEqual(key, reopened.shutdown("request", key, expected_generation=0)["request_id"])
+        reopened.shutdown("cancel", key)
+        with self.assertRaisesRegex(Blocked, "replayed"):
+            reopened.shutdown("request", key, expected_generation=0)
+        self.start()
+        with self.assertRaisesRegex(Blocked, "generation"):
+            reopened.shutdown("request", key, expected_generation=0)
+
+    def test_expired_wait_never_becomes_ready(self):
+        with patch("devorchestra.runtime.time", return_value=1):
+            key = self.runner.shutdown("request", wait_seconds=1)["request_id"]
+        with patch("devorchestra.runtime.time", return_value=2):
+            result = self.runner.shutdown("finalize", key)
+        self.assertEqual(("RECOVERY_REQUIRED", "WAIT_LIMIT"), (result["state"], result["reason"]))
 
     def test_expired_checkpoint_is_blocked_in_projection_and_controller(self):
         with patch("devorchestra.runtime.time", return_value=1):
@@ -191,3 +242,25 @@ class SetupTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 catalog.save_project({**project, "local_path": setup["replica"]}, revision)
             self.assertEqual(20, catalog.read()["setups"]["portable"]["wait_seconds"])
+
+
+class ShutdownWindowTests(unittest.TestCase):
+    def test_window_close_waits_for_checkpoint_and_never_closes_on_error(self):
+        center = CommandCenter.__new__(CommandCenter)
+        center.root = Mock()
+        center.refresh = Mock()
+        center.view = {"shutdown": {"state": "SCHEDULED", "request_id": "key"}}
+        center.shutdown_command = Mock()
+        pending = center.shutdown_future = Future()
+        center.close_requested()
+        center.shutdown_command.assert_not_called()
+        center.finish_shutdown(pending, "finalize", "key", 0)
+        center.root.destroy.assert_not_called()
+        pending.set_exception(OSError("checkpoint write failed"))
+        center.finish_shutdown(pending, "finalize", "key", 0)
+        center.root.destroy.assert_not_called()
+        ready = Future()
+        ready.set_result({"state": "READY", "request_id": "key"})
+        center.view["shutdown"]["state"] = "READY"
+        center.finish_shutdown(ready, "finalize", "key", 0)
+        center.root.destroy.assert_called_once()

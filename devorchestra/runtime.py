@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
+import re
 from time import monotonic, time
 from uuid import uuid4
 
@@ -94,6 +95,11 @@ def last_run(events):
     return []
 
 
+def require_admission(events):
+    if shutdown_state(events)["state"] in HELD:
+        raise Blocked("Shutdown has closed admission")
+
+
 def mock_role(phase, scenario, history):
     if phase is State.PLANNING:
         return {"decision": "Plan a fixture change from draft to ready",
@@ -180,7 +186,9 @@ class Runner:
             catalog = Catalog(self.ledger).read() if action == "start" else None
             return session.apply(action, project, scenario, expected_run, abandoned, catalog)
 
-    def shutdown(self, action, request_id=None, *, wait_seconds=10):
+    def shutdown(self, action, request_id=None, *, wait_seconds=10, expected_generation=None):
+        if action == "request":
+            return self._reserve_shutdown(request_id, wait_seconds, expected_generation)
         with execution_slot() as abandoned:
             events, tail = self.ledger.snapshot(recover_journal=True)
             current = shutdown_state(events)
@@ -214,10 +222,43 @@ class Runner:
             event = transition(action, current, evidence, request_id=request_id, unresolved=unresolved,
                                now=time(), wait_seconds=wait_seconds)
             if event is not current:
-                if abandoned and action == "request":
-                    event["abandoned"] = True
                 self.ledger.append(len(events), tail, event)
             return event
+
+    def _reserve_shutdown(self, request_id, wait_seconds, expected_generation):
+        # Only intent can write without the execution slot. The write transaction
+        # orders it against role/task admission, even across controllers.
+        if request_id is not None and (not isinstance(request_id, str)
+                                       or not re.fullmatch("[0-9a-f]{32}", request_id)):
+            raise Blocked("Invalid shutdown request ID")
+        if request_id is not None and expected_generation is None:
+            raise Blocked("Explicit shutdown request requires a generation")
+        result = None
+
+        def choose(events, _tail):
+            nonlocal result
+            current = shutdown_state(events)
+            run = last_run(events)
+            generation = run[0]["generation"] if run else 0
+            if expected_generation is not None and expected_generation != generation:
+                raise Blocked("Stale shutdown generation")
+            if request_id is not None and (
+                current["state"] in HELD and current.get("request_id") != request_id
+                or current["state"] not in HELD and any(
+                    event.get("request_id") == request_id for event in events
+                )
+            ):
+                raise Blocked("Conflicting or replayed shutdown request")
+            result = transition("request", current, None, request_id=request_id, unresolved=False,
+                                now=time(), wait_seconds=wait_seconds)
+            if result is current:
+                return None
+            result["generation"] = generation
+            result["bound_run_id"] = run[0]["run_id"] if run else None
+            return result
+
+        self.ledger.update(choose)
+        return result
 
     def development(self, action, *, project="fixture-a", development_id=None, limits=None,
                     cycles=2, retries=0, task_limits=None, scenario=Scenario.NORMAL):
@@ -236,7 +277,7 @@ class Runner:
                 event = {"kind": kind, "project_id": project_id, "development_id": identity,
                          "run_id": None, "state": fields.pop("state", "ACTIVE"), "source": "MOCK_SESSION",
                          "timestamp": datetime.now(timezone.utc).isoformat(), **fields}
-                self.ledger.append(len(events), tail, event)
+                self.ledger.append(len(events), tail, event, admission=require_admission)
                 return event
 
             if action == "start":
@@ -377,9 +418,10 @@ class _Session:
         }
         if self.development_id:
             event["development_id"] = self.development_id
-        self.ledger.append(self.count, self.tail, event)
-        self.count += 1
-        self.tail = digest([self.count, self.tail, event])
+        admission = require_admission if kind in ("run_started", "role_started", "job_intent") else None
+        self.count, self.tail = self.ledger.append(
+            self.count, self.tail, event, allow_shutdown=True, admission=admission,
+        )
         self.run.append(event)
         self.state = state
         return event

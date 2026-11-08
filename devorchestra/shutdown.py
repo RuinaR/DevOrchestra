@@ -67,7 +67,7 @@ def transition(action, current, evidence, *, request_id, unresolved, now, wait_s
             return current
         if type(wait_seconds) is not int or not 1 <= wait_seconds <= 60:
             raise Blocked("Invalid shutdown wait bound")
-        return _event("SCHEDULED", uuid4().hex, now, deadline=now + wait_seconds)
+        return _event("SCHEDULED", request_id or uuid4().hex, now, deadline=now + wait_seconds)
     if not request_id or current.get("request_id") != request_id:
         raise Blocked("Stale shutdown request")
     if action == "cancel" and state == "SCHEDULED":
@@ -78,10 +78,11 @@ def transition(action, current, evidence, *, request_id, unresolved, now, wait_s
         if state in ("READY", "RECOVERY_REQUIRED"):
             return current
         if state == "SCHEDULED":
-            if unresolved:
+            if unresolved or now >= current["deadline"]:
                 return _event("RECOVERY_REQUIRED", request_id, now, reason=(
-                    "WAIT_LIMIT_OWNERSHIP_UNKNOWN" if now >= current["deadline"] else "OWNERSHIP_UNKNOWN"),
-                    external_requests="UNKNOWN", child_drain="UNKNOWN")
+                    "WAIT_LIMIT" if now >= current["deadline"] else "OWNERSHIP_UNKNOWN"),
+                    external_requests="UNKNOWN" if unresolved else "NONE_SYNTHETIC",
+                    child_drain="UNKNOWN" if unresolved else "NO_PENDING_OWNED_WORK")
             return _event("READY", request_id, now, checkpoint=evidence)
     if action == "resume" and state == "READY":
         saved = current["checkpoint"]

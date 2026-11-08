@@ -141,10 +141,10 @@ class P1Tests(unittest.TestCase):
         self.assertEqual("PLANNING", self.dashboard()["state"])
         original_append = self.ledger.append
 
-        def fail_result(count, tail, event):
+        def fail_result(count, tail, event, **options):
             if event["kind"] == "role_finished":
                 raise sqlite3.OperationalError("fixture result I/O failure")
-            original_append(count, tail, event)
+            return original_append(count, tail, event, **options)
 
         with patch.object(self.ledger, "append", side_effect=fail_result):
             with self.assertRaises(sqlite3.OperationalError):

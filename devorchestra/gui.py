@@ -1,12 +1,15 @@
 """DevOrchestra Command Center. Read-only desktop viewer for Windows."""
 from datetime import datetime, timezone
+from concurrent.futures import Future
 import json
 import os
 from pathlib import Path
 import sqlite3
-from time import monotonic
+from threading import Thread
+from time import monotonic, time
 import tkinter as tk
 from tkinter import ttk
+from uuid import uuid4
 
 from .catalog import Catalog, new_project
 from .lease import Blocked
@@ -90,6 +93,8 @@ class CommandCenter:
         self.project_ids = list(PROJECTS)
         self.run_options = {}
         self.controller = Runner(reader.ledger)
+        self.shutdown_future = None
+        self.shutdown_notice = None
         root.title("DevOrchestra | Command Center")
         root.configure(bg=BG)
         root.geometry("1220x830")
@@ -183,6 +188,7 @@ class CommandCenter:
 
         self.build_audit(root)
         root.bind("<F5>", lambda _: self.refresh())
+        root.protocol("WM_DELETE_WINDOW", self.close_requested)
         self.refresh()
         root.after(POLL_MS, self.poll)
 
@@ -438,14 +444,24 @@ class CommandCenter:
                   "CANCELLED": "종료 예약 취소됨", "RESUMED": "재개 확인됨 · 자동 실행 없음",
                   "UNAVAILABLE": "종료 제어 BLOCKED"}
         problem = self.view["shutdown"].get("resume_problem") if self.view else None
-        self.shutdown_label.configure(text=("복구 확인 필요 · " + problem) if problem else titles[state])
+        notice = self.shutdown_notice
+        if state == "SCHEDULED" and time() >= self.view["shutdown"]["deadline"]:
+            notice = "대기 상한 초과 · 복구 확인 필요"
+        self.shutdown_label.configure(text=("복구 확인 필요 · " + problem) if problem else notice or titles[state])
         allowed = {"RUNNING": ("request",), "RESUMED": ("request",), "CANCELLED": ("request",),
                    "SCHEDULED": ("cancel", "finalize"), "READY": () if problem else ("resume",)}
         for action, button in self.shutdown_buttons.items():
-            button.configure(state="normal" if action in allowed.get(state, ()) else "disabled")
+            enabled = self.shutdown_future is None and action in allowed.get(state, ())
+            button.configure(state="normal" if enabled else "disabled")
+
+    def close_requested(self):
+        if self.shutdown_future is not None or self.view is None:
+            return
+        state = self.view["shutdown"]["state"]
+        self.shutdown_command("finalize" if state in ("SCHEDULED", "READY") else "request")
 
     def shutdown_command(self, action, *, expected=None, until=None):
-        if self.view is None:
+        if self.view is None or self.shutdown_future is not None:
             return
         state = self.view["shutdown"]
         if expected is not None and (state.get("request_id") != expected or state["state"] != "SCHEDULED"):
@@ -454,24 +470,48 @@ class CommandCenter:
         configured = self.view.get("setup") if active and active["project_id"] == self.view["project_id"] else None
         wait_seconds = (configured or {}).get("wait_seconds", 10)
         if until is None:
-            until = monotonic() + wait_seconds
+            until = monotonic() + max(0, state.get("deadline", time() + wait_seconds) - time())
+        key = uuid4().hex if action == "request" else state.get("request_id")
+        generation = active["generation"] if active else 0
+        future = self.shutdown_future = Future()
+        self.shutdown_notice = {"request": "예약 접수 중", "finalize": "체크포인트 저장 중",
+                                "cancel": "예약 취소 처리 중", "resume": "체크포인트 검증 중"}[action]
+        self.render_shutdown()
+
+        def work():
+            try:
+                future.set_result(self.controller.shutdown(action, key, wait_seconds=wait_seconds,
+                                                           expected_generation=generation))
+            except Exception as error:
+                future.set_exception(error)
+
+        Thread(target=work, daemon=True).start()
+        self.root.after(25, lambda: self.finish_shutdown(future, action, key, until))
+
+    def finish_shutdown(self, future, action, key, until):
+        if not future.done():
+            self.root.after(25, lambda: self.finish_shutdown(future, action, key, until))
+            return
+        self.shutdown_future = None
+        self.shutdown_notice = None
         try:
-            if action == "finalize":
-                self.shutdown_label.configure(text="현재 작업 정리 중 · 체크포인트 저장 중")
-            event = self.controller.shutdown(action, state.get("request_id"),
-                                             wait_seconds=wait_seconds)
+            event = future.result()
         except (Blocked, OSError, sqlite3.Error, ValueError) as error:
-            if (action in ("request", "finalize") and isinstance(error, Blocked)
+            if (action == "finalize" and isinstance(error, Blocked)
                     and "Execution slot busy" in str(error) and monotonic() < until):
-                self.shutdown_label.configure(text="현재 작업 정리 중 · 안전 경계 대기")
-                self.root.after(200, lambda: self.shutdown_command(action, expected=expected, until=until))
+                self.shutdown_notice = "예약됨 · 현재 역할 완료 대기"
+                self.render_shutdown()
+                self.root.after(200, lambda: self.shutdown_command(action, expected=key, until=until))
                 return
-            self.shutdown_label.configure(text=f"복구 또는 재확인 필요 · {type(error).__name__}")
+            self.shutdown_notice = f"복구 또는 재확인 필요 · {type(error).__name__}"
+            self.refresh()
             return
         self.refresh()
         if action == "request" and event["state"] == "SCHEDULED":
             self.root.after(900, lambda: self.shutdown_command("finalize", expected=event["request_id"]))
-        elif action == "finalize" and event["state"] == "READY" and self.view is not None:
+        elif (action == "finalize" and event["state"] == "READY" and self.view is not None
+              and self.view["shutdown"]["state"] == "READY"
+              and self.view["shutdown"]["request_id"] == event["request_id"]):
             self.root.destroy()
 
     def setup_wizard(self):

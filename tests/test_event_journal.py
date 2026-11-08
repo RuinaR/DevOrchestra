@@ -97,10 +97,10 @@ class StreamRunnerTests(unittest.TestCase):
                 runner.command(action, expected_run=run)
             append = ledger.append
 
-            def fail(count, tail, event):
+            def fail(count, tail, event, **options):
                 if event["kind"] == "stream_event" and event["stream_receipt"]["record"]["sequence"] == 7:
                     raise OSError("lost terminal receipt")
-                return append(count, tail, event)
+                return append(count, tail, event, **options)
 
             with patch.object(ledger, "append", side_effect=fail), self.assertRaises(OSError):
                 runner.command("step", expected_run=run)

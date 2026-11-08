@@ -117,10 +117,10 @@ class JobProbeTests(unittest.TestCase):
     def test_lost_drain_receipt_prevents_next_role(self):
         append = self.ledger.append
 
-        def fail_drain(count, tail, event):
+        def fail_drain(count, tail, event, **options):
             if event["kind"] == "job_drained":
                 raise OSError("simulated receipt write failure")
-            append(count, tail, event)
+            return append(count, tail, event, **options)
 
         def drained(_fixture, _cwd, created, _cancel):
             created(1)
