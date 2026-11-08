@@ -20,12 +20,18 @@ class LivePreflightTests(unittest.TestCase):
                 self.assertEqual("BLOCKED", result["status"])
                 self.assertIs(False, result["automatic_fallback"])
                 self.assertEqual(None if backend == "invalid" else backend, result["backend"])
-                self.assertEqual("UNKNOWN_BACKEND" if backend == "invalid"
-                                 else "ISOLATION_UNVERIFIED", result["reason"])
+                expected = {"invalid": "UNKNOWN_BACKEND",
+                            "windows-native-codex": "GENERAL_ADMISSION_UNVERIFIED"}
+                self.assertEqual(expected.get(backend, "ISOLATION_UNVERIFIED"), result["reason"])
+
+    def test_enhanced_gate_is_separate(self):
+        result = live_preflight(mode="enhanced")
+        self.assertEqual("enhanced", result["development_mode"])
+        self.assertEqual("ISOLATION_UNVERIFIED", result["reason"])
 
     def test_native_role_adapter_denies_before_using_request(self):
         request = Mock(spec=RoleRequest)
-        with self.assertRaisesRegex(Blocked, "ISOLATION_UNVERIFIED"):
+        with self.assertRaisesRegex(Blocked, "GENERAL_ADMISSION_UNVERIFIED"):
             WindowsNativeCodexAdapter().execute(request)
         self.assertEqual([], request.mock_calls)
 
@@ -42,7 +48,7 @@ class LivePreflightTests(unittest.TestCase):
         for required in ((), ("project-read", "build", "test")):
             decision = live_preflight(required)
             self.assertEqual("BLOCKED", decision["status"])
-            self.assertEqual("ISOLATION_UNVERIFIED", decision["reason"])
+            self.assertEqual("GENERAL_ADMISSION_UNVERIFIED", decision["reason"])
             self.assertEqual("NOT_VERIFIED", decision["noninterference"])
 
     def test_cli_reports_denial_without_opening_ledger(self):

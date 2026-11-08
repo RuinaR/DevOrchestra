@@ -120,13 +120,14 @@ def _account(api, job):
     return counts
 
 
-def _create(api, job, fixture, cwd, info):
+def _create_owned(api, job, executable, argv, cwd, environment, info, stdio=()):
     size = SIZE()
-    api.InitializeProcThreadAttributeList(None, 1, 0, c.byref(size))
+    count = 2 if stdio else 1
+    api.InitializeProcThreadAttributeList(None, count, 0, c.byref(size))
     if not size.value or c.get_last_error() != 122:  # ERROR_INSUFFICIENT_BUFFER
         raise Blocked("Cannot size process attributes")
     attributes = c.create_string_buffer(size.value)
-    _require(api.InitializeProcThreadAttributeList(attributes, 1, 0, c.byref(size)))
+    _require(api.InitializeProcThreadAttributeList(attributes, count, 0, c.byref(size)))
     try:
         handles = (w.HANDLE * 1)(job)
         _require(api.UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
@@ -134,17 +135,20 @@ def _create(api, job, fixture, cwd, info):
         startup = StartupInfoEx()
         startup.startup.size = c.sizeof(startup)
         startup.attributes = c.cast(attributes, PTR)
-        interpreter = sys.executable
-        command = c.create_unicode_buffer(subprocess.list2cmdline(
-            [interpreter, "-I", "-S", "-B", "-c", FIXTURES[fixture]]
-        ))
-        # Python's Windows process bootstrap needs SystemRoot. Inherit no other variables.
-        environment = c.create_unicode_buffer(f"SystemRoot={os.environ['SystemRoot']}\0")
+        if stdio:
+            inherited = (w.HANDLE * 3)(*stdio)
+            _require(api.UpdateProcThreadAttribute(attributes, 0, 0x00020002,
+                                                   inherited, c.sizeof(inherited), None, None))
+            startup.startup.geometry[7] = 0x100  # STARTF_USESTDHANDLES
+            startup.startup.stdin, startup.startup.stdout, startup.startup.stderr = stdio
+        command = c.create_unicode_buffer(subprocess.list2cmdline([str(executable), *argv]))
+        block = c.create_unicode_buffer("".join(
+            f"{key}={environment[key]}\0" for key in sorted(environment, key=str.upper)) + "\0")
         flags = (CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT
                  | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW)
         # The kernel assigns the Job at creation. No create-then-assign window.
-        _require(api.CreateProcessW(interpreter, command, None, None, False, flags,
-                                    environment, str(cwd), c.byref(startup), c.byref(info)))
+        _require(api.CreateProcessW(str(executable), command, None, None, bool(stdio), flags,
+                                    block, str(cwd), c.byref(startup), c.byref(info)))
     finally:
         api.DeleteProcThreadAttributeList(attributes)
 
@@ -192,7 +196,8 @@ def _run_probe(fixture, cwd, record_created, cancel_requested):
         if (configured.basic.flags != limits.basic.flags or configured.job_memory != MEMORY_LIMIT
                 or configured.basic.active_limit != MAX_PROCESSES):
             raise Blocked("Owned Job limits could not be verified")
-        _create(api, job, fixture, cwd, info)
+        _create_owned(api, job, sys.executable, ["-I", "-S", "-B", "-c", FIXTURES[fixture]],
+                      cwd, {"SystemRoot": os.environ["SystemRoot"]}, info)
         record_created(_account(api, job).active)
         if api.ResumeThread(info.thread) != 1:
             raise Blocked("Unexpected synthetic child suspend count")

@@ -552,6 +552,8 @@ class CommandCenter:
         facts = environment_status()
         label(environment, f"Windows x64 · {facts['windows_x64']}\n"
               f"기본 실행 방식 · {facts['backend_label']}\n"
+              "일반 개발 · 공식 샌드박스와 승인 정책 · 완전 격리 보증 없음\n"
+              "강화 격리 · 별도 A/B/C 실측 필요 · 실행 차단\n"
               f"Codex on PATH · {facts['codex_found']}\nCLI 서명·버전 / 격리 · NOT VERIFIED\n"
               f"실제 실행 {facts['live_execution']} · 인증정보를 입력하지 마세요.").pack(fill="x")
         label(paths, "승인할 복제본 경로 (등록만, 복사·실행 없음)").pack(fill="x")

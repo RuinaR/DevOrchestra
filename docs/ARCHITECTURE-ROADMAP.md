@@ -1,5 +1,15 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
+## P2.34 일반 개발과 강화 격리
+
+일반 개발은 Windows Native Codex와 공식 샌드박스·승인 정책을 사용한다. VirtualBox와 A/B/C 실측은 강화 격리의 조건이다. 일반 개발도 정책·복제본·승인 도구·소유 자원·예산·실제 Verifier 영수증이 불명확하면 BLOCKED다. GUI와 CLI는 두 모드의 차이를 표시한다. 설정 스키마 및 합성 실행기는 유지한다.
+
+실제 전송 코드는 고정 해시·기존 검증 버전에 귀속된 CLI 서명 확인 후, 원장 의도를 가진 내부 Controller 검사에서 `codex app-server`를 Windows Job에 생성 시 배치한다. stdin/stdout JSONL 프레임 및 대기 시간에 상한이 있고, 서버 측 요청을 자동 승인하지 않는다. `initialize` → `initialized` → `config/read` → `configRequirements/read`만 사용한다. 원시 응답 대신 정책 분류를 저장하며 정상 종료·Job 활성 수 0·파이프 종료가 확인돼야 결과를 확정한다. 실제 Codex 바이너리 연결은 이번 차수에서 실행하지 않았다. [App Server](https://learn.chatgpt.com/docs/app-server)
+
+Codex는 CODEX_HOME의 전역 지침과 저장소 루트에서 cwd까지의 지침을 탐색한다. 같은 위치에서는 AGENTS.override.md를 먼저 본다. 이번 검사는 합성 홈과 루트 cwd의 예상 파일 존재·해시를 확인한다. 실제 로딩은 NOT VERIFIED다. 지침 적용, OS 집행, ChatGPT 앱 제어 설정은 별개의 증거다. [AGENTS.md 탐색](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+
+다음 별도 승인은 **새 합성 홈·작업 폴더·원장에 고정 CLI로 모델 없는 Controller 검사 1회**다. 환경과 유효 설정, 실제 Windows Job 시작·회수 및 재실행 방지를 확인한다. 모델 요청·인증·도구 실행·복제본 수정 없이 끝낸다. 이후에도 모델 턴·도구·토큰 이벤트 수집, 승인 복제본 변경과 Verifier, Git 및 실제 복구를 연결해야 한다. 계정 잔여량과 제공자 최종 사용량은 UNKNOWN이다.
+
 ## P2.33 네이티브 역할 실행 입장
 
 Controller의 내부 `Runner.native_step`은 기존 실행 슬롯과 현재 역할, 세대, 기한, 예산과 토큰 예비량을 사용한다. 네이티브 실행기의 입장 확인 뒤 역할 의도를 저장한다. 실행기는 외부 요청 직전 Controller에 전송 의도 기록을 요청해야 하며, 원장 트랜잭션에서 종료 예약과 기한을 다시 확인한다. 확인이 실패하면 실행기가 요청을 보내서는 안 된다. 테스트는 합성 요청과 전송기 주입을 사용한다. 기존 Mock 승인은 실제 역할 실행 승인으로 사용할 수 없다.

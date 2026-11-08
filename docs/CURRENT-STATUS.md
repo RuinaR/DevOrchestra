@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.34 일반 개발과 강화 격리를 분리했다. Controller 소유 Windows Job 기반 App Server stdio와 모델 없는 정책 검사를 구현했다. 실제 Codex 프로세스 연결은 미실측이며 모델·프로젝트 자동 개발은 BLOCKED다. [검사 범위](ARCHITECTURE-ROADMAP.md#p234-일반-개발과-강화-격리)
+
 P2.33 네이티브 역할 입장, 원장 기반 전송 경계와 결과 영수증 계약을 Controller에 연결했다. 독립 소유 전송기와 OS 증거 발급은 미연결이며 실제 실행과 P2 A/B/C·P3는 BLOCKED다. [남은 인수 조건](ARCHITECTURE-ROADMAP.md#p233-네이티브-역할-실행-입장)
 
 P2.32 Windows Native Codex를 기본 후보로 전환했다. CLI 사전검사, 역할 어댑터 및 초기 설정은 실제 실행을 차단한다. 독립 프로세스 격리·실제 GUI 렌더링은 미검증이고 P2 A/B/C 및 P3는 BLOCKED다. [실행 계약](ARCHITECTURE-ROADMAP.md#p232-windows-native-codex)

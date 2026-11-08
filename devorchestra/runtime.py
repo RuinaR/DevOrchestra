@@ -95,7 +95,8 @@ def last_run(events):
     for index in range(len(events) - 1, -1, -1):
         if events[index]["kind"] == "run_started":
             return [e for e in events[index:]
-                    if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_"))]
+                    if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
+                                                 "native_inspection_"))]
     return []
 
 
@@ -106,6 +107,10 @@ def native_unresolved(events):
             pending.add(event["agent_run_id"])
         elif event["kind"] == "native_role_result":
             pending.discard(event["agent_run_id"])
+        elif event["kind"] == "native_inspection_intent":
+            pending.add(("inspection", event["request_id"]))
+        elif event["kind"] == "native_inspection_result":
+            pending.discard(("inspection", event["request_id"]))
     return bool(pending)
 
 
@@ -188,6 +193,52 @@ def freeze_project(project_id, catalog):
 class Runner:
     def __init__(self, ledger):
         self.ledger = ledger
+
+    def inspect_native(self, approval):
+        """Internal owner entry for a single model-free App Server handshake."""
+        from .app_server import NativeInspectionApproval, open_app_server, prepare_inspection
+
+        if (type(approval) is not NativeInspectionApproval
+                or not re.fullmatch(r"[0-9a-f]{32}", approval.request_id)
+                or not time() < approval.expires_epoch):
+            raise Blocked("Current App Server inspection approval required")
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            require_admission(events)
+            run, development = last_run(events), session_view(events)
+            if (abandoned or (run and run[-1]["state"] not in TERMINAL)
+                    or (development and not development["end"])
+                    or any(event.get("request_id") == approval.request_id for event in events)):
+                raise Blocked("App Server inspection requires idle, unused admission")
+            work, environment, instructions = prepare_inspection(approval)
+            fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",
+                      "source": "WINDOWS_NATIVE_CODEX", "request_id": approval.request_id,
+                      "instruction_sources": instructions}
+
+            def admit(current):
+                require_admission(current)
+                if time() >= approval.expires_epoch:
+                    raise Blocked("App Server inspection approval expired")
+
+            def cancelled():
+                current, _ = self.ledger.snapshot()
+                return time() >= approval.expires_epoch or shutdown_state(current)["state"] in HELD
+
+            count, head = self.ledger.append(len(events), tail, {
+                **fields, "kind": "native_inspection_intent",
+            }, admission=admit)
+            try:
+                if cancelled():
+                    raise Blocked("App Server inspection cancelled")
+                with open_app_server(approval.binary, work, environment, 15, cancelled) as server:
+                    policy = server.inspect_policy()
+            except Exception:
+                # Preserve the durable unresolved intent without raw process errors.
+                raise Blocked("App Server inspection or owned drain unverified") from None
+            result = {**fields, "kind": "native_inspection_result", "policy": policy,
+                      "instruction_loading": "NOT_VERIFIED", "owned_tree": "DRAINED"}
+            self.ledger.append(count, head, result, allow_shutdown=True)
+            return result
 
     def native_step(self, expected_run):
         """Explicit owner entry. It never falls back to a synthetic role."""

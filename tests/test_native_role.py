@@ -34,7 +34,7 @@ class NativeRoleTests(unittest.TestCase):
 
     def test_default_admission_does_not_write_or_call_transport(self):
         before = self.ledger.read()
-        with self.assertRaisesRegex(Blocked, "ISOLATION_UNVERIFIED"):
+        with self.assertRaisesRegex(Blocked, "GENERAL_ADMISSION_UNVERIFIED"):
             self.runner.native_step(self.run_id)
         self.assertEqual(before, self.ledger.read())
         self.transport.assert_not_called()

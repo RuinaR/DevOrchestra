@@ -1,5 +1,10 @@
 # 작업 기록
 
+## P2.34 일반 개발 모드와 App Server 전송
+
+- 기준 `17cc7df2c643a8f9cc0bd5b5740fa9857b120b04`. 일반·강화 모드의 입장 상태를 분리하고 Controller의 모델 없는 검사에 Windows Job, 제한된 stdio, 내구 의도와 결과를 연결했다.
+- Windows unittest 107건 및 독립 MXC 프로필 정적 검사 PASS. 실제 Job/stdin/stdout은 소유 합성 피어로 검증했다. Codex 바이너리 실행과 모델 턴·지침 로딩·사용량 실측은 미수행이다.
+
 ## P2.33 네이티브 역할 입장과 복구
 
 - 기준 `14b5ad1b572a55b429258f738618814b6c53a570`. 기존 Controller 역할 경로에 네이티브 전송 인터페이스, 별도 역할·전송 의도와 소유 트리 영수증 확인을 연결했다. 실제 App Server 프로세스 연결은 미완료다.

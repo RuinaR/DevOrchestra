@@ -24,13 +24,18 @@ class ExecutionBackend(str, Enum):
 DEFAULT_BACKEND = ExecutionBackend.WINDOWS_NATIVE_CODEX
 
 
+class DevelopmentMode(str, Enum):
+    GENERAL = "general"
+    ENHANCED = "enhanced"
+
+
 FORBIDDEN_LIVE_CAPABILITIES = (
     "external-process-access", "global-input", "screen-capture", "external-window-control",
     "outside-workspace-files", "privilege-escalation", "system-settings-change",
 )
 
 
-def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND):
+def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND, mode=DevelopmentMode.GENERAL):
     """Assess declared requirements without opening files or authorizing execution.
 
     A declaration is not evidence about what generated code actually does.
@@ -40,6 +45,10 @@ def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND):
         selected = ExecutionBackend(backend)
     except (TypeError, ValueError):
         selected = None
+    try:
+        selected_mode = DevelopmentMode(mode)
+    except (TypeError, ValueError):
+        selected_mode = None
     required = tuple(required_capabilities)
     forbidden = tuple(name for name in FORBIDDEN_LIVE_CAPABILITIES if name in required)
     known = (*FORBIDDEN_LIVE_CAPABILITIES, *(item.value for item in Capability))
@@ -50,6 +59,10 @@ def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND):
         reason = "UNKNOWN_CAPABILITY"
     elif selected is None:
         reason = "UNKNOWN_BACKEND"
+    elif selected_mode is None:
+        reason = "UNKNOWN_DEVELOPMENT_MODE"
+    elif selected_mode is DevelopmentMode.GENERAL and selected is ExecutionBackend.WINDOWS_NATIVE_CODEX:
+        reason = "GENERAL_ADMISSION_UNVERIFIED"
     else:
         reason = "ISOLATION_UNVERIFIED"
     return {
@@ -57,6 +70,7 @@ def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND):
         "reason": reason,
         "forbidden_capabilities": forbidden,
         "backend": selected.value if selected is not None else None,
+        "development_mode": selected_mode.value if selected_mode is not None else None,
         "isolation_candidate": {
             ExecutionBackend.WINDOWS_NATIVE_CODEX: "Windows Native Codex",
             ExecutionBackend.EXPLICIT_MXC: "MXC",

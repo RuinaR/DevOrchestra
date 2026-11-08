@@ -31,6 +31,7 @@
 - Never transfer credentials, raw personal conversations, operational databases or private user assets between registered projects or send them to third-party providers without explicit consent. Network allowlist and credential separation must be enforced by the runner, not by prompts.
 
 ## Role-specific immutable privileges
+- General development uses the verified official Codex sandbox and scoped owner approval. Enhanced isolation separately requires P2 A/B/C. A missing sandbox, unsupported operation or unverifiable ownership blocks execution without fallback. Keep role budgets, durable dispatch intent and explicit recovery for ambiguous outcomes.
 - MANAGER: goal and scope planning, read-only project inspection, prioritization, acceptance criteria. Cannot modify source, merge, commit, push, change permissions or self-approve.
 - DEVELOPER: limited write access to approved isolated project worktree only for the current task. Cannot modify approval engine, audit logs or protected guard files; cannot push or grant itself more permissions.
 - REVIEWER: independent context; read-only diff/requirements/verification evidence; may propose changes but cannot edit code or approve a higher privilege.
