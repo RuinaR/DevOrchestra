@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.5 기준 `1519b78`. [인수 계획](P2-VM-VALIDATION.md)에 따라 승인된 전용 VirtualBox 환경의 UUID·이미지·자원·합성 매체를 먼저 지정한다. VM 제어 및 반출기는 미구현이다. 기존 Job 증거는 OS 접근 거부나 게스트 반출에 사용하지 않는다. A/B/C와 별도 송신 승인 및 App Server 버전 정산 확인 전 P3는 BLOCKED다.
+
 P2.4 기준 `07f6ff7`. `EventJournal`은 trusted 실행 슬롯 아래 `stream_event`를 개별 커밋한다. `restore`는 검증된 접두사 조회와 중복 확인 전용이다. `event_audit`는 제한된 공식 이벤트 모양과 별도로 표시한 합성 사용량을 처리한다. 다음은 P2 A/B/C 실측 및 고정 App Server 버전의 스키마·정산 계약 검증이다.
 
 P2.3 기준 `9228088`. `Runner.development`가 기존 원장의 `session_*` 이벤트와 `development_id`로 작업을 연결한다. `session-next` 뒤에는 기존 작업별 승인 흐름을 사용한다. `event_audit.py`는 로컬 봉투 기반 오프라인 subset이며 제공자 완료를 인수인계 근거로 쓰지 않는다. 다음 단계는 P2 A/B/C 실측과 버전 고정 App Server 스키마 계약 검증이다.

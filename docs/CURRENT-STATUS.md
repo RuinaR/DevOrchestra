@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.5 기준 `1519b7874d6e6716aef33746b94d7b79adb24ece`. Windows Core x64에서 VirtualBox·VMware 관리 도구를 PATH와 표준 경로에서 찾지 못했다. 전용 x64 테스트 PC의 VirtualBox 7.2 계열과 Windows 11 게스트를 1순위로 선정했다. 설치·설정 변경 및 VM 실행은 하지 않았다. A는 일부 Win32 Job 실측만 PASS, B는 BLOCKED, C는 합성 검역만 PASS이며 실제 반출은 BLOCKED다. GUI는 NOT VERIFIED, P3는 BLOCKED다. [시험과 승인 범위](P2-VM-VALIDATION.md)
+
 P2.4 기준 `07f6ff7d86a3f247d9b8eab35ad6b4743d35c100`. 역할별 증분 영속 합성 이벤트, 커밋된 접두사 복구, 사용량 최고치 및 세션 다음 작업 게이트를 추가했다. 기존 39건과 신규 5건 및 CLI 흐름 PASS. 실제 제공자 사용량·재접속·GUI는 NOT VERIFIED다. 독립 GUI 시험 환경은 확인되지 않았다. 실제 Codex·임의 프로젝트·OS 격리와 반출은 계속 BLOCKED다.
 
 P2.3 기준 `92280880309ac358dd193eb66d7bb997cc4413b0`. 두 작업 이상을 잇는 합성 세션, 계층형 예산·관리자 제안 검증, 오프라인 App Server 이벤트 감사와 Command Center 세션 표시를 추가했다. 기존 32건과 신규 7건, 기존/세션 CLI 흐름 PASS. 실제 GUI, 제공자 계측·재접속은 NOT VERIFIED. P2 OS 격리·반출, 실제 Codex 및 임의 프로젝트 실행은 BLOCKED다.
