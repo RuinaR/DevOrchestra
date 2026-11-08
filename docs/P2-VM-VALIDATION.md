@@ -1,6 +1,30 @@
 # P2.5 격리 실행 환경과 인수 시험
 
+## P2.30 사용자 세션의 설치 파일 접근 확인
+
+기준 `64f786ae8a20390461bff5511f62d13cc54180e2`. 사용자가 직접 연 Windows PowerShell에서는 다운로드 폴더가 발견되지 않았다. Codex의 기본 Windows 셸은 패키지별 `LOCALAPPDATA`를 사용했고, 해당 변수로 구성한 경로에서도 파일이 발견되지 않았다. 같은 셸에 사용자가 알려준 절대 경로를 지정하면 EXE가 보였다. 별도의 승인된 읽기 전용 명령에서도 같은 절대 경로의 EXE와 SHA256SUMS가 보였고, EXE 크기와 SHA-256은 아래 기준에 일치했다.
+
+확인된 차이는 기본 Codex 셸의 환경 변수 값이다. 동일한 절대 경로를 바라본 Codex 도구와 사용자 세션의 관측 차이, 실제 파일 저장 위치 및 P2.29 실행 오류의 원인은 미확정이다. 사용자 세션에서 접근 가능한 파일을 확인할 때까지 P2.28 호스트 다운로드 상태는 `HOST_FILE_NOT_VERIFIED`다. 기존 무결성 결과는 Codex 도구가 읽은 바이트에만 적용된다.
+
+사용자가 직접 연 일반 PowerShell에서 탐색기의 **경로로 복사**로 얻은 절대 EXE 경로를 아래에 입력한다. 존재·크기·SHA-256만 읽고 경로는 출력하지 않는다. 파일이 없다면 그 결과를 그대로 기록한다.
+
+```powershell
+$p = (Read-Host 'VirtualBox EXE absolute path').Trim().Trim('"')
+if ($p -notmatch '^[A-Za-z]:\\') { throw 'ABSOLUTE_LOCAL_PATH_REQUIRED' }
+if (Test-Path -LiteralPath $p -PathType Leaf -ErrorAction Stop) {
+    $file = Get-Item -LiteralPath $p -ErrorAction Stop
+    $hash = (Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash
+    [pscustomobject]@{ Exists = $true; Bytes = $file.Length; SHA256 = $hash }
+} else {
+    [pscustomobject]@{ Exists = $false }
+}
+```
+
+이번 확인에서 다시 다운로드하거나 설치기를 실행하지 않았다. 수동 설치 및 P2 A/B/C·P3는 BLOCKED다.
+
 ## P2.28 승인된 Oracle 패키지 다운로드 및 검증
+
+**정정** 사용자 세션에서의 다운로드 상태는 `HOST_FILE_NOT_VERIFIED`다. 아래는 기존 Codex 도구 세션 기록이다. [P2.30 재확인](#p230-사용자-세션의-설치-파일-접근-확인)
 
 기준 `67a447b8af3662652623ec590f4125b9bf141edc`. 다운로드 직전 Oracle의 안정 채널은 7.2.22를 가리켰으며, 10월 보안 공지에는 7.2.16과 7.2.20이 영향 버전으로 기록돼 있다. 공식 7.2.22 디렉터리에서 별도 승인된 Windows x64 기본 설치 파일과 SHA256SUMS 두 개만 저장소 밖 DevOrchestra-Lab 다운로드 폴더에 저장했다. 기존 파일을 덮어쓰지 않았다. [Oracle 안정 채널](https://download.oracle.com/virtualbox/LATEST-STABLE.TXT) · [배포 인덱스](https://download.oracle.com/virtualbox/7.2.22/) · [Oracle 10월 보안 공지](https://www.oracle.com/security-alerts/cpuoct2026.html)
 

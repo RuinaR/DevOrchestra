@@ -1,6 +1,6 @@
 # 현재 상태
 
-P2.28 Oracle VirtualBox 7.2.22 Windows 기본 패키지와 SHA256SUMS를 별도 승인으로 내려받았다. 공식 해시 일치·Oracle 서명 유효·파일 버전 일치로 무결성 PASS. 설치는 별도 승인 대기이며 P2/P3는 BLOCKED다. [공개 검증 결과](P2-VM-VALIDATION.md#p228-승인된-oracle-패키지-다운로드-및-검증)
+P2.30에서 Codex 기본 셸의 패키지별 LOCALAPPDATA와 사용자 세션 경로 차이를 확인했다. P2.28의 Oracle 패키지 무결성 증거는 Codex 도구에서 읽은 파일에 한정한다. 사용자 호스트 다운로드 상태는 `HOST_FILE_NOT_VERIFIED`, 수동 설치 및 P2 A/B/C·P3는 BLOCKED다. [재확인 절차](P2-VM-VALIDATION.md#p230-사용자-세션의-설치-파일-접근-확인)
 
 P2.29 VirtualBox 7.2.22 패키지 재검증 PASS. 최소 설치는 두 실행 요청의 Windows 경로 오류로 BLOCKED다. 기본 본체·지정 드라이버 서비스 등록 미발견, 설치기 종료 코드와 재부팅 요구 NOT VERIFIED. P2 A/B/C 및 P3는 BLOCKED다. [설치 시도](P2-VM-VALIDATION.md#p229-승인된-최소-설치-시도)
 
