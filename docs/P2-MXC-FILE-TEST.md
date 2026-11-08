@@ -1,5 +1,24 @@
 # P2.8 MXC 합성 파일 인수 시험
 
+## P2.16 Python 독립 네이티브 프로브
+
+[소스](../tools/mxc-probe/probe.c)는 Win32 C 단일 파일이다. `--self-test`는 stdout에 `MXC_NATIVE_OK` 한 줄을 출력한다. `--file-test`는 실행 파일이 `mxc-native-<소문자 GUID 32자리>\work\mxc-probe.exe`이고 현재 디렉터리가 그 work인 경우에만 진행한다. 임의 경로 인자는 받지 않는다. 위 시험의 일곱 경로를 고정하며 보호 파일의 상대·절대 요청을 구분한다. `CreateFileW`의 읽기·쓰기 요청을 분리하고 기존 파일만 연다. 열기에 성공하면 실제 I/O 전에 같은 핸들의 정규 경로와 일반 파일·링크 수·크기를 확인한다. 정규 경로는 junction의 의도된 표식 파일과 일치해야 한다. 호스트의 승인된 루트·junction·파일 사전 확인을 대체하지 않는다. [Microsoft 핸들 경로 확인](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)
+
+각 출력 줄은 대상 이름, 읽기 Win32 코드, 쓰기 Win32 코드를 탭으로 구분한다. 0은 실제 한 바이트 전송이다. 핸들 확인, 출력 또는 종료가 불완전하면 프로브 오류로 처리하고, 실패한 핸들 확인을 접근 거부로 집계하지 않는다. 보호 대상에서 읽기 또는 쓰기 0이 관측되면 FAIL이며, 보호 대상의 두 코드가 5이고 허용 대상이 모두 0이며 전후 해시와 junction 검사가 일치해야 파일 경계 PASS다. 호스트 양성 대조, 표식 복원, MXC 및 결과 검증은 기존 절차와 전역 슬롯을 따른다.
+
+### 승인된 빌드와 바이너리 검사 계약
+
+승인된 프로젝트 전용 MSVC x64 및 Windows SDK 도구의 절대 경로와 버전을 고정한다. 네트워크 없이 새 프로젝트 소유 빌드 폴더에서 아래 두 단계만 수행한다. 표준 CRT 시작 코드와 기본 라이브러리를 제외하고 kernel32.lib만 명시한다. 빌드가 실패하거나 추가 런타임이 필요하면 중단한다.
+
+```powershell
+& $cl /nologo /TC /O1 /W4 /WX /c /Foprobe.obj $approvedSource
+& $link /nologo /MACHINE:X64 /SUBSYSTEM:CONSOLE /ENTRY:probe_entry /NODEFAULTLIB /DYNAMICBASE /NXCOMPAT /OUT:mxc-probe.exe probe.obj $approvedKernel32Lib
+```
+
+공개 커밋에는 소스만 넣는다. 빌드 후 `dumpbin /headers`로 AMD64·PE32+와 콘솔 서브시스템을, `dumpbin /imports`로 일반·지연 import를 검사한다. 지연 import 디렉터리가 없고 직접 import가 KERNEL32.dll의 소스에 나타난 API만 포함해야 한다. 의도한 API 범위는 명령줄, 자체 이미지·현재 경로, 표준 출력, 지정 파일 핸들·메타데이터·I/O, 종료다. 바이너리 SHA-256을 기록하고 합성 work에 배치한 사본을 재대조한다. 실제 허용 범위는 합성 호스트에서 자기 점검, 잘못된 인자·작업 위치 거부, 정상 7개 경로, 링크·대상 불일치 및 전후 표식으로 검사한다. 정적 검토는 실행 검증이나 악성 동작 부재의 보증이 아니다. [Microsoft 링커 기본 라이브러리 제외](https://learn.microsoft.com/en-us/cpp/build/reference/nodefaultlib-ignore-libraries) · [Microsoft DUMPBIN imports](https://learn.microsoft.com/en-us/cpp/build/reference/imports-dumpbin)
+
+이번 작업에서는 저장소와 PATH에서 프로젝트가 사용할 C/C++ 컴파일러·링커 조합을 확인하지 못했다. 설치하지 않았으며 바이너리, PE·import·SHA-256 검사와 네이티브 호스트 실행은 BLOCKED다. 소스에서 프로세스 열거·외부 프로세스 핸들·네트워크·입력·화면 관련 호출이 없음을 정적으로 확인했다. 승인된 빌드와 호스트 확인 이후 다음 MXC 승인은 기존 프로필로 `--self-test` 정확히 1회에 한한다. 성공하면 별도 파일 시험 승인을 요청한다. Python 실패 원인과 P2 A/B/C·P3 판정은 바뀌지 않는다.
+
 ## P2.15 승인된 Python 버전 진단 결과
 
 기준 `cb80d0738f9a6eb6ae70a805bc84aa05243e2a9b`. OpenAI OpCo, LLC의 유효 서명, 기존 CLI SHA-256 `4b3286e35d7fe866c6b0eb3f07d7a4cdb5e96489576170dfd6b3a15aa1c67382` 및 Python SHA-256 `3cce33d75d6fdae4e004d0bdf149320b3147482a9caf370079dcb9c191a1b260`를 확인했다. 새 GUID 합성 CODEX_HOME과 빈 작업 폴더, 기존 제한 환경과 전역 슬롯을 사용했다. 명시적 MXC 및 `mxc-file-test`로 승인된 절대 경로의 `python.exe -V`를 1회 호출했다.
