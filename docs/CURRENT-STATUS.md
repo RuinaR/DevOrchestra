@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.23 고정 MXC 자기 점검 1회는 종료 1, 표식 미관측, UNRECOGNIZED_STDERR로 FAIL이다. 사전검사·소유 CLI 시작·종료만 CONFIRMED다. 내부 단계와 트리 회수는 UNKNOWN이며 P2/P3는 BLOCKED다. [정제 영수증](P2-MXC-VALIDATION.md#p223-승인된-수집기-실측)
+
 P2.22는 고정 네이티브 자기 점검 내부 런처에 정제 수집기·시간 및 파이프 상한·원장 입장 제어를 연결했다. 소유 CLI 종료만 관측하고 트리 회수는 UNKNOWN으로 유지한다. Windows 회귀 87건(기존 76건 및 신규 11건) PASS. 실제 MXC 호출 0회. P2.18 실패와 P2/P3 BLOCKED는 유지한다. [수집기 계약](P2-MXC-VALIDATION.md#p222-소유-cli-진단-수집기)
 
 P2.21은 P2.18 실패 원인을 MXC 초기화·이미지 준비·프로세스 시작 후보로 검토하고 7단계 정제 영수증 분류기를 추가했다. 원문은 없으며 실제 실패 단계는 미확정이다. Windows 회귀 76건(기존 72건 및 신규 4건) PASS. MXC·Codex 실행은 0회, P2/P3는 BLOCKED다. [정적 분석 및 재진단 계약](P2-MXC-VALIDATION.md#p221-네이티브-자기-점검-실패-분석)

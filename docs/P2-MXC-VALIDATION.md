@@ -1,5 +1,23 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.23 승인된 수집기 실측
+
+기준 `9ad63f0bd71de77b48f0c2b54c8d400a00a272b9`. 운영 원장과 분리된 새 합성 원장 및 새 GUID 합성 홈·작업 폴더에서 P2.22 런처를 그대로 사용했다. 승인 ID·만료, 기존 CLI 경로·오프라인 서명·고정 해시, 네이티브 EXE 해시 및 고정 프로필 사전검사가 통과했다. 명시적 MXC와 `mxc-file-test`로 EXE의 `--self-test`만 정확히 1회 호출했다. 원장에는 실행 의도 1건과 정제 결과 1건이 남았다.
+
+| 단계 | 판정 |
+| --- | --- |
+| 신뢰 런처 사전검사 | CONFIRMED |
+| 소유 CLI 시작 | CONFIRMED |
+| MXC 초기화·프로필 적용 | UNKNOWN |
+| 내부 실행 이미지 준비 | UNKNOWN |
+| 내부 명령 시작 | UNKNOWN |
+| 내부 명령 종료·결과 | UNKNOWN |
+| 소유 CLI 종료 | CONFIRMED, 종료 코드 1 |
+
+자기 점검은 FAIL이다. 고정 표식은 미관측이었다. 스트림 수집은 완료됐고 상한 초과·타임아웃은 없었다. 정제 오류는 `UNRECOGNIZED_STDERR`이며 허용된 숫자 오류 코드는 없었다. 원시 stdout·stderr는 원장에 저장하지 않았다. MXC 초기화·정책 처리, 이미지 준비 또는 프로세스 생성이 후보로 남지만 이번 영수증은 어느 단계에서 실패했는지 좁히지 못했다. 기존 P2.18과 같은 종료 코드가 관측됐으나 동일 원인 여부는 알 수 없다.
+
+재시도·권한 확대·폴백 없이 중단했다. 소유 CLI 종료와 전체 트리 회수는 별개이며 트리 상태는 UNKNOWN이다. P2.10 시작 PASS와 P2.17 호스트 증거를 유지한다. A의 MXC 전체 회수·외부 Job 결합, B의 OS 격리·비간섭, C의 MXC 원장 보호는 NOT VERIFIED다. P2 A/B/C 전체 및 P3 실제 Codex 자동 개발·커밋은 BLOCKED다.
+
 ## P2.22 소유 CLI 진단 수집기
 
 기준 `dc79a929777d4cdd1e911ce47ce970929ffef7be`. 내부 `mxc_launcher._run_approved_self_test`는 신뢰 소유자 승인 ID·만료와 원장을 받는다. CLI 또는 GUI 진입점이 없으며 호출자에게 명령·경로·프로필을 받지 않는다. OpenAI 서명 CLI와 P2.17 EXE의 해시를 고정한다. 버전은 이전 실측과 동일한 CLI 바이트로 확인하며 별도 CLI 버전 프로세스를 열지 않는다. Windows 신뢰 검증은 캐시 전용이며 최신 온라인 인증서 상태의 증거가 아니다. 호스트 폴더 및 관리 구성 후보를 확인하고 새 합성 홈과 EXE만 들어 있는 작업 공간을 만든다. 고정 TOML과 argv를 확인하며 유효 MXC 정책의 OS 적용 여부는 여전히 UNKNOWN이다. [Microsoft WINTRUST_DATA](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/ns-wintrust-wintrust_data)
