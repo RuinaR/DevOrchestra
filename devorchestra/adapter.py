@@ -1,7 +1,7 @@
 """Role contract and bounded synthetic event normalization."""
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .lease import Blocked
 from .policy import ExecutionBackend, live_preflight
@@ -101,9 +101,43 @@ class RoleAdapter(Protocol):
         ...
 
 
-class WindowsNativeCodexAdapter:
-    """Reserved live role boundary. No transport or process can start yet."""
+@dataclass(frozen=True)
+class NativeReceipt:
+    request_hash: str
+    outcome: Outcome
+    owned_tree_drained: bool
+    measured_tokens: int | None
+    cost_microunits: int | None
 
-    def execute(self, request: RoleRequest) -> RoleResult:
+
+class OwnedNativeTransport(Protocol):
+    def __call__(self, request: RoleRequest, before_send: Callable[[], None],
+                 cancellation_requested: Callable[[], bool]) -> NativeReceipt:
+        """Collect the request-bound receipt after verifying owned resource drain."""
+        ...
+
+
+class WindowsNativeCodexAdapter:
+    """Live role boundary. Admission stays closed without trusted OS evidence."""
+
+    def __init__(self, transport: OwnedNativeTransport | None = None):
+        self._transport = transport
+
+    def preflight(self, request: RoleRequest) -> None:
         decision = live_preflight(backend=ExecutionBackend.WINDOWS_NATIVE_CODEX)
         raise Blocked(decision["reason"])
+
+    def execute(self, request: RoleRequest) -> RoleResult:
+        self.preflight(request)
+        raise Blocked("Native transport is not configured")
+
+    def execute_owned(self, request: RoleRequest, before_send, cancellation_requested):
+        """An owned transport must call before_send before dispatching once.
+
+        The return value is a NativeReceipt assembled by the trusted collector
+        after waiting for process drain, never from model-supplied fields.
+        """
+        self.preflight(request)
+        if self._transport is None:
+            raise Blocked("Native owned transport is not configured")
+        return self._transport(request, before_send, cancellation_requested)

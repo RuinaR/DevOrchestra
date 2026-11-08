@@ -6,7 +6,8 @@ from .event_audit import AuditCursor, normalize_packet
 from .lease import Blocked
 from .ledger import digest
 
-OPEN_ROLE_EVENTS = frozenset(("role_started", "stream_event", "stream_interrupted"))
+OPEN_ROLE_EVENTS = frozenset(("role_started", "stream_event", "stream_interrupted",
+                              "native_role_intent", "native_dispatch_intent", "native_role_unknown"))
 
 
 class EventJournal:

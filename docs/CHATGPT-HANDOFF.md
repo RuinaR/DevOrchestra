@@ -1,5 +1,7 @@
 # ChatGPT 전달용 요약
 
+P2.33은 내부 `Runner.native_step`에 단일 슬롯·토큰 예비량·종료 예약·내구 역할 및 전송 의도·소유 자식 영수증 검사를 연결했다. 미확정 전송은 자동 반복하지 않는다. 실제 Windows App Server 전송기·OS 증거 발급은 미연결이다. 연결 이후 별도 승인할 실측은 모델 없는 합성 접근 프로브의 `command/exec` 1회이며 이전 echo는 반복하지 않는다. P2 A/B/C 및 P3는 BLOCKED다. [실행 계약](ARCHITECTURE-ROADMAP.md#p233-네이티브-역할-실행-입장)
+
 ## P2.32 Windows Native Codex 전환
 
 기준 `c471822a6141b066c3c2501746cadad0b3fede4a`. Windows Native Codex 기본, VirtualBox와 명시적 MXC는 선택 후보로 바꿨다. CLI·GUI·역할 어댑터의 실제 실행은 BLOCKED이고 자동 폴백은 없다. 현재 PATH의 OpenAI 서명 CLI는 `0.167.0-alpha.3.2`이며 기존 고정 해시와 일치한다. 데스크톱 세션과 독립 Controller의 격리는 별개다. 다음은 별도 승인된 고정 echo 명령 한 번으로 독립 시작만 확인하는 것이다. P2 A/B/C와 P3는 BLOCKED다. [계약](ARCHITECTURE-ROADMAP.md#p232-windows-native-codex)

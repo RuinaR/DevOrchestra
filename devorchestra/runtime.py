@@ -1,4 +1,4 @@
-"""Trusted state transitions. Roles are synchronous, fixed Mock functions."""
+"""Trusted state transitions and fenced role admission."""
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -6,7 +6,8 @@ import re
 from time import monotonic, time
 from uuid import uuid4
 
-from .adapter import Budget, MockAdapter, RoleRequest, Scope, normalize_mock
+from .adapter import (Budget, MockAdapter, NativeReceipt, Outcome, RoleRequest, Scope,
+                      WindowsNativeCodexAdapter, normalize_mock)
 from .catalog import Catalog
 from .development import session_view, usage_totals, validate_proposal
 from .event_audit import Binding, FIXTURE_USAGE, Packet
@@ -98,11 +99,23 @@ def last_run(events):
     return []
 
 
+def native_unresolved(events):
+    pending = set()
+    for event in events:
+        if event["kind"] == "native_role_intent":
+            pending.add(event["agent_run_id"])
+        elif event["kind"] == "native_role_result":
+            pending.discard(event["agent_run_id"])
+    return bool(pending)
+
+
 def require_admission(events):
     if shutdown_state(events)["state"] in HELD:
         raise Blocked("Shutdown has closed admission")
     if diagnostic_unresolved(events):
         raise Blocked("Diagnostic process ownership requires recovery")
+    if native_unresolved(events):
+        raise Blocked("Native process ownership requires recovery")
     if pending_budget_stop(events):
         raise Blocked("Unsettled budget stop requires a shutdown checkpoint")
 
@@ -176,6 +189,18 @@ class Runner:
     def __init__(self, ledger):
         self.ledger = ledger
 
+    def native_step(self, expected_run):
+        """Explicit owner entry. It never falls back to a synthetic role."""
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            require_admission(events)
+            work = _Session(self.ledger, len(events), tail, last_run(events))
+            if (abandoned or work.pending_job or work.state not in PHASES
+                    or work.ids["run_id"] != expected_run
+                    or work.run[-1]["kind"] in OPEN_ROLE_EVENTS):
+                raise Blocked("Native role admission or previous ownership unverified")
+            return work.step(Catalog(self.ledger).read(), native=WindowsNativeCodexAdapter())
+
     def command(self, action, project="fixture-a", scenario=Scenario.NORMAL, expected_run=None):
         if action == "run":
             event = self.command("step", project, scenario, expected_run)
@@ -209,7 +234,8 @@ class Runner:
             events, tail = self.ledger.snapshot(recover_journal=True)
             current = shutdown_state(events)
             run = last_run(events)
-            unresolved = (abandoned or diagnostic_unresolved(events) or any(event["kind"] in UNKNOWN for event in run[-1:])
+            unresolved = (abandoned or diagnostic_unresolved(events) or native_unresolved(events)
+                          or any(event["kind"] in UNKNOWN for event in run[-1:])
                           or any(event["kind"] == "recovery" for event in run))
             if current.get("abandoned"):
                 unresolved = True
@@ -433,15 +459,20 @@ class _Session:
                          probe_id=previous["probe_id"], phase=previous["phase"],
                          result="UNKNOWN", reason="Owned Job drain evidence missing")
 
-    def emit(self, kind, state, **details):
+    def emit(self, kind, state, *, admission_check=None, **details):
         event = {
             **self.ids, **details, "kind": kind, "state": state.value,
-            "owner": self.owner, "source": "WINDOWS_SYNTHETIC_JOB" if kind.startswith("job_") else "MOCK",
+            "owner": self.owner, "source": (
+                "WINDOWS_NATIVE_CODEX" if kind.startswith("native_") else
+                "WINDOWS_SYNTHETIC_JOB" if kind.startswith("job_") else "MOCK"),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         if self.development_id:
             event["development_id"] = self.development_id
-        admission = require_admission if kind in ("run_started", "role_started", "job_intent") else None
+        admission = require_admission if kind in (
+            "run_started", "role_started", "job_intent", "native_role_intent") else None
+        if admission_check is not None:
+            admission = admission_check
         self.count, self.tail = self.ledger.append(
             self.count, self.tail, event, allow_shutdown=True, admission=admission,
         )
@@ -484,6 +515,11 @@ class _Session:
         if interrupted:
             if action != "recover":
                 raise Blocked("USAGE_UNVERIFIED: unfinished execution requires explicit recovery")
+            if latest["kind"].startswith("native_"):
+                return self.emit("recovery", State.RECOVERING,
+                                 agent_run_id=latest["agent_run_id"], role=latest["role"],
+                                 result="UNKNOWN", reason="NATIVE_OWNERSHIP_UNVERIFIED",
+                                 owned_tree="UNKNOWN")
             return self.emit("recovery", State.RECOVERING,
                              agent_run_id=latest.get("agent_run_id"), role=latest.get("role", latest.get("stream_role")),
                              result="UNKNOWN", reason="USAGE_UNVERIFIED", owned_children=[])
@@ -531,7 +567,66 @@ class _Session:
         self.count, self.tail = self.ledger.update(choose)
         return result
 
-    def step(self, catalog):
+    def execute_native(self, adapter, request, phase, evidence):
+        adapter.preflight(request)
+        intent = {key: evidence[key] for key in (
+            "agent_run_id", "context_id", "role", "input_contract_hash", "role_budget", "approval_id")}
+        self.emit("native_role_intent", phase, **intent)
+        dispatched = False
+
+        def cancellation_requested():
+            events, _ = self.ledger.snapshot()
+            return time() >= request.deadline_utc_epoch or shutdown_state(events)["state"] in HELD
+
+        def before_send():
+            nonlocal dispatched
+            def check_dispatch(events):
+                if (dispatched or time() >= request.deadline_utc_epoch
+                        or shutdown_state(events)["state"] in HELD or pending_budget_stop(events)):
+                    raise Blocked("Native dispatch is closed")
+
+            self.emit("native_dispatch_intent", phase, admission_check=check_dispatch, **intent)
+            dispatched = True
+
+        try:
+            receipt = adapter.execute_owned(request, before_send, cancellation_requested)
+            if (not dispatched or type(receipt) is not NativeReceipt
+                    or receipt.request_hash != intent["input_contract_hash"]
+                    or receipt.owned_tree_drained is not True
+                    or type(receipt.outcome) is not Outcome
+                    or receipt.outcome not in (Outcome.COMPLETED, Outcome.FAILED, Outcome.CANCELLED)):
+                raise Blocked("Native result or resource ownership unverified")
+        except Exception:
+            self.emit("native_role_unknown", State.RECOVERING, **intent,
+                      external_request="UNKNOWN" if dispatched else "NOT_DISPATCHED",
+                      owned_tree="UNKNOWN")
+            raise Blocked("Native execution requires explicit recovery") from None
+
+        tokens, cost = receipt.measured_tokens, receipt.cost_microunits
+        usage_known = all(type(value) is int and value >= 0 for value in (tokens, cost))
+        reason = "NATIVE_VERIFIER_UNWIRED"
+        if not usage_known:
+            reason = "USAGE_UNVERIFIED"
+        elif tokens >= request.budget.tokens:
+            reason = "TOKEN_LIMIT"
+        elif cost > request.budget.cost_microunits:
+            reason = "COST_LIMIT"
+        elif time() >= request.deadline_utc_epoch:
+            reason = "TIME_LIMIT"
+        # A drained transport receipt does not authorize a role transition.
+        # The deterministic verifier and native usage settlement are separate gates.
+        result = self.emit("native_role_result", State.BLOCKED, **intent,
+                           outcome=receipt.outcome.value, owned_tree="DRAINED",
+                           measured_tokens=tokens if usage_known else None,
+                           cost_microunits=cost if usage_known else None, reason=reason,
+                           shutdown_reason={"TOKEN_LIMIT": "TOKEN_RESERVE_LOW",
+                                            "COST_LIMIT": "COST_LIMIT",
+                                            "TIME_LIMIT": "TIME_LIMIT"}.get(reason))
+        if result["shutdown_reason"]:
+            self.schedule_budget_stop(result["shutdown_reason"])
+        return result
+
+    def step(self, catalog, *, native=None):
         phase = self.state
         start = self.run[0]
         now = time()
@@ -569,18 +664,19 @@ class _Session:
         current_role = live["project"].get("roles", {}).get(role, {}).get("budget", live["budget"])
         role_budget = {key: min(amount, current_role[key], live["budget"][key])
                        for key, amount in role_budget.items()}
-        status = reserve_status(limit, used, ROLE_TOKENS, catalog.get("token_reserve", DEFAULT_RESERVE))
+        reservation = role_budget["tokens"] if native is not None else ROLE_TOKENS
+        status = reserve_status(limit, used, reservation, catalog.get("token_reserve", DEFAULT_RESERVE))
         role_budget["cost_microunits"] = min(role_budget["cost_microunits"],
                                             min(task_budget["cost_microunits"], live["budget"]["cost_microunits"]) - spent)
         if role_budget["cost_microunits"] < 0:
             self.schedule_budget_stop("COST_LIMIT", status)
             return self.emit("budget", State.BLOCKED, reason="COST_LIMIT")
-        if ROLE_TOKENS > min(role_budget["tokens"], limit - used):
+        if reservation > min(role_budget["tokens"], limit - used):
             self.schedule_budget_stop("TOKEN_RESERVE_LOW", status)
             return self.emit("budget", State.BLOCKED, reason="TOKEN_LIMIT")
-        if status["available"] < ROLE_TOKENS:
+        if status["available"] < reservation:
             return self.schedule_budget_stop("TOKEN_RESERVE_LOW", status)
-        role_budget["tokens"] = ROLE_TOKENS
+        role_budget["tokens"] = reservation
         live_deadline = datetime.fromisoformat(start["timestamp"]).timestamp() + live["budget"]["seconds"]
         if now >= live_deadline:
             self.schedule_budget_stop("TIME_LIMIT")
@@ -596,8 +692,8 @@ class _Session:
             "requested_model": preference["model"] if preference else None,
             "requested_reasoning": preference["reasoning"] if preference else None,
             "role_budget": role_budget, "approval_id": approval["approval_id"],
-            "token_reservation": dict(status, active_reservation=ROLE_TOKENS,
-                                      available=status["available"] - ROLE_TOKENS),
+            "token_reservation": dict(status, active_reservation=reservation,
+                                      available=status["available"] - reservation),
         }
         prior = next((event for event in reversed(self.run) if event["kind"] == "role_finished"), None)
         if prior and "input_contract_hash" in prior and (prior.get("scope_released") is not True
@@ -612,6 +708,8 @@ class _Session:
                               deadline_utc_epoch=min(start["deadline"], live_deadline, approval["expires"],
                                                      now + role_budget["seconds"]))
         evidence.update(input_contract_hash=digest(asdict(request)), input_refs=refs)
+        if native is not None:
+            return self.execute_native(native, request, phase, evidence)
         started = monotonic()
         self.emit("role_started", phase, **evidence)
         binding = Binding(self.ids["project_id"], self.development_id, self.ids["run_id"],
