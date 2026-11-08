@@ -15,18 +15,31 @@ class Capability(str, Enum):
     SERVICE = "external-service"
 
 
+class ExecutionBackend(str, Enum):
+    WINDOWS_NATIVE_CODEX = "windows-native-codex"
+    VIRTUALBOX = "virtualbox"
+    EXPLICIT_MXC = "explicit-mxc"
+
+
+DEFAULT_BACKEND = ExecutionBackend.WINDOWS_NATIVE_CODEX
+
+
 FORBIDDEN_LIVE_CAPABILITIES = (
     "external-process-access", "global-input", "screen-capture", "external-window-control",
     "outside-workspace-files", "privilege-escalation", "system-settings-change",
 )
 
 
-def live_preflight(required_capabilities=()):
+def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND):
     """Assess declared requirements without opening files or authorizing execution.
 
     A declaration is not evidence about what generated code actually does.
     This release has no verified live admission path, even for an empty plan.
     """
+    try:
+        selected = ExecutionBackend(backend)
+    except (TypeError, ValueError):
+        selected = None
     required = tuple(required_capabilities)
     forbidden = tuple(name for name in FORBIDDEN_LIVE_CAPABILITIES if name in required)
     known = (*FORBIDDEN_LIVE_CAPABILITIES, *(item.value for item in Capability))
@@ -35,13 +48,21 @@ def live_preflight(required_capabilities=()):
         reason = "FORBIDDEN_CAPABILITY"
     elif unknown:
         reason = "UNKNOWN_CAPABILITY"
+    elif selected is None:
+        reason = "UNKNOWN_BACKEND"
     else:
         reason = "ISOLATION_UNVERIFIED"
     return {
         "status": "BLOCKED",
         "reason": reason,
         "forbidden_capabilities": forbidden,
-        "isolation_candidate": "MXC",
+        "backend": selected.value if selected is not None else None,
+        "isolation_candidate": {
+            ExecutionBackend.WINDOWS_NATIVE_CODEX: "Windows Native Codex",
+            ExecutionBackend.EXPLICIT_MXC: "MXC",
+            ExecutionBackend.VIRTUALBOX: "VirtualBox",
+        }.get(selected),
+        "automatic_fallback": False,
         "noninterference": "NOT_VERIFIED",
     }
 

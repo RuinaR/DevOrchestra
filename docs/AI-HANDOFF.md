@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.32 기본 실행 후보는 Windows Native Codex다. VirtualBox 및 명시적 MXC 진단은 선택 후보이며 자동 폴백은 없다. 실운영 연결은 차단된 상태다. [네이티브 계약과 다음 승인 범위](ARCHITECTURE-ROADMAP.md#p232-windows-native-codex)
+
 P2.8 기준 `ac306f4`. 명시적 MXC 시작 진단은 별도 승인 하에 PASS했다. [합성 파일 시험](P2-MXC-FILE-TEST.md)의 호스트 양성 대조 및 MXC 1회는 새 승인이 필요하다. 기존 안전 계약은 유지하며 실제 Codex 및 P3는 BLOCKED다.
 
 P2.7 기준 `71abfd9`. [MXC 시험 계약](P2-MXC-VALIDATION.md)을 우선 적용한다. VirtualBox 다운로드·설치는 보류다. 명시적 MXC 시작 진단은 소유자 별도 승인 후 합성 작업 공간에서만 수행한다. 진단 PASS는 파일·네트워크·데스크톱·Job 및 원장 보호를 증명하지 않는다. 레거시 폴백은 입장 금지다.

@@ -1,5 +1,9 @@
 # ChatGPT 전달용 요약
 
+## P2.32 Windows Native Codex 전환
+
+기준 `c471822a6141b066c3c2501746cadad0b3fede4a`. Windows Native Codex 기본, VirtualBox와 명시적 MXC는 선택 후보로 바꿨다. CLI·GUI·역할 어댑터의 실제 실행은 BLOCKED이고 자동 폴백은 없다. 현재 PATH의 OpenAI 서명 CLI는 `0.167.0-alpha.3.2`이며 기존 고정 해시와 일치한다. 데스크톱 세션과 독립 Controller의 격리는 별개다. 다음은 별도 승인된 고정 echo 명령 한 번으로 독립 시작만 확인하는 것이다. P2 A/B/C와 P3는 BLOCKED다. [계약](ARCHITECTURE-ROADMAP.md#p232-windows-native-codex)
+
 ## P2.27 예산 종료 및 복구
 
 합성 Controller는 최신 한도와 예비량이 부족하면 새 역할 대신 TOKEN_RESERVE_LOW를 기록한다. 역할 완료 커밋 후 응답이 유실되면 입장 금지 사유를 원장에서 복원한다. WAL과 감사 무결성, 명시적 재개를 임시 자료로 검증한다. 실제 VM·모델·파일·Git 외부 결과 복구와 물리 정전 내구성은 미검증이다. P2/P3는 BLOCKED다.

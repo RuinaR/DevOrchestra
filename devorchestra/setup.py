@@ -6,15 +6,19 @@ from pathlib import PureWindowsPath
 from shutil import which
 
 from .catalog import validate_project
+from .policy import live_preflight
 
 
 def environment_status():
+    decision = live_preflight()
     return {
         "windows_x64": os.name == "nt" and platform.machine().upper() in ("AMD64", "X86_64"),
         "codex_found": bool(which("codex.exe")) if os.name == "nt" else False,
         "cli_signature_version": "NOT_VERIFIED",
         "mxc": "NOT_VERIFIED",
-        "live_execution": "BLOCKED",
+        "backend": decision["backend"],
+        "backend_label": decision["isolation_candidate"],
+        "live_execution": decision["status"],
     }
 
 

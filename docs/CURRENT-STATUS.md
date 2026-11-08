@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.32 Windows Native Codex를 기본 후보로 전환했다. CLI 사전검사, 역할 어댑터 및 초기 설정은 실제 실행을 차단한다. 독립 프로세스 격리·실제 GUI 렌더링은 미검증이고 P2 A/B/C 및 P3는 BLOCKED다. [실행 계약](ARCHITECTURE-ROADMAP.md#p232-windows-native-codex)
+
 P2.31 사용자 수동 설치 후 VirtualBox 7.2.22 본체 버전·Oracle 서명, VBoxSup 등록·서명 PASS. 미재부팅 상태이며 로드·재부팅 필요성 UNKNOWN. USB·브리지·Host-only 드라이버가 등록돼 최소 구성과 다르다. VM 생성·부팅 및 P2 A/B/C·P3는 BLOCKED다. [설치 후 검증](P2-VM-VALIDATION.md#p231-사용자-수동-설치-후-읽기-전용-검증)
 
 P2.30 당시 Codex 기본 셸과 사용자 세션의 경로 관측 차이로 P2.28 호스트 다운로드를 `HOST_FILE_NOT_VERIFIED`로 기록했다. [당시 재확인 절차](P2-VM-VALIDATION.md#p230-사용자-세션의-설치-파일-접근-확인)

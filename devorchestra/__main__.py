@@ -12,7 +12,7 @@ from .dashboard import project_view, render
 from .development import session_view
 from .lease import Blocked
 from .ledger import Ledger, canonical
-from .policy import live_preflight
+from .policy import DEFAULT_BACKEND, ExecutionBackend, live_preflight
 from .runtime import Runner, Scenario
 
 
@@ -26,6 +26,8 @@ def main():
     shutdown.add_argument("--generation", type=int)
     preflight = commands.add_parser("live-preflight", help="Check declared capabilities without running anything")
     preflight.add_argument("--requires", action="append", default=[], metavar="CAPABILITY")
+    preflight.add_argument("--backend", choices=[backend.value for backend in ExecutionBackend],
+                           default=DEFAULT_BACKEND.value)
     start = commands.add_parser("start")
     start.add_argument("--project", default="fixture-a", help="Run a synthetic workflow only")
     start.add_argument("--scenario", type=Scenario, choices=list(Scenario), default=Scenario.NORMAL)
@@ -59,7 +61,7 @@ def main():
     commands.add_parser("session-status").add_argument("--project")
     args = parser.parse_args()
     if args.action == "live-preflight":
-        print(canonical(live_preflight(args.requires)))
+        print(canonical(live_preflight(args.requires, backend=args.backend)))
         return 2
     try:
         if os.name != "nt" or not os.environ.get("LOCALAPPDATA"):

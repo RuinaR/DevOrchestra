@@ -8,7 +8,7 @@ Command Center의 종료 예약은 합성 작업의 다음 역할 입장을 막�
 
 **한 번에 한 프로젝트 · 한 작업 · 한 에이전트만 실행하는 로컬 AI 개발 오케스트레이터.**
 
-> P2.26의 주력 격리 후보는 호스트 통합을 끈 전용 VirtualBox Windows 게스트이며, 명시적 MXC는 조건부 대체입니다. 실제 Codex, 외부 프로젝트 실행 및 OS 격리는 BLOCKED입니다. [백엔드 결정과 다음 승인 범위](docs/P2-VM-VALIDATION.md#p226-격리-백엔드-결정)
+> P2.32 기본 실행 후보는 Windows Native Codex입니다. VirtualBox와 명시적 MXC 진단은 별도 선택 후보이며 자동 전환은 없습니다. 실제 Codex와 외부 프로젝트 실행은 BLOCKED입니다. [네이티브 실행 계약](docs/ARCHITECTURE-ROADMAP.md#p232-windows-native-codex)
 
 Command Center의 역할 감사에서 커밋된 합성 스트림의 이벤트 ID와 원장 순번을 조회합니다. 중단된 스트림은 확인된 기록만 보존하며, 새 이벤트로 이어받거나 자동 재실행하지 않습니다.
 

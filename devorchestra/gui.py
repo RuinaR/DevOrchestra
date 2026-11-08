@@ -551,8 +551,9 @@ class CommandCenter:
             steps.add(tab, text=title)
         facts = environment_status()
         label(environment, f"Windows x64 · {facts['windows_x64']}\n"
-              f"Codex on PATH · {facts['codex_found']}\nCLI 서명·버전 / MXC · NOT VERIFIED\n"
-              "실제 실행 BLOCKED · 인증정보를 입력하지 마세요.").pack(fill="x")
+              f"기본 실행 방식 · {facts['backend_label']}\n"
+              f"Codex on PATH · {facts['codex_found']}\nCLI 서명·버전 / 격리 · NOT VERIFIED\n"
+              f"실제 실행 {facts['live_execution']} · 인증정보를 입력하지 마세요.").pack(fill="x")
         label(paths, "승인할 복제본 경로 (등록만, 복사·실행 없음)").pack(fill="x")
         replica = ttk.Entry(paths, width=60)
         replica.pack(fill="x")

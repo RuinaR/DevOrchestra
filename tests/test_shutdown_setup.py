@@ -225,7 +225,9 @@ class SetupTests(unittest.TestCase):
         with patch("devorchestra.setup.platform.machine", return_value="ARM64"), patch(
                 "devorchestra.setup.which", return_value=None):
             self.assertEqual({"windows_x64": False, "codex_found": False, "cli_signature_version": "NOT_VERIFIED",
-                              "mxc": "NOT_VERIFIED", "live_execution": "BLOCKED"}, environment_status())
+                              "mxc": "NOT_VERIFIED", "backend": "windows-native-codex",
+                              "backend_label": "Windows Native Codex",
+                              "live_execution": "BLOCKED"}, environment_status())
         with patch("devorchestra.setup.which", return_value=r"C:\tools\codex.exe"):
             self.assertEqual("BLOCKED", environment_status()["live_execution"])
 

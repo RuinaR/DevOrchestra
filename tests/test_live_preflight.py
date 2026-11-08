@@ -3,13 +3,32 @@ from contextlib import redirect_stdout
 from io import StringIO
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from devorchestra.__main__ import main
+from devorchestra.adapter import RoleRequest, WindowsNativeCodexAdapter
+from devorchestra.lease import Blocked
 from devorchestra.policy import FORBIDDEN_LIVE_CAPABILITIES, live_preflight
 
 
 class LivePreflightTests(unittest.TestCase):
+    def test_native_default_and_explicit_backends_cannot_fall_back(self):
+        self.assertEqual("windows-native-codex", live_preflight()["backend"])
+        for backend in ("windows-native-codex", "virtualbox", "explicit-mxc", "invalid"):
+            with self.subTest(backend=backend):
+                result = live_preflight(backend=backend)
+                self.assertEqual("BLOCKED", result["status"])
+                self.assertIs(False, result["automatic_fallback"])
+                self.assertEqual(None if backend == "invalid" else backend, result["backend"])
+                self.assertEqual("UNKNOWN_BACKEND" if backend == "invalid"
+                                 else "ISOLATION_UNVERIFIED", result["reason"])
+
+    def test_native_role_adapter_denies_before_using_request(self):
+        request = Mock(spec=RoleRequest)
+        with self.assertRaisesRegex(Blocked, "ISOLATION_UNVERIFIED"):
+            WindowsNativeCodexAdapter().execute(request)
+        self.assertEqual([], request.mock_calls)
+
     def test_prohibited_requirements_take_precedence(self):
         for capability in FORBIDDEN_LIVE_CAPABILITIES:
             with self.subTest(capability=capability):

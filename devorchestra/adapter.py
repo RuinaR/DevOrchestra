@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Protocol
 
 from .lease import Blocked
+from .policy import ExecutionBackend, live_preflight
 
 
 class Outcome(str, Enum):
@@ -98,3 +99,11 @@ class RoleAdapter(Protocol):
         drain, receipt provenance, and the handoff before admitting another role.
         """
         ...
+
+
+class WindowsNativeCodexAdapter:
+    """Reserved live role boundary. No transport or process can start yet."""
+
+    def execute(self, request: RoleRequest) -> RoleResult:
+        decision = live_preflight(backend=ExecutionBackend.WINDOWS_NATIVE_CODEX)
+        raise Blocked(decision["reason"])
