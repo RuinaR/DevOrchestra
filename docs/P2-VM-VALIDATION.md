@@ -17,6 +17,16 @@
 
 다음 승인 후보는 지정 유지보수 시간에 `VBoxApplication` 본체와 필수 서명 가상화 드라이버만 설치하는 범위다. 관리자 작업과 드라이버·서비스 변경을 명시한다. 네트워크 변경·재부팅 요구가 나타나면 별도 승인 전 중단한다. 게스트 이미지·라이선스, VM 생성·부팅과 A/B/C 시험도 별도 승인이다. 이번에는 EXE 실행, 관리자 요청, 시스템 변경 또는 VM 생성·실행을 수행하지 않았다. P2 A/B/C와 P3는 BLOCKED다.
 
+## P2.29 승인된 최소 설치 시도
+
+기준 `4ce9d798fb8232930dfa242f4fbed4eeef86ed08`. 실행 직전 P2.28의 SHA-256, 크기 178101352 bytes, 파일 버전 7.2.22.175245 및 유효한 Oracle America, Inc. Authenticode 서명을 재확인했다.
+
+대화형 설치 요청에 `ADDLOCAL=VBoxApplication`, `VBOX_START=0`, `REBOOT=ReallySuppress`, `MSIRESTARTMANAGERCONTROL=Disable`을 전달하고 바탕 화면·빠른 실행 바로가기와 파일 연결을 껐다. Oracle의 최소 구성은 USB, 브리지, Host-only, Python 기능을 제외한다. [Oracle 설치 옵션](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/installation.html) · [Microsoft Restart Manager 제어](https://learn.microsoft.com/en-us/windows/win32/msi/msirestartmanagercontrol)
+
+두 실행 요청은 Windows 경로 오류로 설치기 핸들을 반환하지 않았다. 두 번째 요청은 설치 파일의 폴더를 작업 디렉터리로 명시했다. 설치 프로그램 종료 코드 및 재부팅 요구는 NOT VERIFIED다. 이후 기본 설치 위치의 본체와 지정 VBoxSup·USB·네트워크 드라이버 서비스 등록 항목을 읽기 전용으로 확인했으나 발견되지 않았다. 이 조회는 시스템 전체 변경이나 롤백의 증거로 사용하지 않는다.
+
+설치는 BLOCKED다. 다음 단계는 사용자가 직접 제어하는 Windows 세션에서 같은 최소 구성의 설치 마법사를 열고, 범위 밖 요구가 나타나면 중단하는 것이다. VM 생성·부팅 및 게스트 이미지는 별도 승인이다. P2 A/B/C 및 P3는 BLOCKED다.
+
 ## P2.26 격리 백엔드 결정
 
 기준 `416d041b8d95dd1b28b91b93d9cba7920ba47d95`. **주력은 호스트 통합 기능을 끈 전용 VirtualBox Windows x64 게스트, 대체 후보는 명시적 네이티브 MXC**다. 주력 선정은 구현·인수 순서를 정한 것이다. 현재 두 후보 모두 실제 개발에는 BLOCKED이고 자동 전환은 없다. 이전 MXC 우선순위는 이력으로 유지한다.

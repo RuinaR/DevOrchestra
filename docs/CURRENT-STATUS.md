@@ -2,6 +2,8 @@
 
 P2.28 Oracle VirtualBox 7.2.22 Windows 기본 패키지와 SHA256SUMS를 별도 승인으로 내려받았다. 공식 해시 일치·Oracle 서명 유효·파일 버전 일치로 무결성 PASS. 설치는 별도 승인 대기이며 P2/P3는 BLOCKED다. [공개 검증 결과](P2-VM-VALIDATION.md#p228-승인된-oracle-패키지-다운로드-및-검증)
 
+P2.29 VirtualBox 7.2.22 패키지 재검증 PASS. 최소 설치는 두 실행 요청의 Windows 경로 오류로 BLOCKED다. 기본 본체·지정 드라이버 서비스 등록 미발견, 설치기 종료 코드와 재부팅 요구 NOT VERIFIED. P2 A/B/C 및 P3는 BLOCKED다. [설치 시도](P2-VM-VALIDATION.md#p229-승인된-최소-설치-시도)
+
 P2.27은 합성 역할 입장 시 토큰 예비량·최신 제한을 검증하고 자동 종료 예약과 복구 표시를 연결했다. Windows 회귀 91건(기존 87건 및 신규 4건)과 PowerShell 정적 검사 PASS. 실제 VM·모델·Git 부작용 복구와 물리 정전은 미검증이다. [예산 및 복구 계약](ARCHITECTURE-ROADMAP.md#p227-토큰-예비량-및-장애-복구)
 
 P2.26 주력은 호스트 통합을 끈 전용 VirtualBox Windows 게스트, 대체는 명시적 MXC로 결정했다. 두 후보 모두 실사용 BLOCKED. 다음 별도 승인 후보는 준비된 지정 VM의 A 정상 수명주기 1회다. Windows 합성 87건 및 PowerShell 정적 검사 PASS. [백엔드 결정](P2-VM-VALIDATION.md#p226-격리-백엔드-결정)
