@@ -1,5 +1,7 @@
 # ChatGPT 전달용 요약
 
+P2.8 합성 파일 시험은 호스트 양성 대조 7개 대상 PASS, MXC 1회는 `SystemDrive` 누락으로 준비 단계 종료 코드 1이었다. 표식 해시와 junction은 불변이며 접근 거부 실측은 없다. 재시험에는 최소 환경 수정 검토와 새 승인이 필요하다. P3는 BLOCKED다. [시험 결과](P2-MXC-FILE-TEST.md)
+
 P2.8 기준 `ac306f4ef05e0e939b4e9cf5c7f9c5f4794f90f4`. 앞선 명시적 MXC·`:workspace` 시작 진단은 `MXC_OK`/0이었다. 별도 합성 프로필과 파일·junction 양성 대조, 실행 명령, 전후 해시 기준을 준비했다. 파일 시험은 별도 승인 대기이며 시스템 경로 및 MXC/Job 결합은 미검증이다. P3는 BLOCKED다. [시험 계약](P2-MXC-FILE-TEST.md)
 
 P2.7 기준 `71abfd91f6ac80dcd46548e44d13a4b0866eaa76`. 현재 Windows PC의 MXC를 우선 검토하고 VirtualBox 계획은 보류했다. OS와 CLI 수치 기준을 충족했지만 장치·유효 정책·Job 결합은 미검증이다. 다음은 소유자 승인 후 합성 폴더에서 공식 명시적 MXC 시작 진단 한 번이다. 파일·네트워크·데스크톱·소유 Job·원장 보호와 검역이 입증될 때까지 P3와 실제 Codex 실행은 BLOCKED다. [MXC 시험 계약](P2-MXC-VALIDATION.md)

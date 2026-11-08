@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.8 실행 기준 `96125464afb62848999647e1aaa5fa578c1dfcef`. 호스트 양성 대조는 일곱 대상 모두 PASS였다. MXC 1회는 시험 환경의 `SystemDrive` 누락으로 준비 단계에서 종료 코드 1을 반환했다. 모든 전후 표식 해시와 junction 대상은 동일했으나 MXC 파일 접근 결과는 미측정이다. A 기존 증거와 C 합성 검역만 유지한다. B 파일 경계와 C의 MXC 원장 보호는 NOT VERIFIED이며 P3는 BLOCKED다. [실행 결과](P2-MXC-FILE-TEST.md#2026-11-09-실행-결과)
+
 P2.8 기준 `ac306f4ef05e0e939b4e9cf5c7f9c5f4794f90f4`. 별도 승인으로 명시적 MXC·`:workspace` 시작 진단 1회에서 `MXC_OK` 및 종료 코드 0을 관측했다. 파일 시험의 프로필·양성 대조·명령·판정은 확정했으며 실행은 별도 승인 대기다. A는 기존 제한 Job 및 MXC 시작 증거만 있다. B와 MXC/Job 결합은 미검증, C는 기존 합성 검역만 PASS다. P3는 BLOCKED다. [합성 파일 시험](P2-MXC-FILE-TEST.md)
 
 P2.7 기준 `71abfd91f6ac80dcd46548e44d13a4b0866eaa76`. Windows 11 25H2 빌드 및 설치 CLI 버전이 공식 MXC 시작 진단의 수치 기준을 충족한다. 장치 호환성·유효 정책·Job 결합은 NOT VERIFIED다. VirtualBox 계획은 보류했다. MXC 진단은 별도 승인 대기이며 P2 실측과 P3는 BLOCKED다. [MXC 사전 검토](P2-MXC-VALIDATION.md)
