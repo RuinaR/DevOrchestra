@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.10 승인 진단 1회에서 명시적 MXC와 `mxc-file-test` 조합으로 `MXC_OK` 및 종료 코드 0을 확인했다. 시작만 PASS다. OS 접근 거부·비간섭·외부 Job 결합은 NOT VERIFIED이며 P2 A/B/C 전체 및 P3는 BLOCKED다. [시작 진단 결과](P2-MXC-VALIDATION.md#p210-승인된-시작-진단-결과)
+
 P2.12 기준 `44f731aaca227e8a5a6bb8a81b894da4d6aaba00`. 현재 OpenAI 서명 CLI 버전을 직접 확인했다. P2.10 시작 진단은 별도 승인 대기다. 합성 후보와 실제 Controller 테스트 영수증 계약을 분리했고, 실제 영수증 발행·실행 어댑터·P2 A/B/C·P3는 BLOCKED다. [CLI 점검](P2-MXC-VALIDATION.md#p212-현재-cli-확인)
 
 P2.11 기준 `be6db0e712b0857d52bd4316af2c86630ce1b0f7`. 전용 합성 원장 기반 커밋 후보 등록·재확인을 구현했다. 실제 커밋 실행 및 스테이징은 미연결이며 P2.10은 별도 승인 대기, P2 A/B/C와 P3는 BLOCKED다. [커밋 후보 계약](ARCHITECTURE-ROADMAP.md#p211-오프라인-커밋-후보)

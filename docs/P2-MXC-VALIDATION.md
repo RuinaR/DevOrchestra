@@ -1,5 +1,13 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.10 승인된 시작 진단 결과
+
+기준 `bbfe379be2408712fcf0294aa33e2dd45879b772`. 별도 승인 범위에서 OpenAI OpCo, LLC의 유효 서명, 앞서 확인한 실행 위치, `codex-cli 0.167.0-alpha.3.2` 및 SHA-256 `4b3286e35d7fe866c6b0eb3f07d7a4cdb5e96489576170dfd6b3a15aa1c67382`를 재확인했다. 실행 직전 바이너리 해시·합성 프로필 원문·빈 작업 디렉터리를 대조했다. 표준 위치의 관리 요구 파일은 발견되지 않았으며 명령에는 `--include-managed-config`를 유지했다.
+
+새 GUID 기반 합성 홈과 빈 작업 폴더, 전역 실행 뮤텍스를 사용했다. 런처에는 `SystemRoot`, `WINDIR`, `SystemDrive`, `LOCALAPPDATA`, `ProgramData`, `PATH`, `TEMP`, `TMP`, `CODEX_HOME`만 전달했다. 실제 `LOCALAPPDATA` 값은 Known Folder와 대조했고 디렉터리 내용은 조사하지 않았다. 기존 설정·인증 파일을 복사하거나 수정하지 않았다. 새 합성 자료는 보존했다.
+
+명시적 `windows.sandbox=mxc` 및 `mxc-file-test`로 System32의 고정 echo 명령을 정확히 1회 호출했다. 결과는 `MXC_OK`, 종료 코드 0, CLI 종료 확인, 표준 오류 없음으로 **시작 PASS**다. 설정·명령에서 네트워크 비활성과 승인 금지를 선택했으나 OS 거부 동작을 실측하지 않았다. 내부 환경 노출, 파일·네트워크·자격증명·프로세스 비간섭, 외부 Job 결합 및 소유 트리 회수는 NOT VERIFIED다. 재시도와 폴백은 없었다. 다음은 별도 승인된 합성 파일 경계 시험이며, P2 A/B/C 전체와 P3 실제 Codex·커밋은 BLOCKED다.
+
 ## P2.12 현재 CLI 확인
 
 PATH가 해석한 OpenAI Codex 설치 트리의 절대 실행 파일에서 `--version`으로 `0.167.0-alpha.3.2`를 확인했다. Windows Authenticode는 Valid, 서명자는 OpenAI OpCo, LLC였다. SHA-256은 `4b3286e35d7fe866c6b0eb3f07d7a4cdb5e96489576170dfd6b3a15aa1c67382`다. 실제 사용자 경로는 공개 기록에서 제외했다. 버전 조회 중 기존 홈의 임시 별칭 정리와 생성 시도가 접근 거부됐다는 경고가 있었다. 후속 조회와 승인된 진단에는 처음부터 전용 합성 홈을 지정한다.
