@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from .adapter import Budget, MockAdapter, RoleRequest, Scope, normalize_mock
 from .catalog import Catalog
+from .development import session_view, validate_proposal
+from .event_audit import Binding, Packet, normalize_stream
 
 from .lease import Blocked, execution_slot
 from .ledger import digest
@@ -86,7 +88,7 @@ ROLE_TOKENS = 1
 def last_run(events):
     for index in range(len(events) - 1, -1, -1):
         if events[index]["kind"] == "run_started":
-            return events[index:]
+            return [e for e in events[index:] if not e["kind"].startswith("session_")]
     return []
 
 
@@ -115,6 +117,37 @@ def mock_role(phase, scenario, history):
             "result": "PASS" if verified else "FAIL"}
 
 
+def mock_next(goal_hash, verification_ref):
+    return {"decision": "NEXT", "goal_hash": goal_hash, "evidence_ref": verification_ref}
+
+
+def freeze_project(project_id, catalog):
+    registered = catalog["projects"].get(project_id)
+    if project_id in PROJECTS:
+        project = asdict(PROJECTS[project_id])
+        goal = project["priority"]
+        project_budget = {"seconds": project["seconds"], "tokens": project["tokens"], "cost_microunits": 0}
+    elif registered:
+        # Snapshot only synthetic metadata. Never pass owner filesystem paths to a role.
+        config = registered["data"]
+        project_budget = config["budget"]
+        goal = config["goal"]
+        project = {"name": config["name"], "milestone": "MOCK",
+                   "model": "mock-v1", "reasoning": "NOT_APPLICABLE",
+                   "seconds": project_budget["seconds"], "cost_limit": project_budget["cost_microunits"],
+                   "roles": config["roles"], "acceptance": config["acceptance"],
+                   "revision": registered["revision"]}
+    else:
+        raise Blocked("Unknown project")
+    global_budget = catalog["global_budget"]
+    budget = {key: min(value, global_budget[key]) for key, value in project_budget.items()}
+    acceptance = project.get("acceptance", ["Verify synthetic workflow"])
+    guidance = registered["data"]["documents"] if registered else project["documents"]
+    return {"project": project, "goal": goal, "acceptance": acceptance, "budget": budget,
+            "project_budget": project_budget, "global_budget": global_budget,
+            "guidance_hash": digest([INSTRUCTION_VERSION, POLICY_HASH, guidance])}
+
+
 class Runner:
     def __init__(self, ledger):
         self.ledger = ledger
@@ -130,6 +163,10 @@ class Runner:
             session = _Session(self.ledger, len(events), tail, last_run(events))
             if session.pending_job:
                 return session.recover_job(action, expected_run)
+            if action == "start":
+                development = session_view(events)
+                if development and not development["end"]:
+                    raise Blocked("Development session owns admission")
             if action == "run":
                 event = session.apply("step", project, scenario, expected_run, abandoned)
                 while session.state in PHASES:
@@ -137,6 +174,86 @@ class Runner:
                 return event
             catalog = Catalog(self.ledger).read() if action == "start" else None
             return session.apply(action, project, scenario, expected_run, abandoned, catalog)
+
+    def development(self, action, *, project="fixture-a", development_id=None, limits=None,
+                    cycles=2, retries=0, task_limits=None, scenario=Scenario.NORMAL):
+        """Owner-driven scheduler tick. Every task still requires its own approval."""
+        from .catalog import validate_budget
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            work = _Session(self.ledger, len(events), tail, last_run(events))
+            if abandoned or work.pending_job or work.state not in (State.IDLE, *TERMINAL):
+                raise Blocked("Previous work must be resolved before a session transition")
+            view = session_view(events)
+
+            def record(kind, project_id, identity, **fields):
+                event = {"kind": kind, "project_id": project_id, "development_id": identity,
+                         "run_id": None, "state": fields.pop("state", "ACTIVE"), "source": "MOCK_SESSION",
+                         "timestamp": datetime.now(timezone.utc).isoformat(), **fields}
+                self.ledger.append(len(events), tail, event)
+                return event
+
+            if action == "start":
+                if view and not view["end"]:
+                    raise Blocked("A development session already owns admission")
+                validate_budget(limits)
+                if task_limits is not None:
+                    validate_budget(task_limits)
+                if type(cycles) is not int or not 1 <= cycles <= 100 or type(retries) is not int or not 0 <= retries < cycles:
+                    raise ValueError("Invalid session cycle or retry limits")
+                frozen = freeze_project(project, Catalog(self.ledger).read())
+                now = time()
+                return record("session_started", project, uuid4().hex, frozen=frozen,
+                              goal_hash=digest([frozen["goal"], frozen["acceptance"], frozen["guidance_hash"]]),
+                              goal=frozen["goal"], acceptance=frozen["acceptance"],
+                              limits=limits, task_limits=task_limits, max_cycles=cycles, max_retries=retries,
+                              started_epoch=now, deadline=now + limits["seconds"])
+            if not view or view["start"]["development_id"] != development_id:
+                raise Blocked("Explicit latest development session required")
+            start = view["start"]
+            if view["end"]:
+                return view["end"]
+
+            def finish(state, reason):
+                return record("session_ended", start["project_id"], development_id, state=state, reason=reason,
+                              cycles=view["cycles"], completed=view["completed"], synthetic_tokens=view["tokens"],
+                              synthetic_cost_microunits=view["cost"], usage_kind=view["usage_kind"])
+
+            if action == "stop":
+                return finish("CANCELLED", "OWNER_STOP")
+            if action != "next":
+                raise Blocked("Unknown development session action")
+            previous = view["current"]
+            selection = "INITIAL"
+            if previous:
+                last = previous[-1]
+                if last["state"] != "COMPLETED" or view["usage_kind"] == "UNKNOWN":
+                    return finish("BLOCKED", last.get("reason", f"PREVIOUS_{last['state']}"))
+                proof = next((e["handoff_ref"] for e in previous if e["kind"] == "role_finished"
+                              and e.get("role") == "Verifier" and e.get("result") == "PASS"), None)
+                try:
+                    selection = validate_proposal(last.get("manager_proposal"), start["goal_hash"], proof)
+                except Blocked:
+                    return finish("BLOCKED", "INVALID_MANAGER_PROPOSAL")
+                if selection not in ("NEXT", "REWORK"):
+                    return finish(selection, f"MANAGER_{selection}")
+                if selection == "REWORK" and view["retries"] >= start["max_retries"]:
+                    return finish("NO_PROGRESS", "RETRY_LIMIT")
+            if view["cycles"] >= start["max_cycles"]:
+                return finish("NO_PROGRESS", "CYCLE_LIMIT")
+            now = time()
+            if not start["started_epoch"] <= now < start["deadline"]:
+                return finish("BLOCKED", "SESSION_TIME_LIMIT")
+            remaining = dict(start["limits"], tokens=start["limits"]["tokens"] - view["tokens"],
+                             cost_microunits=start["limits"]["cost_microunits"] - view["cost"])
+            if remaining["tokens"] < ROLE_TOKENS or remaining["cost_microunits"] < 0:
+                return finish("BLOCKED", "SESSION_BUDGET_LIMIT")
+            return work.start_run(start["project_id"], scenario, start["frozen"], development={
+                "development_id": development_id, "selection": selection, "cycle": view["cycles"] + 1,
+                "session_deadline": start["deadline"], "session_remaining": remaining,
+                "task_limits": start["task_limits"], "goal_hash": start["goal_hash"],
+                "selection_ref": previous[-1]["handoff_ref"] if previous else start["goal_hash"],
+            })
 
     def _probe_job(self, expected_run, fixture, cancel_requested=lambda: False):
         """Internal synthetic test seam. There is no CLI or adapter dispatch to it."""
@@ -174,6 +291,7 @@ class _Session:
         self.tail = tail
         self.run = run
         self.owner = uuid4().hex
+        self.development_id = run[0].get("development_id") if run else None
         self.state = State(run[-1]["state"]) if run else State.IDLE
         self.ids = {key: run[0][key] for key in ("project_id", "run_id", "task_id", "generation")} if run else {}
 
@@ -198,6 +316,8 @@ class _Session:
             "owner": self.owner, "source": "WINDOWS_SYNTHETIC_JOB" if kind.startswith("job_") else "MOCK",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        if self.development_id:
+            event["development_id"] = self.development_id
         self.ledger.append(self.count, self.tail, event)
         self.count += 1
         self.tail = digest([self.count, self.tail, event])
@@ -205,41 +325,32 @@ class _Session:
         self.state = state
         return event
 
+    def start_run(self, project_id, scenario, frozen, development=None):
+        budget = dict(frozen["budget"])
+        now = time()
+        deadline = now + (0 if scenario is Scenario.TIME_LIMIT else budget["seconds"])
+        if development:
+            for limits in (development["session_remaining"], development["task_limits"]):
+                if limits is not None:
+                    budget = {key: min(amount, limits[key]) for key, amount in budget.items()}
+            deadline = min(deadline, now + budget["seconds"], development["session_deadline"])
+        self.run = []
+        self.development_id = development["development_id"] if development else None
+        self.ids = {"project_id": project_id, "task_id": uuid4().hex,
+                    "run_id": uuid4().hex, "generation": self.count + 1}
+        return self.emit(
+            "run_started", State.PRECHECK, **{**frozen, "budget": budget}, **(development or {}),
+            scenario=scenario.value, deadline=deadline,
+            token_limit=0 if scenario is Scenario.TOKEN_LIMIT else budget["tokens"],
+            instruction=INSTRUCTION_VERSION, policy_hash=POLICY_HASH,
+            git_before="NOT_APPLICABLE", git_after="NOT_APPLICABLE", owned_children=[],
+        )
+
     def apply(self, action, project_id, scenario, expected_run, abandoned, catalog=None):
         if action == "start":
             if abandoned or (self.state != State.IDLE and self.state not in TERMINAL):
                 raise Blocked("Previous run requires completion or recovery")
-            registered = catalog["projects"].get(project_id)
-            if project_id in PROJECTS:
-                project = asdict(PROJECTS[project_id])
-                goal = project["priority"]
-                project_budget = {"seconds": project["seconds"], "tokens": project["tokens"], "cost_microunits": 0}
-            elif registered:
-                # Snapshot only synthetic metadata. Never pass owner filesystem paths to a role.
-                config = registered["data"]
-                project_budget = config["budget"]
-                goal = config["goal"]
-                project = {"name": config["name"], "milestone": "MOCK",
-                           "model": "mock-v1", "reasoning": "NOT_APPLICABLE",
-                           "seconds": project_budget["seconds"], "cost_limit": project_budget["cost_microunits"],
-                           "roles": config["roles"], "acceptance": config["acceptance"],
-                           "revision": registered["revision"]}
-            else:
-                raise Blocked("Unknown project")
-            global_budget = catalog["global_budget"]
-            budget = {key: min(value, global_budget[key]) for key, value in project_budget.items()}
-            self.run = []
-            self.ids = {"project_id": project_id, "task_id": uuid4().hex,
-                        "run_id": uuid4().hex, "generation": self.count + 1}
-            return self.emit(
-                "run_started", State.PRECHECK, project=project, budget=budget,
-                global_budget=global_budget, project_budget=project_budget,
-                scenario=scenario.value, deadline=time() + (
-                    0 if scenario is Scenario.TIME_LIMIT else budget["seconds"]),
-                token_limit=0 if scenario is Scenario.TOKEN_LIMIT else budget["tokens"],
-                goal=goal, instruction=INSTRUCTION_VERSION, policy_hash=POLICY_HASH,
-                git_before="NOT_APPLICABLE", git_after="NOT_APPLICABLE", owned_children=[],
-            )
+            return self.start_run(project_id, scenario, freeze_project(project_id, catalog))
         if not self.run or expected_run != self.ids["run_id"]:
             raise Blocked("Explicit current run ID required")
         latest = self.run[-1]
@@ -343,6 +454,16 @@ class _Session:
         self.emit("role_started", phase, **evidence)
         adapter = MockAdapter(lambda: mock_role(phase, Scenario(start["scenario"]), self.run))
         result, tool_audit = normalize_mock(adapter.stream(request))
+        status = "failed" if result["result"] == "FAIL" else "completed"
+        binding = Binding(self.ids["project_id"], self.development_id, self.ids["run_id"],
+                          self.ids["generation"], evidence["agent_run_id"], evidence["context_id"],
+                          evidence["context_id"], evidence["agent_run_id"])
+        audit = normalize_stream(binding, tuple(
+            Packet(binding, seq, uuid4().hex, {"method": method, "params": {
+                "turn": {"id": binding.turn_id, "status": state}}})
+            for seq, (method, state) in enumerate((
+                ("turn/started", "inProgress"), ("turn/completed", status)), 1)
+        ))
         elapsed = monotonic() - started
         if result["result"] == "FAIL":
             next_state = State.FAILED
@@ -354,6 +475,20 @@ class _Session:
         if time() >= approval["expires"] and next_state != State.FAILED:
             next_state = State.BLOCKED
             result = {**result, "reason": "APPROVAL_EXPIRED"}
+        if self.development_id and phase is State.PLANNING and next_state is State.DEVELOPING:
+            result["selected_task"] = {"goal_hash": start["goal_hash"], "cycle": start["cycle"],
+                                       "acceptance": start["acceptance"], "basis": start["selection_ref"]}
+        if self.development_id and next_state is State.COMPLETED:
+            proof = prior["handoff_ref"] if (prior and prior.get("role") == "Verifier"
+                                              and prior.get("result") == "PASS") else None
+            proposal = mock_next(start["goal_hash"], proof)
+            try:
+                validate_proposal(proposal, start["goal_hash"], proof)
+            except Blocked:
+                next_state = State.BLOCKED
+                result["reason"] = "INVALID_MANAGER_PROPOSAL"
+            else:
+                result["manager_proposal"] = proposal
         handoff_ref = digest([evidence["input_contract_hash"], result, next_state.value])
         return self.emit(
             "role_finished", next_state, **evidence, **result, elapsed_seconds=elapsed,
@@ -363,4 +498,5 @@ class _Session:
             usage_kind="SYNTHETIC", estimated_tokens="UNKNOWN", synthetic_cost_microunits=0,
             tool_audit=tool_audit, diff_ref=digest(result["diff"]) if "diff" in result else None,
             handoff_ref=handoff_ref, scope_released=True,
+            provider_audit_fixture=audit,
         )

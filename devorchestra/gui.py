@@ -33,6 +33,9 @@ EVIDENCE_FIELDS = (
     "context_id", "requested_model", "requested_reasoning", "role_budget", "input_contract_hash", "input_refs",
     "usage_kind", "estimated_tokens", "synthetic_cost_microunits", "tool_audit", "diff_ref", "handoff_ref",
     "scope_released", "budget", "global_budget", "project_budget",
+    "development_id", "cycle", "selection", "selection_ref", "goal_hash", "guidance_hash",
+    "selected_task", "manager_proposal", "provider_audit_fixture", "limits", "max_cycles", "max_retries",
+    "cycles", "completed", "acceptance", "task_limits",
 )
 
 
@@ -55,6 +58,11 @@ def audit_rows(view, run_id=None, role=None):
 def evidence_text(event):
     fields = {key: event[key] for key in EVIDENCE_FIELDS if key in event}
     return json.dumps(fields, ensure_ascii=False, indent=2)
+
+
+def meter(used, limit):
+    filled = min(8, int(8 * used / limit)) if limit else 0
+    return "■" * filled + "□" * (8 - filled)
 
 
 def label(parent, text="", size=10, fg=INK, bg=PANEL, bold=False):
@@ -270,6 +278,11 @@ class CommandCenter:
         run, current = view["run"], view["global_run"]
         state = view["global_state"]
         global_project = current["project"]["name"] if current else "No run"
+        development = view["global_development"]
+        if development and not development["end"]:
+            global_project = view["project_names"][development["start"]["project_id"]]
+            if not development["current"] or state == "COMPLETED":
+                state = "SESSION READY"
         self.global_badge.configure(text=f"GLOBAL / {state} · {global_project}", fg=color(state))
         self.project_states.configure(text="\n".join(
             f"{view['project_names'][key]} · {status}" for key, status in
@@ -285,6 +298,25 @@ class CommandCenter:
                      f"\nAcceptance · {configured['acceptance'][0]}"
                      f"\nDeclared Git SHA · {configured['git_sha'] or 'UNKNOWN'}"
                      f"\nDeclared block · {configured['block_reason'] or 'none'}")
+        session = view["development"]
+        if session:
+            start, end = session["start"], session["end"]
+            current_work = session["current"]
+            reason = (end or (current_work[-1] if current_work else {})).get("reason", "")
+            session_state = end["state"] if end else current_work[-1]["state"] if current_work else "READY"
+            limits = start["limits"]
+            deadline = datetime.fromtimestamp(start["deadline"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            selected = current_work[0]["selection"] if current_work else "Awaiting first task"
+            goal += (f"\nSession {start['development_id'][:8]} · {session_state} {reason}"
+                     f"\nCycle {session['cycles']}/{start['max_cycles']} · {session['completed']} verified · "
+                     f"Rework {session['retries']}/{start['max_retries']}"
+                     f"\n{meter(session['tokens'], limits['tokens'])} {session['usage_kind']} · "
+                     f"{session['tokens']}/{limits['tokens']} tokens"
+                     f"\n{meter(session['cost'], limits['cost_microunits'])} "
+                     f"{session['cost']}/{limits['cost_microunits']} synthetic µcost"
+                     f"\n{meter(session['recorded_wall_seconds'], limits['seconds'])} recorded wall "
+                     f"{session['recorded_wall_seconds']:.1f}/{limits['seconds']}s · deadline {deadline}"
+                     f"\nSelection · {selected} · Session control via CLI")
         self.goal.configure(text=goal, wraplength=350)
         self.gates.configure(text="\n".join(
             f"{gate['name']}   {gate['state']}" +

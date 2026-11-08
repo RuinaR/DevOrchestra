@@ -1,5 +1,7 @@
 # ChatGPT 전달용 요약
 
+P2.3 기준 `92280880309ac358dd193eb66d7bb997cc4413b0`. 기존 단일 슬롯과 원장에 재시작 가능한 장기 Mock 세션, 동결 설정, 누적·계층 예산, Manager 제안 검증과 오프라인 App Server 이벤트 감사를 연결했다. 기존 32건과 신규 7건, CLI 흐름 PASS. Command Center는 세션 진행과 상세 기록을 표시한다. 실제 GUI와 제공자 연결은 미검증이며 OS 격리·반출·Codex는 BLOCKED다. 다음은 승인된 독립 VM에서 P2 A/B/C 실측이다.
+
 P2.2 기준 `9551db4e7288e9db0a9830c1f370f56d0bb73141`. 별도 해시 체인 프로젝트 등록부, revision 기반 설정 편집, 역할별 모델 선호값/예산, 합성 스트림 정규화, 승인 만료 및 상세 감사가 추가됐다. Command Center/CLI에서 설정을 관리하며 등록은 권한이 아니다. Windows 회귀 26건과 신규 계약 6건, CLI 흐름 PASS. 실제 GUI와 제공자 계측은 NOT VERIFIED이며 P2 A/B/C 실측 전 Codex·임의 실행·운영 서비스는 BLOCKED다.
 
 P2.1 기준 `24fc3e74f8f1ef483b00c4677a97639b02061a6f`. Job 실패 경로의 종료와 핸들 정리를 보강했고 종료 영수증 유실 시 재실행 차단을 검증했다. 메모리 내 합성 번들 검역은 경로·목록·크기·SHA-256·UTF-8을 검사한다. 26건 및 기존 CLI PASS. A는 제한적 실제 Job PASS, B 및 C의 게스트 검증은 BLOCKED다. 현재 Windows는 `Core`이며 Sandbox 표준 실행 파일과 `Get-VM`을 확인하지 못했다. 다음 단계는 승인된 전용 VM의 거부·회수 시험이다. P3/Codex는 BLOCKED다.

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from .catalog import Catalog, DEFAULT_BUDGET
 from .dashboard import project_view
+from .development import session_view
 from .lease import Blocked
 from .ledger import digest
 from .runtime import PHASES, PROJECTS
@@ -67,6 +68,8 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "registration": registration,
         "catalog_version": catalog["version"],
         "configured_global_budget": catalog["global_budget"],
+        "development": session_view(events, project_id),
+        "global_development": session_view(events),
         "project_state": view["state"],
         "project_states": {key: project_view(events, key)["state"] for key in names},
         "global_state": global_view["state"],

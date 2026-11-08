@@ -2,7 +2,18 @@
 
 **한 번에 한 프로젝트 · 한 작업 · 한 에이전트만 실행하는 로컬 AI 개발 오케스트레이터.**
 
-> 현재 상태는 **P2.2 프로젝트 등록부 및 Mock 역할 실행 계약**입니다. 실제 Codex, 외부 프로젝트 실행 및 게스트 OS 격리는 BLOCKED입니다.
+> 현재 상태는 **P2.3 장기 합성 개발 세션 및 오프라인 이벤트 감사**입니다. 실제 Codex, 외부 프로젝트 실행 및 게스트 OS 격리는 BLOCKED입니다.
+
+```powershell
+$session = (python -B -m devorchestra session-start --project fixture-a --cycles 2 --tokens 10 | ConvertFrom-Json).development_id
+$run = (python -B -m devorchestra session-next $session | ConvertFrom-Json).run_id
+python -B -m devorchestra step $run
+python -B -m devorchestra approve $run
+python -B -m devorchestra run $run
+python -B -m devorchestra session-status --project fixture-a
+```
+
+두 번째 작업은 같은 `session-next`와 작업별 승인 흐름을 사용합니다. 종료 전 `session-next`로 마지막 판정과 제한을 반영하거나, 작업을 먼저 종료한 뒤 `session-stop`으로 세션을 닫습니다. 재시작은 누적 기록을 보존하고 실행을 자동 재개하지 않습니다. [세션 및 감사 계약](docs/ARCHITECTURE-ROADMAP.md#p23-세션과-이벤트-감사)
 
 Command Center의 `Register`, `Project settings`, `Global limits`에서 JSON 설정을 편집할 수 있습니다. Trusted Controller가 형식과 수정 버전을 검증한 뒤 로컬 등록부에 저장합니다. 등록한 프로젝트에서도 실행은 합성 워크플로와 명시적 승인으로 제한됩니다. 입력 설정에는 비밀이나 원문 로그를 붙여넣지 마세요.
 

@@ -9,6 +9,7 @@ import sys
 
 from .catalog import Catalog, new_project
 from .dashboard import project_view, render
+from .development import session_view
 from .lease import Blocked
 from .ledger import Ledger, canonical
 from .runtime import Runner, Scenario
@@ -38,11 +39,36 @@ def main():
     commands.add_parser("project-list")
     commands.add_parser("project-save").add_argument("--revision", type=int, default=0)
     commands.add_parser("limits-save").add_argument("--revision", type=int, required=True)
+    development = commands.add_parser("session-start")
+    development.add_argument("--project", default="fixture-a")
+    development.add_argument("--seconds", type=int, default=600)
+    development.add_argument("--tokens", type=int, default=20)
+    development.add_argument("--cost-microunits", type=int, default=0)
+    development.add_argument("--cycles", type=int, default=2)
+    development.add_argument("--retries", type=int, default=0)
+    development.add_argument("--task-limits", type=json.loads)
+    for action in ("session-next", "session-stop"):
+        commands.add_parser(action).add_argument("development_id")
+    commands.add_parser("session-status").add_argument("--project")
     args = parser.parse_args()
     try:
         if os.name != "nt" or not os.environ.get("LOCALAPPDATA"):
             raise Blocked("Windows LOCALAPPDATA required")
         ledger = Ledger(Path(os.environ["LOCALAPPDATA"]) / "DevOrchestra" / "p1.sqlite3")
+        if args.action == "session-start":
+            print(canonical(Runner(ledger).development(
+                "start", project=args.project, cycles=args.cycles, retries=args.retries,
+                task_limits=args.task_limits,
+                limits={"seconds": args.seconds, "tokens": args.tokens, "cost_microunits": args.cost_microunits},
+            )))
+            return
+        if args.action in ("session-next", "session-stop"):
+            print(canonical(Runner(ledger).development(args.action.removeprefix("session-"),
+                                                        development_id=args.development_id)))
+            return
+        if args.action == "session-status":
+            print(canonical(session_view(ledger.read(), args.project)))
+            return
         if args.action == "project-template":
             print(json.dumps(new_project(args.project_id, args.name, args.goal), indent=2, ensure_ascii=True))
             return
