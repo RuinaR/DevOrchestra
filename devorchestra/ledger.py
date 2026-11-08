@@ -49,6 +49,7 @@ class Ledger:
         with self.path.open("xb"):
             pass
         with closing(self.connect("rw")) as db, db:
+            db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
             db.execute("CREATE TABLE anchor (version INTEGER, seq INTEGER, hash TEXT)")
             db.execute("CREATE TABLE events (seq INTEGER PRIMARY KEY, payload TEXT, hash TEXT)")

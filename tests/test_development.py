@@ -142,9 +142,16 @@ class DevelopmentTests(unittest.TestCase):
         approval = self.command("approve")
         self.command("step")
         with patch("devorchestra.runtime.time", return_value=approval["expires"] + 1):
-            self.assertIn(self.command("step")["reason"], ("APPROVAL_EXPIRED", "TIME_LIMIT"))
+            reason = self.command("step")["reason"]
+            self.assertIn(reason, ("APPROVAL_EXPIRED", "TIME_LIMIT"))
         with self.assertRaises(Blocked):
             self.command("cancel")
+        if reason == "TIME_LIMIT":
+            with self.assertRaisesRegex(Blocked, "Shutdown"):
+                self.next()
+            key = self.runner.shutdown("request")["request_id"]
+            self.runner.shutdown("finalize", key)
+            self.runner.shutdown("resume", key)
         self.assertEqual("BLOCKED", self.next()["state"])
         self.start()
         self.run_id = self.next()["run_id"]

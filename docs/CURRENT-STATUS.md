@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.27은 합성 역할 입장 시 토큰 예비량·최신 제한을 검증하고 자동 종료 예약과 복구 표시를 연결했다. Windows 회귀 91건(기존 87건 및 신규 4건)과 PowerShell 정적 검사 PASS. 실제 VM·모델·Git 부작용 복구와 물리 정전은 미검증이다. [예산 및 복구 계약](ARCHITECTURE-ROADMAP.md#p227-토큰-예비량-및-장애-복구)
+
 P2.26 주력은 호스트 통합을 끈 전용 VirtualBox Windows 게스트, 대체는 명시적 MXC로 결정했다. 두 후보 모두 실사용 BLOCKED. 다음 별도 승인 후보는 준비된 지정 VM의 A 정상 수명주기 1회다. Windows 합성 87건 및 PowerShell 정적 검사 PASS. [백엔드 결정](P2-VM-VALIDATION.md#p226-격리-백엔드-결정)
 
 P2.25 독립 프로필 초안과 PowerShell 정적 검사 추가. 정확한 Windows 런타임 허용 목록 및 유효 정책 증거가 없어 PROFILE_UNSUPPORTED/BLOCKED다. 실제 실행 0회, Python 회귀 미실행. P2 전체와 P3는 BLOCKED다. [독립 프로필 계약](P2-MXC-VALIDATION.md#p225-독립-자기-점검-프로필의-정적-계약)

@@ -5,6 +5,7 @@ import re
 
 from .lease import Blocked, execution_slot
 from .ledger import Ledger, check_path
+from .token_reserve import validate_reserve
 
 ROLES = ("Manager", "Developer", "Reviewer", "Verifier")
 FIXTURE_IDS = frozenset(("fixture-a", "fixture-b"))
@@ -114,6 +115,7 @@ class Catalog:
     @staticmethod
     def _project(events):
         projects, setups, limits = {}, {}, dict(DEFAULT_BUDGET)
+        reserve = None
         for index, event in enumerate(events, 1):
             if event["kind"] in ("project_saved", "setup_saved"):
                 data = event["data"]
@@ -129,9 +131,15 @@ class Catalog:
             elif event["kind"] == "limits_saved":
                 validate_budget(event["data"])
                 limits = event["data"]
+            elif event["kind"] == "token_reserve_saved":
+                validate_reserve(event["data"])
+                reserve = event["data"]
             else:
                 raise Blocked("Unknown catalog event")
-        return {"projects": projects, "setups": setups, "global_budget": limits, "version": len(events)}
+        view = {"projects": projects, "setups": setups, "global_budget": limits, "version": len(events)}
+        if reserve is not None:
+            view["token_reserve"] = reserve
+        return view
 
     def read(self):
         snapshot = self._snapshot()
@@ -144,6 +152,10 @@ class Catalog:
     def save_limits(self, data, revision):
         validate_budget(data)
         return self._save("limits_saved", data, revision)
+
+    def save_token_reserve(self, data, revision):
+        validate_reserve(data)
+        return self._save("token_reserve_saved", data, revision)
 
     def save_setup(self, data):
         from .setup import environment_status, validate_setup

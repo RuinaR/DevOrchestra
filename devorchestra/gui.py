@@ -125,6 +125,7 @@ class CommandCenter:
         ttk.Button(projects, text="Register", command=lambda: self.edit_settings("new")).pack(fill="x")
         ttk.Button(projects, text="Project settings", command=lambda: self.edit_settings("edit")).pack(fill="x")
         ttk.Button(projects, text="Global limits", command=lambda: self.edit_settings("limits")).pack(fill="x")
+        ttk.Button(projects, text="토큰 예비량", command=lambda: self.edit_settings("reserve")).pack(fill="x")
         ttk.Button(projects, text="초기 설정", command=self.setup_wizard).pack(fill="x")
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
@@ -260,6 +261,7 @@ class CommandCenter:
         self.root.after(POLL_MS, self.poll)
 
     def refresh(self):
+        previous = self.view
         try:
             project_id = self.project_ids[self.project.current()]
             view = self.reader.read(project_id)
@@ -279,6 +281,12 @@ class CommandCenter:
         seq, tail = view["snapshot_version"]
         if hasattr(self, "shutdown_buttons"):
             self.render_shutdown()
+            shutdown = view["shutdown"]
+            if (previous and shutdown["state"] == "SCHEDULED"
+                    and shutdown.get("reason") in ("TOKEN_RESERVE_LOW", "TIME_LIMIT", "COST_LIMIT")
+                    and previous["shutdown"].get("request_id") != shutdown["request_id"]):
+                key = shutdown["request_id"]
+                self.root.after(900, lambda: self.shutdown_command("finalize", expected=key))
         self.observation.configure(text=f"MOCK LEDGER  /  Seq {seq} · "
                                    f"{tail[:12] or 'empty'}  /  Verified {view['as_of_utc']}")
 
@@ -425,6 +433,11 @@ class CommandCenter:
             return f"{title} · {budget['seconds']}s / {budget['tokens']} tokens / {budget['cost_microunits']} µcost"
 
         configured = budget_text("Global config", view["configured_global_budget"])
+        tokens = view.get("token_budget")
+        if tokens:
+            available = tokens["available"] if tokens["available"] is not None else "UNKNOWN"
+            configured += (f"\n{tokens['usage']} · 예비 {tokens['reserve']} · 예약 {tokens['active_reservation']}"
+                           f" · 입장 가능 {available}\n계정 한도 UNKNOWN")
         if view["registration"]:
             configured += "\n" + budget_text("Project config", view["registration"]["data"]["budget"])
         if resources["elapsed"] is None:
@@ -445,6 +458,19 @@ class CommandCenter:
                   "UNAVAILABLE": "종료 제어 BLOCKED"}
         problem = self.view["shutdown"].get("resume_problem") if self.view else None
         notice = self.shutdown_notice
+        if self.view and state in ("SCHEDULED", "READY", "RECOVERY_REQUIRED"):
+            record = self.view["shutdown"]
+            reason = {"TOKEN_RESERVE_LOW": "토큰 잔여량 부족", "TIME_LIMIT": "작업 시간 부족",
+                      "COST_LIMIT": "비용 예산 부족", "OWNERSHIP_UNKNOWN": "소유권·사용량 확인 필요",
+                      "WAIT_LIMIT": "대기 상한 초과"}.get(record.get("reason"), "사용자 요청")
+            titles[state] += " · " + reason
+            if state == "READY":
+                saved = record["checkpoint"]
+                titles[state] += (f"\n원장 #{saved['sequence']} · {saved['current_phase'] or 'IDLE'}"
+                                  f" · 확인 역할 {saved['last_completed_role'] or '없음'}"
+                                  f" · 남은 토큰 {saved['tokens_remaining']}")
+        if self.view and state in ("RUNNING", "RESUMED") and self.view.get("recovery_state") == "UNKNOWN":
+            notice = "복구 확인 필요 · USAGE_UNVERIFIED"
         if state == "SCHEDULED" and time() >= self.view["shutdown"]["deadline"]:
             notice = "대기 상한 초과 · 복구 확인 필요"
         self.shutdown_label.configure(text=("복구 확인 필요 · " + problem) if problem else notice or titles[state])
@@ -570,7 +596,9 @@ class CommandCenter:
         if mode == "edit" and registration is None:
             self.observation.configure(text="Built-in fixture or missing registration. Use Register for a new project.")
             return
-        if mode == "limits":
+        if mode == "reserve":
+            value, revision = self.view["token_policy"], self.view["catalog_version"]
+        elif mode == "limits":
             value, revision = self.view["configured_global_budget"], self.view["catalog_version"]
         elif mode == "edit":
             value, revision = registration["data"], registration["revision"]
@@ -595,7 +623,9 @@ class CommandCenter:
                     raise ValueError("Configuration input too large")
                 data = json.loads(raw)
                 catalog = Catalog(self.reader.ledger)
-                if mode == "limits":
+                if mode == "reserve":
+                    catalog.save_token_reserve(data, revision)
+                elif mode == "limits":
                     catalog.save_limits(data, revision)
                 else:
                     if mode == "edit" and (not isinstance(data, dict) or data.get("project_id") != project_id):

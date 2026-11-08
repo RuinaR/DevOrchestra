@@ -116,6 +116,9 @@ class P1Tests(unittest.TestCase):
                 self.assertEqual(("BLOCKED", reason), (result["state"], result["reason"]))
                 self.assertIn("[BLOCKED]", render(self.dashboard()))
                 self.assertEqual([], self.dashboard()["completed_phases"])
+                key = self.runner.shutdown("request")["request_id"]
+                self.runner.shutdown("finalize", key)
+                self.runner.shutdown("resume", key)
 
     def test_permission_scope(self):
         request = Request("fixture-a", "task", "run", "Manager", Capability.READ,

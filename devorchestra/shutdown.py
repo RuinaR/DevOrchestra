@@ -17,7 +17,7 @@ def shutdown_state(events):
                  if event["kind"].startswith("shutdown_")), {"state": "RUNNING"})
 
 
-def resume_problem(saved, now):
+def resume_problem(saved, now, budget_status=None):
     deadlines = [saved["session_deadline"]]
     if saved["state"] not in TERMINAL:
         deadlines.extend((saved["deadline"], saved["approval_expires"]))
@@ -27,6 +27,10 @@ def resume_problem(saved, now):
             and (saved["tokens_remaining"] is not None and saved["tokens_remaining"] < 1
                  or saved["cost_remaining"] is not None and saved["cost_remaining"] < 0)):
         return "Checkpoint budget exhausted"
+    if (saved["state"] not in TERMINAL and budget_status is not None
+            and (budget_status["available"] is None
+                 or budget_status["available"] < budget_status["next_role_max"])):
+        return "Token reserve requires owner review"
     return None
 
 
@@ -83,12 +87,13 @@ def transition(action, current, evidence, *, request_id, unresolved, now, wait_s
                     "WAIT_LIMIT" if now >= current["deadline"] else "OWNERSHIP_UNKNOWN"),
                     external_requests="UNKNOWN" if unresolved else "NONE_SYNTHETIC",
                     child_drain="UNKNOWN" if unresolved else "NO_PENDING_OWNED_WORK")
-            return _event("READY", request_id, now, checkpoint=evidence)
+            return _event("READY", request_id, now, checkpoint=evidence,
+                          **{key: current[key] for key in ("reason", "budget_status") if key in current})
     if action == "resume" and state == "READY":
         saved = current["checkpoint"]
         if unresolved or saved != evidence:
             raise Blocked("Checkpoint no longer matches the ledger or configuration")
-        problem = resume_problem(saved, now)
+        problem = resume_problem(saved, now, current.get("budget_status"))
         if problem:
             raise Blocked(problem)
         return _event("RESUMED", request_id, now, checkpoint_ref=digest(saved))

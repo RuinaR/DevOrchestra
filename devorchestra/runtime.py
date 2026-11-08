@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .adapter import Budget, MockAdapter, RoleRequest, Scope, normalize_mock
 from .catalog import Catalog
-from .development import session_view, validate_proposal
+from .development import session_view, usage_totals, validate_proposal
 from .event_audit import Binding, FIXTURE_USAGE, Packet
 from .event_journal import EventJournal, OPEN_ROLE_EVENTS
 
@@ -17,6 +17,7 @@ from .ledger import digest
 from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
 from .shutdown import HELD, UNKNOWN, checkpoint, shutdown_state, transition
+from .token_reserve import DEFAULT_RESERVE, reserve_status
 
 
 class State(str, Enum):
@@ -102,6 +103,17 @@ def require_admission(events):
         raise Blocked("Shutdown has closed admission")
     if diagnostic_unresolved(events):
         raise Blocked("Diagnostic process ownership requires recovery")
+    if pending_budget_stop(events):
+        raise Blocked("Unsettled budget stop requires a shutdown checkpoint")
+
+
+def pending_budget_stop(events):
+    for event in reversed(events):
+        if event["kind"].startswith("shutdown_") or event["kind"] == "run_started":
+            return None
+        if event["kind"] == "role_finished":
+            return event if event.get("shutdown_reason") else None
+    return None
 
 
 def mock_role(phase, scenario, history):
@@ -167,7 +179,7 @@ class Runner:
     def command(self, action, project="fixture-a", scenario=Scenario.NORMAL, expected_run=None):
         if action == "run":
             event = self.command("step", project, scenario, expected_run)
-            while event["state"] in PHASES:
+            while event["state"] in PHASES and not event.get("shutdown_reason"):
                 event = self.command("step", project, scenario, expected_run)
             return event
         with execution_slot() as abandoned:
@@ -187,7 +199,7 @@ class Runner:
                 development = session_view(events)
                 if development and not development["end"]:
                     raise Blocked("Development session owns admission")
-            catalog = Catalog(self.ledger).read() if action == "start" else None
+            catalog = Catalog(self.ledger).read() if action in ("start", "step") else None
             return session.apply(action, project, scenario, expected_run, abandoned, catalog)
 
     def shutdown(self, action, request_id=None, *, wait_seconds=10, expected_generation=None):
@@ -201,6 +213,10 @@ class Runner:
                           or any(event["kind"] == "recovery" for event in run))
             if current.get("abandoned"):
                 unresolved = True
+            unsettled = pending_budget_stop(events)
+            if action == "finalize" and current["state"] == "SCHEDULED" and unsettled:
+                current = {**current, "reason": unsettled["shutdown_reason"],
+                           "budget_status": unsettled.get("shutdown_budget")}
             evidence = None
             if (action == "finalize" and current["state"] == "SCHEDULED" and not unresolved
                     or action == "resume" and current["state"] == "READY"):
@@ -259,6 +275,9 @@ class Runner:
                 return None
             result["generation"] = generation
             result["bound_run_id"] = run[0]["run_id"] if run else None
+            unsettled = pending_budget_stop(events)
+            if unsettled:
+                result.update(reason=unsettled["shutdown_reason"], budget_status=unsettled.get("shutdown_budget"))
             return result
 
         self.ledger.update(choose)
@@ -464,10 +483,10 @@ class _Session:
         )
         if interrupted:
             if action != "recover":
-                raise Blocked("Unfinished execution requires explicit recovery")
+                raise Blocked("USAGE_UNVERIFIED: unfinished execution requires explicit recovery")
             return self.emit("recovery", State.RECOVERING,
                              agent_run_id=latest.get("agent_run_id"), role=latest.get("role", latest.get("stream_role")),
-                             result="UNKNOWN", reason="Interrupted owner", owned_children=[])
+                             result="UNKNOWN", reason="USAGE_UNVERIFIED", owned_children=[])
         if self.state in TERMINAL:
             raise Blocked("Run already terminal")
         if action == "cancel":
@@ -479,7 +498,7 @@ class _Session:
         if action == "approve" and self.state == State.NEED_APPROVAL:
             return self.approve()
         if action == "step" and self.state in (State.PRECHECK, *PHASES):
-            return self.step()
+            return self.step(catalog)
         raise Blocked("Action unavailable in current state")
 
     def request(self):
@@ -495,11 +514,29 @@ class _Session:
         return self.emit("owner_approved_mock", State.PRECHECK, request=asdict(self.request()),
                          issued=now, expires=expires, approval_id=uuid4().hex)
 
-    def step(self):
+    def schedule_budget_stop(self, reason, status=None):
+        result = None
+
+        def choose(events, _tail):
+            nonlocal result
+            current = shutdown_state(events)
+            result = transition("request", current, None, request_id=None, unresolved=False,
+                                now=time(), wait_seconds=60)
+            if result is current:
+                return None
+            result.update(reason=reason, budget_status=status, generation=self.ids["generation"],
+                          bound_run_id=self.ids["run_id"])
+            return result
+
+        self.count, self.tail = self.ledger.update(choose)
+        return result
+
+    def step(self, catalog):
         phase = self.state
         start = self.run[0]
         now = time()
         if now >= start["deadline"]:
+            self.schedule_budget_stop("TIME_LIMIT")
             return self.emit("budget", State.BLOCKED, reason="TIME_LIMIT")
         if phase == State.PRECHECK:
             request = self.request()
@@ -517,7 +554,7 @@ class _Session:
                 safe_args_hash=digest(asdict(request)),
                 approval_id=approval["approval_id"] if allowed else None,
             )
-        used = sum(e.get("synthetic_tokens", 0) for e in self.run)
+        used, spent = usage_totals(self.run)
         approval = next((e for e in reversed(self.run) if e["kind"] == "owner_approved_mock"), None)
         if approval is None or not approval["issued"] <= now < approval["expires"]:
             return self.emit("permission_expired", State.BLOCKED, reason="APPROVAL_EXPIRED")
@@ -527,11 +564,27 @@ class _Session:
                                           "tokens": start["token_limit"], "cost_microunits": 0})
         role_limits = preference["budget"] if preference else task_budget
         role_budget = {key: min(value, task_budget[key]) for key, value in role_limits.items()}
-        role_budget["tokens"] = min(role_budget["tokens"], start["token_limit"] - used)
-        spent = sum(e.get("synthetic_cost_microunits", 0) for e in self.run)
-        role_budget["cost_microunits"] = min(role_budget["cost_microunits"], task_budget["cost_microunits"] - spent)
-        if ROLE_TOKENS > role_budget["tokens"]:
+        live = freeze_project(self.ids["project_id"], catalog)
+        limit = min(start["token_limit"], live["budget"]["tokens"])
+        current_role = live["project"].get("roles", {}).get(role, {}).get("budget", live["budget"])
+        role_budget = {key: min(amount, current_role[key], live["budget"][key])
+                       for key, amount in role_budget.items()}
+        status = reserve_status(limit, used, ROLE_TOKENS, catalog.get("token_reserve", DEFAULT_RESERVE))
+        role_budget["cost_microunits"] = min(role_budget["cost_microunits"],
+                                            min(task_budget["cost_microunits"], live["budget"]["cost_microunits"]) - spent)
+        if role_budget["cost_microunits"] < 0:
+            self.schedule_budget_stop("COST_LIMIT", status)
+            return self.emit("budget", State.BLOCKED, reason="COST_LIMIT")
+        if ROLE_TOKENS > min(role_budget["tokens"], limit - used):
+            self.schedule_budget_stop("TOKEN_RESERVE_LOW", status)
             return self.emit("budget", State.BLOCKED, reason="TOKEN_LIMIT")
+        if status["available"] < ROLE_TOKENS:
+            return self.schedule_budget_stop("TOKEN_RESERVE_LOW", status)
+        role_budget["tokens"] = ROLE_TOKENS
+        live_deadline = datetime.fromisoformat(start["timestamp"]).timestamp() + live["budget"]["seconds"]
+        if now >= live_deadline:
+            self.schedule_budget_stop("TIME_LIMIT")
+            return self.emit("budget", State.BLOCKED, reason="TIME_LIMIT")
         # Persist intent before role entry. A crash before the finish event leaves UNKNOWN.
         evidence = {
             "agent_run_id": uuid4().hex, "context_id": uuid4().hex, "role": role, "phase": phase.value,
@@ -543,6 +596,8 @@ class _Session:
             "requested_model": preference["model"] if preference else None,
             "requested_reasoning": preference["reasoning"] if preference else None,
             "role_budget": role_budget, "approval_id": approval["approval_id"],
+            "token_reservation": dict(status, active_reservation=ROLE_TOKENS,
+                                      available=status["available"] - ROLE_TOKENS),
         }
         prior = next((event for event in reversed(self.run) if event["kind"] == "role_finished"), None)
         if prior and "input_contract_hash" in prior and (prior.get("scope_released") is not True
@@ -554,7 +609,7 @@ class _Session:
                               context_id=evidence["context_id"], budget=Budget(**role_budget),
                               scope=Scope(f"mock://{self.ids['project_id']}", (approval["approval_id"],)),
                               verified_input_refs=refs, goal=start["goal"],
-                              deadline_utc_epoch=min(start["deadline"], approval["expires"],
+                              deadline_utc_epoch=min(start["deadline"], live_deadline, approval["expires"],
                                                      now + role_budget["seconds"]))
         evidence.update(input_contract_hash=digest(asdict(request)), input_refs=refs)
         started = monotonic()
@@ -599,7 +654,8 @@ class _Session:
             result["reason"] = "USAGE_LIMIT"
         elif result["result"] == "FAIL":
             next_state = State.FAILED
-        elif (time() >= start["deadline"] or elapsed >= min(start["deadline"] - now, role_budget["seconds"])):
+        elif (time() >= min(start["deadline"], live_deadline)
+              or elapsed >= min(start["deadline"] - now, live_deadline - now, role_budget["seconds"])):
             next_state = State.BLOCKED
             result["reason"] = "TIME_LIMIT"
         else:
@@ -622,7 +678,16 @@ class _Session:
             else:
                 result["manager_proposal"] = proposal
         handoff_ref = digest([evidence["input_contract_hash"], result, next_state.value])
-        return self.emit(
+        next_tokens = reserve_status(limit, used + settlement["synthetic_tokens"], ROLE_TOKENS,
+                                     catalog.get("token_reserve", DEFAULT_RESERVE))
+        stop_reason = None
+        if result.get("reason") == "TIME_LIMIT":
+            stop_reason = "TIME_LIMIT"
+        elif result.get("reason") == "USAGE_LIMIT":
+            stop_reason = "TOKEN_RESERVE_LOW" if settlement["synthetic_tokens"] > role_budget["tokens"] else "COST_LIMIT"
+        elif next_state in PHASES and next_tokens["available"] < ROLE_TOKENS:
+            stop_reason = "TOKEN_RESERVE_LOW"
+        finished = self.emit(
             "role_finished", next_state, **evidence, **result, elapsed_seconds=elapsed,
             commands=[], exit_code="NOT_APPLICABLE", resource_peaks="UNKNOWN",
             measured_tokens="NOT_APPLICABLE", synthetic_tokens=settlement["synthetic_tokens"],
@@ -632,4 +697,9 @@ class _Session:
             tool_audit=tool_audit, diff_ref=digest(result["diff"]) if "diff" in result else None,
             handoff_ref=handoff_ref, scope_released=True,
             stream_settlement=settlement,
+            **({"shutdown_reason": stop_reason, "shutdown_budget": next_tokens
+                if stop_reason == "TOKEN_RESERVE_LOW" else None} if stop_reason else {}),
         )
+        if stop_reason:
+            self.schedule_budget_stop(stop_reason, next_tokens if stop_reason == "TOKEN_RESERVE_LOW" else None)
+        return finished

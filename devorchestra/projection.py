@@ -3,13 +3,15 @@ from datetime import datetime, timezone
 
 from .catalog import Catalog, DEFAULT_BUDGET
 from .dashboard import project_view
-from .development import session_view
+from .development import session_view, usage_totals
 from .event_journal import OPEN_ROLE_EVENTS
 from .lease import Blocked
 from .ledger import digest
+from .mxc_diagnostic import diagnostic_unresolved
 from .policy import live_preflight
-from .runtime import PHASES, POLICY_HASH, PROJECTS
+from .runtime import PHASES, POLICY_HASH, PROJECTS, ROLE_TOKENS, freeze_project
 from .shutdown import resume_problem, shutdown_state
+from .token_reserve import DEFAULT_RESERVE, reserve_status
 
 
 def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None):
@@ -70,8 +72,27 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
             "Checkpoint configuration changed"
             if (saved["catalog_hash"] != digest(catalog) or saved["policy_hash"] != POLICY_HASH
                 or events[-1]["kind"] != "shutdown_ready")
-            else resume_problem(saved, datetime.fromisoformat(observed_at).timestamp())
+            else resume_problem(saved, datetime.fromisoformat(observed_at).timestamp(), shutdown.get("budget_status"))
         )
+    token_policy = catalog.get("token_reserve", DEFAULT_RESERVE)
+    token_budget = None
+    if start:
+        latest_role = next((event for event in reversed(current) if event["kind"] == "role_started"), {})
+        unknown = latest.get("kind") in OPEN_ROLE_EVENTS or any(event["kind"] == "recovery" for event in current)
+        limit = min(start["token_limit"], freeze_project(project_id, catalog)["budget"]["tokens"])
+        token_budget = reserve_status(limit, usage_totals(current)[0], ROLE_TOKENS, token_policy,
+                                      active=latest_role.get("token_reservation", {}).get("active_reservation", 0)
+                                      if latest.get("kind") in OPEN_ROLE_EVENTS else 0,
+                                      verified=not unknown)
+        if unknown:
+            token_budget["reason"] = "USAGE_UNVERIFIED"
+    recovery_state = "BLOCKED"
+    if pending or job_pending or diagnostic_unresolved(events):
+        recovery_state = "UNKNOWN"
+    elif shutdown["state"] == "RECOVERY_REQUIRED":
+        recovery_state = "RECOVERY_REQUIRED"
+    elif shutdown["state"] == "READY" and not shutdown["resume_problem"]:
+        recovery_state = "RESUMABLE"
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -82,6 +103,9 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "project_names": names,
         "registration": registration,
         "shutdown": shutdown,
+        "recovery_state": recovery_state,
+        "token_policy": token_policy,
+        "token_budget": token_budget,
         "setup": catalog.get("setups", {}).get(project_id),
         "catalog_version": catalog["version"],
         "configured_global_budget": catalog["global_budget"],
