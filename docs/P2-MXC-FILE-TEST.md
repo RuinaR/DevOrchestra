@@ -1,5 +1,22 @@
 # P2.8 MXC 합성 파일 인수 시험
 
+## P2.17 빌드 및 호스트 검증 결과
+
+기준 `83f912620593ec13e9ba1d9c4e561f280cc48d6b`. Microsoft 서명이 유효한 vswhere에서 Visual Studio Build Tools 2022 및 Community 2022/2026 등록을 확인했다. 빌드에는 Build Tools 2022의 MSVC 14.44.35207 Hostx64/x64와 Windows SDK 10.0.26100.0만 사용했다. cl 19.44.35228.0, link·dumpbin 14.44.35228.0 및 컴파일러 DLL c1·c2는 AMD64이며 Microsoft 서명이 유효했다. SDK 헤더는 명시적 include 경로로 고정했다. 도구 설치나 영구 환경 변경은 없었다.
+
+첫 링크에서 컴파일러가 생성한 CRT 참조 5건을 관측했다. 고정 버퍼의 경계를 명시하고, 복사 루프와 단일 호출용 메타데이터 저장 방식을 바꿨다. 경고 검사·기본 스택 보호 옵션·/NODEFAULTLIB를 유지한 최종 빌드는 PASS다. PE32+ AMD64 콘솔, ASLR·NX 플래그, 직접 import KERNEL32.dll 1개, 지연 import 없음이다. 소스의 파일·콘솔·자체 경로·종료 API 13개만 나타났고 CRT·프로세스 조작·디버깅·입력·화면·네트워크 관련 직접 import는 없었다. Windows의 전이 의존성이나 전체 런타임 동작을 검증한 결과는 아니다.
+
+| 대상 | SHA-256 |
+| --- | --- |
+| 빌드 입력 probe.c | `ca84e6de105e405f72fe24f61944debcb95ff3eba37d2f3b10a0bbc7b4ac4b14` |
+| SDK x64 kernel32.lib | `341c7d56125a03b458e4d5093e4c79b33123ccfdfd610fe236937b8e6f3134bb` |
+| 직접 의존성의 호스트 System32 KERNEL32.dll | `e132eba4166256e2f414b91fe7d5386590bc5ea8626aee5af9c9738383cf2ae1` |
+| 호스트 시험 mxc-probe.exe | `5bcaf68f8f75cc58db781812ff84c85e541042b3b7e6504f7d6d09816e598357` |
+
+기본 도구 샌드박스에서 junction 생성이 거부되어 프로브 실행 전에 멈췄다. 합성 디렉터리 상태를 다시 확인한 뒤 도구 승인 경로로 junction을 준비했으며 Windows 권한 상승은 없었다. 자체 점검은 `MXC_NATIVE_OK`, 종료 0이었다. 추가 인자와 잘못된 작업 디렉터리는 각각 종료 2로 거부했다. 호스트 파일 양성 대조에서 일곱 경로 읽기·쓰기 코드가 모두 0이었다. 호스트이므로 보호 표식도 예상대로 변경됐으며 첫 바이트·전후 해시를 대조하고 초기 해시로 복원했다. 두 junction은 불변이었다. 합성 표식·junction은 정리했고 해시로 고정한 EXE는 Git 추적 제외 build 디렉터리에 보존했다.
+
+MXC 호출은 0회다. 다음 별도 승인 범위는 이 해시의 EXE와 기존 프로필을 사용한 MXC `--self-test` 정확히 1회다. MXC 파일 시험·비간섭·외부 Job 결합은 후속 검증이며 P2 전체와 P3는 BLOCKED다.
+
 ## P2.16 Python 독립 네이티브 프로브
 
 [소스](../tools/mxc-probe/probe.c)는 Win32 C 단일 파일이다. `--self-test`는 stdout에 `MXC_NATIVE_OK` 한 줄을 출력한다. `--file-test`는 실행 파일이 `mxc-native-<소문자 GUID 32자리>\work\mxc-probe.exe`이고 현재 디렉터리가 그 work인 경우에만 진행한다. 임의 경로 인자는 받지 않는다. 위 시험의 일곱 경로를 고정하며 보호 파일의 상대·절대 요청을 구분한다. `CreateFileW`의 읽기·쓰기 요청을 분리하고 기존 파일만 연다. 열기에 성공하면 실제 I/O 전에 같은 핸들의 정규 경로와 일반 파일·링크 수·크기를 확인한다. 정규 경로는 junction의 의도된 표식 파일과 일치해야 한다. 호스트의 승인된 루트·junction·파일 사전 확인을 대체하지 않는다. [Microsoft 핸들 경로 확인](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)

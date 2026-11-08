@@ -80,7 +80,9 @@ static BOOL locate_fixture(void)
     while (work_end && module[work_end - 1] != L'\\') --work_end;
     if (!work_end || !same(module + work_end, L"mxc-probe.exe"))
         return FALSE;
-    module[--work_end] = 0;
+    --work_end;
+    if (work_end >= PATH_CAP) return FALSE;
+    *(module + work_end) = 0;
     length = GetCurrentDirectoryW(PATH_CAP, cwd);
     if (!length || length >= PATH_CAP || !same(module, cwd))
         return FALSE;
@@ -104,17 +106,21 @@ static BOOL locate_fixture(void)
 
 static BOOL make_path(WCHAR *buffer, DWORD offset, const WCHAR *suffix)
 {
+    /* Keep this bounded copy independent of compiler-emitted CRT memcpy. */
+    volatile WCHAR *destination = buffer + offset;
     DWORD i = 0;
     if (offset + root_length + lstrlenW(suffix) >= PATH_CAP) return FALSE;
-    for (; i < root_length; ++i) buffer[offset + i] = module[i];
-    do { buffer[offset + i] = *suffix; ++i; } while (*suffix++);
+    for (; i < root_length; ++i) destination[i] = module[i];
+    do { destination[i++] = *suffix; } while (*suffix++);
     return TRUE;
 }
 
 /* FALSE means the fixture or the probe failed, not that Windows denied I/O. */
 static BOOL attempt(const Target *target, BOOL write, DWORD *code)
 {
-    BY_HANDLE_FILE_INFORMATION info;
+    /* One invocation at a time. Avoid an address-taken stack aggregate at
+       this CRT-free entry point, which does not initialize a GS cookie. */
+    static BY_HANDLE_FILE_INFORMATION info;
     DWORD count, length;
     char byte = 'X';
     BOOL ok = FALSE;
