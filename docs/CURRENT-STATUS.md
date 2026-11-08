@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.8 재시험 기준 `d14c0b8ab9b73e0827e18d70e5be599574580ef6`. 새 루트에서 호스트 대조 7개 PASS, `SystemDrive`를 보완한 MXC 1회는 `LOCALAPPDATA` 요구로 준비 단계에서 종료 코드 1이었다. SHA-256과 junction 대상은 동일하다. 파일 경계와 MXC 원장 보호는 NOT VERIFIED이며 P3는 BLOCKED다. [재시험 기록](P2-MXC-FILE-TEST.md#2026-11-09-별도-승인-재시험)
+
 P2.8 재시험 준비 기준 `fe1f1e2dc145833398ee2ffe9ceed11648ca362d`. 이전 합성 루트와 시험용 Codex 홈을 읽기 전용으로 확인하고 보존했다. Windows 시스템 디렉터리에서 확인한 드라이브를 최소 환경에 전달하는 안을 확정했다. 재시험은 새 승인 대기이며 B 파일 경계와 C의 MXC 원장 보호는 NOT VERIFIED, P3는 BLOCKED다. [최소 환경 수정안](P2-MXC-FILE-TEST.md#재시험용-최소-환경-수정안)
 
 P2.8 실행 기준 `96125464afb62848999647e1aaa5fa578c1dfcef`. 호스트 양성 대조는 일곱 대상 모두 PASS였다. MXC 1회는 시험 환경의 `SystemDrive` 누락으로 준비 단계에서 종료 코드 1을 반환했다. 모든 전후 표식 해시와 junction 대상은 동일했으나 MXC 파일 접근 결과는 미측정이다. A 기존 증거와 C 합성 검역만 유지한다. B 파일 경계와 C의 MXC 원장 보호는 NOT VERIFIED이며 P3는 BLOCKED다. [실행 결과](P2-MXC-FILE-TEST.md#2026-11-09-실행-결과)

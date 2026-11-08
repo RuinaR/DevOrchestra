@@ -1,5 +1,7 @@
 # ChatGPT 전달용 요약
 
+P2.8 별도 승인 재시험은 `SystemDrive`를 교차 검증해 전달했다. 호스트 양성 대조 일곱 대상 PASS, MXC는 준비 중 `LOCALAPPDATA` 요구로 종료 코드 1이었다. 해시와 junction 대상은 그대로였고 대상별 접근 거부는 미측정이다. 실제 사용자 환경을 추가하거나 재시도하지 않았다. B/C MXC 경계는 NOT VERIFIED, P3는 BLOCKED다. [재시험 기록](P2-MXC-FILE-TEST.md)
+
 P2.8 재시험 준비에서 이전 합성 루트·Codex 홈을 읽기 전용으로 확인하고 보존했다. CLI `0.167.0-alpha.3.2`에서 앞서 관측한 `SystemDrive` 요구 오류를 근거로 Windows 시스템 디렉터리에서 검증한 값을 전달하는 안을 확정했다. 새 GUID 루트에서의 양성 대조와 MXC 1회는 별도 승인 대기이며 B/C MXC 경계는 NOT VERIFIED, P3는 BLOCKED다. [수정안](P2-MXC-FILE-TEST.md#재시험용-최소-환경-수정안)
 
 P2.8 합성 파일 시험은 호스트 양성 대조 7개 대상 PASS, MXC 1회는 `SystemDrive` 누락으로 준비 단계 종료 코드 1이었다. 표식 해시와 junction은 불변이며 접근 거부 실측은 없다. 재시험에는 최소 환경 수정 검토와 새 승인이 필요하다. P3는 BLOCKED다. [시험 결과](P2-MXC-FILE-TEST.md)
