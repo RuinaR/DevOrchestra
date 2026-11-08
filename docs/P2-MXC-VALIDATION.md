@@ -1,5 +1,36 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.9 런처와 내부 명령의 경계
+
+기준 `c86d63b65e9b8baf4302c1f658975689371d440b`, 시험 당시 설치 CLI `0.167.0-alpha.3.2`. 아래 비교는 이전 영수증과 실행 인자를 검토한 결과다. 환경 값이나 파일 내용을 새로 수집하지 않았다.
+
+| 관측 | 신뢰 런처 | 시험 범위와 결과 |
+| --- | --- | --- |
+| 공식 시작 진단 | 보통 호스트 셸 환경을 상속했고 별도 `CODEX_HOME`은 지정하지 않았다. 실제 상속 값은 계측하지 않았다. | `:workspace`와 고정 echo가 시작됨. `MXC_OK` 및 0. |
+| 파일 시험 1회차 | 환경을 비우고 `SystemRoot`, `WINDIR`, `LOCALAPPDATA`, `ProgramData`, System32 `PATH`, 합성 `TEMP`·`TMP`·`CODEX_HOME`만 설정했다. | `mxc-file-test`에서 `SystemDrive` 요구로 준비 실패. |
+| 파일 시험 2회차 | 검증한 `SystemDrive`를 추가했고 실제 `LOCALAPPDATA`는 제외했다. | 같은 시험 프로필에서 `LOCALAPPDATA` 요구로 준비 실패. |
+
+두 파일 시험 모두 실제 파일 프로브 전에 종료됐다. 시작 진단과는 런처 환경 외에도 Codex 홈·프로필·실행 파일이 달랐다. 따라서 성공한 시작 진단에서 필수 변수 목록을 역추론할 수 없다. 현재 확인된 것은 해당 빌드가 준비 중 비어 있지 않은 유니코드 `SystemDrive`와 `LOCALAPPDATA`를 각각 요구했다는 사실이다. 공식 문서는 이 빌드의 전체 필수 목록, `USERPROFILE` 필요 여부 또는 합성 `LOCALAPPDATA` 지원을 보장하지 않는다. [OpenAI Windows 샌드박스](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+
+### 두 경계의 계약
+
+- **신뢰 런처**는 바이너리와 실행 인자를 고정하고 환경을 비운 뒤 승인된 이름만 주입한다. `SystemDrive`는 Windows 시스템 디렉터리와 `SystemRoot`에 대조한다. `SystemRoot`, `WINDIR`, `ProgramData`, System32 `PATH`는 기존 부트스트랩 후보로만 유지하며 이 각각이 MXC 필수라는 증거는 없다. `TEMP`·`TMP` 및 `CODEX_HOME`은 새 GUID 루트의 승인된 경로에 둔다. 실제 `USERPROFILE`·`HOME`·`APPDATA`, 토큰·프록시·셸 사용자 설정은 상속하지 않는다. 공개 영수증에는 값 대신 변수명, 값의 출처 유형, 검증 결과를 남긴다.
+- **`LOCALAPPDATA` 선택**은 별도 승인 항목이다. Windows의 현재 계정 Known Folder를 확인한 실제 `LOCALAPPDATA`는 신뢰 런처의 초기화 입력 후보로 제안한다. 일치 여부만 기록하고 해당 디렉터리의 내용은 읽거나 복사하지 않는다. 이것이 모든 MXC 버전의 필수 경로라는 증거는 없다. 합성 경로는 비어 있지 않은 문자열 검사를 만족할 수 있어도 내부 Known Folder 조회·경로 일치·쓰기 조건이 공개 문서에 고정돼 있지 않아 지원 여부는 UNKNOWN이다. 임의 리디렉션을 전제로 후속 시험을 승인하지 않는다. [Microsoft Known Folder ID](https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid)
+- **`CODEX_HOME`**은 시험 전용 사용자 설정·상태의 위치로 사용한다. 기존 설정, 인증 파일, 로그, 규칙 및 플러그인을 복사하지 않는다. 이는 샌드박스 파일 접근 허용 목록이나 OS 사용자 프로필을 바꾸는 기능이 아니다. 이전 로컬 CLI 출력에 `CODEX_HOME` 아래 `tmp/arg0-windows` 임시 별칭 준비가 관측됐다. 합성 `TEMP`·`TMP`와 Codex 홈을 지정해도 내부 런타임과 브로커의 모든 파일 사용 위치가 제한된다고 단정할 수 없다. [OpenAI CLI 옵션](https://learn.chatgpt.com/docs/cli/reference)
+- **MXC 내부 명령**의 환경 상속과 파일 권한은 별도로 확인한다. OpenAI가 문서화한 `shell_environment_policy`는 생성되는 명령의 상속·필터 설정이다. 이 설치 빌드의 직접 `codex sandbox` 경로에서도 동일한 필터가 적용되는지, MXC가 추가하는 변수가 무엇인지는 미검증이다. 실제 경로를 런처에 넣었다고 내부 환경에서 그 문자열이 숨겨진다고 가정하지 않는다. 반대로 경로 문자열이 노출돼도 OS 파일 접근 여부는 유효 프로필과 보호 표식의 접근 거부로 판정한다. 가짜 값만 사용하는 별도 승인된 검사로 상속을 확인하기 전에는 일반 명령·모델 입력을 열지 않는다. [OpenAI 설정 참조](https://learn.chatgpt.com/docs/config-file/config-reference) · [OpenAI 권한](https://learn.chatgpt.com/docs/permissions)
+- **정책 합성**은 새 합성 홈과 비어 있는 작업 루트, 명시적 `windows.sandbox=mxc`, `--permission-profile`, `--include-managed-config`를 사용한다. 일반 설정의 기본값 및 CLI 덮어쓰기와 관리자 강제 요구사항을 구분한다. 정책 충돌, 신뢰되지 않은 프로젝트 설정, 추가 루트 또는 유효 정책이 불명확하면 중단한다. 명시적 MXC 실패에는 자동 폴백을 두지 않는다. [OpenAI 구성 우선순위](https://learn.chatgpt.com/docs/config-file/config-basic) · [관리 구성](https://learn.chatgpt.com/docs/enterprise/managed-configuration)
+
+### 별도 승인 후의 최소 시작 진단
+
+새 GUID 합성 홈·임시 디렉터리와 빈 작업 폴더만 만든다. 기존 자료와 저장 설정을 유지한다. 별도로 승인된 실제 `LOCALAPPDATA`를 신뢰 런처에만 입력하는 안을 먼저 검토한다. 그 범위를 승인하지 않으면 진단은 차단 상태다. 내부 명령은 환경을 출력하거나 파일을 여는 동작 없이 고정 echo 한 번으로 제한한다. 파일 시험과 같은 `mxc-file-test`의 파일·네트워크 정책을 적용해 부트스트랩을 비교한다. `cmd.exe`는 검증된 System32의 절대 경로를 사용한다.
+
+```powershell
+& $codex -c windows.sandbox=mxc sandbox --include-managed-config --permission-profile mxc-file-test -- $cmdExe /d /c echo MXC_OK
+$LASTEXITCODE
+```
+
+예상 표식과 종료 코드 0은 그 조합의 시작만 증명한다. 실패 시 정제한 오류와 종료 코드만 기록하고 멈춘다. 새 환경 변수 추가, 폴백 및 재시도는 자동 실행하지 않는다. 성공 후에도 새 승인과 유효 경계 확인을 거쳐 일곱 경로 시험, 접근 거부와 전후 SHA-256 검사, 별도 승인된 네트워크·프로세스 비간섭 시험 순서로 진행한다. 전역 단일 실행·Win32 Job·기존 원장과 권한 계약은 유지한다. 실제 파일·네트워크·프로세스 격리와 P3는 BLOCKED다.
+
 P2.8에서는 별도 승인된 시작 진단 1회에서 `MXC_OK`와 종료 코드 0을 관측했다. [합성 파일 시험](P2-MXC-FILE-TEST.md)은 별도 승인 대기이며 시작 관측으로 파일 경계를 판정하지 않는다.
 
 기준 SHA `71abfd91f6ac80dcd46548e44d13a4b0866eaa76`. 현재 PC에서는 MXC를 우선 검토한다. VirtualBox 다운로드·설치·VM 계획은 보류한다. 이 문서는 승인 전 읽기 전용 점검과 시험 계약이며 런타임에는 새 실행 경로가 없다.

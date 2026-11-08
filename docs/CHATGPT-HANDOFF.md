@@ -1,5 +1,7 @@
 # ChatGPT 전달용 요약
 
+P2.9 기준 `c86d63b65e9b8baf4302c1f658975689371d440b`. 이전 MXC 시작 성공과 `SystemDrive`·`LOCALAPPDATA` 준비 실패를 정적으로 비교했다. 런처 환경, 내부 명령 상속, OS 권한을 별도로 검증한다. 합성 `LOCALAPPDATA` 지원과 실제 경로의 내부 전파는 미검증이다. 다음은 별도 승인된 파일 없는 명시적 MXC 시작 진단 한 번이다. 이번에는 실행하지 않았다. P2 격리와 P3는 BLOCKED다. [런처 계약](P2-MXC-VALIDATION.md#p29-런처와-내부-명령의-경계)
+
 P2.8 별도 승인 재시험은 `SystemDrive`를 교차 검증해 전달했다. 호스트 양성 대조 일곱 대상 PASS, MXC는 준비 중 `LOCALAPPDATA` 요구로 종료 코드 1이었다. 해시와 junction 대상은 그대로였고 대상별 접근 거부는 미측정이다. 실제 사용자 환경을 추가하거나 재시도하지 않았다. B/C MXC 경계는 NOT VERIFIED, P3는 BLOCKED다. [재시험 기록](P2-MXC-FILE-TEST.md)
 
 P2.8 재시험 준비에서 이전 합성 루트·Codex 홈을 읽기 전용으로 확인하고 보존했다. CLI `0.167.0-alpha.3.2`에서 앞서 관측한 `SystemDrive` 요구 오류를 근거로 Windows 시스템 디렉터리에서 검증한 값을 전달하는 안을 확정했다. 새 GUID 루트에서의 양성 대조와 MXC 1회는 별도 승인 대기이며 B/C MXC 경계는 NOT VERIFIED, P3는 BLOCKED다. [수정안](P2-MXC-FILE-TEST.md#재시험용-최소-환경-수정안)
