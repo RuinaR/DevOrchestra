@@ -30,7 +30,10 @@ KNOWN_PREFIXES = {
 }
 HRESULTS = {b"0x80070002", b"0x80070003", b"0x80070005", b"0x80070020"}
 PLATFORM_ERROR = re.compile(rb"cannot locate required Windows platform directory: HRESULT (0x[0-9a-fA-F]{8})")
-SECURITY_ENV_ERROR = re.compile(rb"CreateProcessSecurityEnvironment failed \(HRESULT = (0x[0-9a-fA-F]{8})\)")
+SECURITY_ENV_ERROR = re.compile(
+    rb"(?:MXC launcher: failed to create the process security environment: )?"
+    rb"CreateProcessSecurityEnvironment failed \(HRESULT = (0x[0-9a-fA-F]{8})\)"
+)
 CREATE_ERROR = re.compile(rb"CreateProcessInSandbox failed: error ([0-9]{1,5}) \(0x([0-9a-fA-F]{1,8})\)")
 WIN32_ERRORS = {2, 3, 5, 32, 87, 193, 203, 577, 1260, 1314}
 

@@ -24,6 +24,9 @@ class NativeDiagnosticTests(unittest.TestCase):
              "MXC_SETUP", "HOST_SYSTEMDRIVE_REQUIRED", None),
             (b"cannot locate required Windows platform directory: HRESULT 0x80070003",
              "MXC_SETUP", "PLATFORM_DIRECTORY_FAILED", "0x80070003"),
+            (b"Error: MXC launcher: failed to create the process security environment: "
+             b"CreateProcessSecurityEnvironment failed (HRESULT = 0x80070020)",
+             "MXC_SETUP", "SECURITY_ENVIRONMENT_FAILED", "0x80070020"),
             (b"CreateProcessInSandbox failed: error 203 (0xCB)",
              "COMMAND_START", "SANDBOX_PROCESS_CREATE_FAILED", 203),
             (b"CreateProcessInSandbox failed: error 9999 (0x270F)",

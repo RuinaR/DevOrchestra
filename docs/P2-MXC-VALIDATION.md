@@ -1,5 +1,32 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.24 루트 권한 및 초기화 가설
+
+기준 `e75234b36d70aaca77b4c80f6bf99f8b81e8890c`. P2.23은 사전검사·소유 CLI 시작·종료만 CONFIRMED이며 종료 1, 표식 없음, UNRECOGNIZED_STDERR다. HRESULT와 원문은 남아 있지 않다.
+
+| 후보 | 증거와 한계 |
+| --- | --- |
+| 광범위한 루트 정책 준비와 공유 위반 | #52547의 공개 사용자 재현은 좁은 구성에 루트 읽기만 더해 초기화 오류 `0x80070020`을 재현했다. #52042에는 합성 잠금 재현과 다른 환경의 복수 사례가 있다. 이는 준비 단계가 공유 잠금과 충돌할 수 있다는 외부 관측이며, 이 호스트의 원인이나 고정 알파 빌드의 재현 증거는 아니다. |
+| 사용자 정의 프로필 해석·유효 정책 충돌 | 상속, 관리 구성, 실제 workspace roots 및 Windows 기능에 의존한다. 고정 TOML 사전검사만 통과했으며 유효 정책과 실패 단계는 UNKNOWN이다. |
+| EXE·DLL 또는 프로세스 생성 | 같은 프로필의 P2.10 System32 echo는 시작했고 P2.18/P2.23 네이티브 EXE는 호스트에서만 성공했다. Python 실패와 종료 코드도 다르다. 이미지 또는 생성 경계는 여전히 유력하지만 로더·생성·준비를 구분할 직접 증거는 없다. |
+| 고정 CLI 알파 또는 다른 초기화 문제 | 업스트림 태그를 비교했으나 다른 바이너리와 통제 비교하지 않았다. 호스트 경로·정책 준비·SDK 실패는 여전히 가능하다. |
+
+[공개 이슈 #52547](https://github.com/openai/codex/issues/52547) · [공개 이슈 #52042](https://github.com/openai/codex/issues/52042)
+
+### 고정 버전 소스와 권한 범위
+
+- `:workspace` 상속은 workspace 쓰기와 부모의 루트 읽기·임시 쓰기 설정을 가져온다. `:root = "deny"`는 부모의 같은 키를 덮어쓴다. 따라서 **현재 구성에서 해당 줄만 삭제하면 부모의 넓은 루트 읽기가 다시 활성화**된다. 임시 경로 차단 두 줄을 남겨도 일반적인 루트 읽기를 막지는 못한다. [고정 태그 프로필 해석](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/core/src/config/permissions.rs) · [고정 태그 workspace 정책](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/protocol/src/permissions.rs)
+- 고정 태그의 MXC는 논리 볼륨 목록에 맞춰 심볼릭 루트를 해석한다. 읽기 루트에는 일반적으로 로컬 볼륨과 작업에 해당하는 공유가 포함된다. 이 단계의 루트 매핑과 드라이브 하위 파일 열거는 별개다. 네이티브 정책 생성 소스는 심볼릭 루트 거부를 기본 거부로 취급하고, 볼륨 직계 하위 확장은 쓰기 루트에만 적용한다. 이 프로필은 루트에 읽기·쓰기 허용을 선언하지 않는다. 따라서 공개 이슈의 광범위한 읽기 허용 충돌을 현재 루트 거부가 같은 방식으로 일으켰다는 가설은 약하다. 다만 논리 볼륨 확인과 SDK의 정책 준비·파일 핸들 동작 전체까지 정적 소스로 입증할 수는 없다. [고정 태그 MXC 정책 변환](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/policy.rs) · [고정 태그 Windows 루트 처리](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/windows.rs)
+- `:minimal`은 특정 DLL만 허용하는 표현이 아니다. 이 태그의 플랫폼 읽기 후보에는 Windows, Program Files 계열과 ProgramData가 포함된다. `:tmpdir`은 필터링한 TEMP/TMP에 대응하며 `:slash_tmp`는 Windows에서 별도 경로로 확장되지 않는다. 이 프로필에는 deny glob이 없어 공식 문서의 glob 일치 파일 스캔을 이 실행의 근거로 삼을 수 없다. 네트워크 비활성·승인 금지는 유지하되, 선언을 OS 실측으로 보지 않는다. [OpenAI 권한 프로필](https://learn.chatgpt.com/docs/permissions) · [OpenAI Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+
+### 좁은 비교안과 입장 조건
+
+후보는 **부모 상속 없는 독립 이름**으로 설계한다. 루트 허용·glob·추가 workspace roots 없이 제한 정책을 사용한다. 자기 점검에는 승인된 합성 EXE와 필요한 Windows 런타임만 읽기 후보이며 쓰기 허용은 필요 없다. 런타임 목록을 정확히 산정할 수 없으면 `:minimal`로 조용히 확대하지 말고 차단한다. 후속 파일 시험의 쓰기 범위도 합성 work에만 제한한다. 보호 표식·원장·Controller·사용자 프로필은 허용 목록 밖에 두고, reparse·hard link 및 관리 구성으로 권한이 확대되지 않는지 확인한다. 설정만 보고 OS 파일 읽기·쓰기 거부나 EXE 실행 가능성을 확정하지 않는다.
+
+이 변경은 루트 문법 하나만 바꾸는 비교가 아니다. 현 시점에서 실제 재실행은 제안하지 않는다. 먼저 후보의 유효 접근 목록과 기본 거부, 런타임 항목, 동일 바이너리·관리 정책을 정적으로 확인한다. 통과한 경우에만 별도 승인 범위를 **동일 CLI·EXE 해시, 새 합성 원장·작업 공간, 명시적 MXC, 승인된 별도 프로필, 고정 `--self-test` 1회**로 제한한다. 성공은 해당 프로필의 이미지 시작 관측으로만 기록하고, 파일 읽기·쓰기 거부 시험은 별도 승인과 증거로 분리한다. 원인이 좁혀지지 않거나 권한이 넓어지면 실행하지 않는다. 다른 PC도 OS 격리와 비간섭 통과 전 실제 자동 개발은 차단한다.
+
+정제 분류기에 공개 보고의 정확한 MXC 보안 환경 오류 접두사를 추가했다. 일치하더라도 REPORTED_FAILURE로만 기록한다. P2.23의 원문을 복원하거나 판정을 바꾸지 않는다. 기존 런처·프로필·종료 예약은 유지했고 MXC·Python·네이티브 EXE·Codex 호출은 0회다. P2 A/B/C 전체와 P3 실제 자동 개발·커밋은 BLOCKED다.
+
 ## P2.23 승인된 수집기 실측
 
 기준 `9ad63f0bd71de77b48f0c2b54c8d400a00a272b9`. 운영 원장과 분리된 새 합성 원장 및 새 GUID 합성 홈·작업 폴더에서 P2.22 런처를 그대로 사용했다. 승인 ID·만료, 기존 CLI 경로·오프라인 서명·고정 해시, 네이티브 EXE 해시 및 고정 프로필 사전검사가 통과했다. 명시적 MXC와 `mxc-file-test`로 EXE의 `--self-test`만 정확히 1회 호출했다. 원장에는 실행 의도 1건과 정제 결과 1건이 남았다.
