@@ -2,9 +2,11 @@
 
 **한 번에 한 프로젝트 · 한 작업 · 한 에이전트만 실행하는 로컬 AI 개발 오케스트레이터.**
 
-> 현재 상태는 **P1 Mock 실행기 + P1.5 Windows Command Center + P2 소유 Job 시험 기반**입니다. 실제 Codex, 외부 프로젝트 실행 및 OS 샌드박스 집행은 BLOCKED입니다.
+> 현재 상태는 **P2.1 소유 Job 정리 보강 및 합성 산출물 검역**입니다. 실제 Codex, 외부 프로젝트 실행 및 게스트 OS 격리는 BLOCKED입니다.
 
 P2 시험은 Windows Job에서 고정 합성 프로세스만 실행합니다. 루트와 자식 트리 종료를 검증하며 CLI에는 실제 작업 실행 경로를 추가하지 않았습니다. Command Center의 Job 기록은 관측 당시의 합성 증거입니다. 슬롯의 실시간 점유와 파일·네트워크·자격증명 격리는 별도입니다. [P2 검증 범위](docs/ARCHITECTURE-ROADMAP.md#p2-격리-검증-계획)
+
+P2.1 검역은 호스트 승인 목록에 있는 합성 UTF-8 파일만 메모리에서 검사합니다. 게스트 전송·아카이브 추출·Git 반영 경로는 없습니다. [A/B/C 게이트와 필요한 승인](docs/ARCHITECTURE-ROADMAP.md#p21-게스트-시험과-산출물-회수)
 
 ## Windows Command Center
 

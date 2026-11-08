@@ -306,6 +306,7 @@ class CommandCenter:
         approval = view["safety"]["approval"]
         pending = view["unconfirmed_role"]
         safety = view["safety"]
+        baseline = safety["security_baseline"]
         live = f"Live role UNKNOWN · {pending} intent" if pending else "No recorded open role"
         gate = approval.get("decision", approval["kind"]) if approval else "NO RECORD"
         reason = latest.get("reason")
@@ -321,7 +322,9 @@ class CommandCenter:
         self.safety.configure(text="\n".join(filter(None, (
             live, f"Slot · {safety['lease']}", job_status, recovery_status,
             f"Real execution BLOCKED · {safety['block_reason']}",
-            "Files / network · OS NOT VERIFIED",
+            safety["isolation_mode"],
+            f"Files {safety['files']} / Net {safety['network']} / Credentials {safety['credentials']}",
+            f"Recorded baseline · {baseline['scope']} @ {baseline['git_sha'][:7]}",
             f"Approval {gate}" + (f" · {reason}" if reason else ""),
         ))))
         if resources["elapsed"] is None:

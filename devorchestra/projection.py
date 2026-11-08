@@ -89,8 +89,15 @@ def dashboard_projection_v1(events, tail, project_id, observed_at):
         "safety": {
             "lease": "DRAIN UNVERIFIED" if job_pending else "NOT OBSERVED",
             "sandbox": "BLOCKED",
-            "files": "REAL ACCESS BLOCKED / OS NOT VERIFIED",
-            "network": "REAL ACCESS BLOCKED / OS NOT VERIFIED",
+            "isolation_mode": "NO GUEST / WINDOWS JOB PROBE ONLY",
+            "files": "BLOCKED",
+            "network": "BLOCKED",
+            "credentials": "BLOCKED",
+            "security_baseline": {
+                "git_sha": "24fc3e74f8f1ef483b00c4677a97639b02061a6f",
+                "scope": "Win32 synthetic Job",
+                "evidence": "tests/test_job_probe.py",
+            },
             "real_execution": "BLOCKED",
             "block_reason": "Owned Job drain unverified" if job_pending else "OS isolation not verified",
             "job": last_job,

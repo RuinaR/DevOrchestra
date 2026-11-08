@@ -3,13 +3,44 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
-from devorchestra.job_probe import Probe
+from devorchestra.job_probe import KILL_EXIT, Probe, ProcessInfo, _cleanup
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger
 from devorchestra.projection import ProjectionReader
 from devorchestra.runtime import Runner
+
+
+class JobCleanupFaultTests(unittest.TestCase):
+    def test_failed_accounting_still_terminates_and_closes_all_handles(self):
+        api = Mock()
+        info = ProcessInfo()
+        info.process, info.thread = 11, 12
+        with patch("devorchestra.job_probe._wait_empty", side_effect=OSError("query failed")):
+            with self.assertRaisesRegex(OSError, "query failed"):
+                _cleanup(api, 13, info, False)
+        api.TerminateJobObject.assert_called_once_with(13, KILL_EXIT)
+        self.assertEqual([call(12), call(11), call(13)], api.CloseHandle.call_args_list)
+
+    def test_drain_timeout_closes_job_for_kill_on_close(self):
+        api = Mock()
+        info = ProcessInfo()
+        info.process, info.thread = 11, 12
+        with patch("devorchestra.job_probe._wait_empty", return_value=Mock(active=1)):
+            with self.assertRaisesRegex(Blocked, "cleanup is unverified"):
+                _cleanup(api, 13, info, False)
+        self.assertEqual([call(12), call(11), call(13)], api.CloseHandle.call_args_list)
+
+    def test_failed_thread_handle_close_still_attempts_remaining_closes(self):
+        api = Mock()
+        api.CloseHandle.side_effect = [OSError("close failed"), True, True]
+        info = ProcessInfo()
+        info.process, info.thread = 11, 12
+        with self.assertRaisesRegex(OSError, "close failed"):
+            _cleanup(api, 13, info, True)
+        self.assertEqual([call(12), call(11), call(13)], api.CloseHandle.call_args_list)
+        api.TerminateJobObject.assert_not_called()
 
 
 @unittest.skipUnless(os.name == "nt", "Windows Job contract")
@@ -82,3 +113,25 @@ class JobProbeTests(unittest.TestCase):
         self.assertEqual("DRAIN UNVERIFIED", safety["lease"])
         with self.assertRaises(Blocked):
             self.runner._probe_job(self.run_id, Probe.EXIT)
+
+    def test_lost_drain_receipt_prevents_next_role(self):
+        append = self.ledger.append
+
+        def fail_drain(count, tail, event):
+            if event["kind"] == "job_drained":
+                raise OSError("simulated receipt write failure")
+            append(count, tail, event)
+
+        def drained(_fixture, _cwd, created, _cancel):
+            created(1)
+            return {"active_processes": 0}
+
+        with patch.object(self.ledger, "append", side_effect=fail_drain), \
+                patch("devorchestra.job_probe._run_probe", side_effect=drained):
+            with self.assertRaisesRegex(OSError, "receipt write failure"):
+                self.runner._probe_job(self.run_id, Probe.EXIT)
+        self.assertEqual("job_created", self.ledger.read()[-1]["kind"])
+        self.runner = Runner(Ledger(self.ledger.path))
+        with self.assertRaisesRegex(Blocked, "drain unverified"):
+            self.command("step")
+        self.assertEqual("UNKNOWN", self.command("recover")["result"])

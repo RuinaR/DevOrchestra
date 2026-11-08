@@ -45,6 +45,9 @@ class ProjectionTests(unittest.TestCase):
                          empty["snapshot_version"], empty["project_state"]))
         self.assertIsNone(empty["resources"]["elapsed"])
         self.assertEqual([], empty["events"])
+        self.assertEqual(["BLOCKED"] * 3, [empty["safety"][name]
+                         for name in ("files", "network", "credentials")])
+        self.assertEqual("24fc3e7", empty["safety"]["security_baseline"]["git_sha"][:7])
         self.assertTrue(all(card["start"] is None for card in empty["role_cards"].values()))
         self.assertEqual("0ebe8db", empty["milestone_gates"][0]["git_sha"][:7])
         self.start()

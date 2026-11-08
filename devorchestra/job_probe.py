@@ -1,5 +1,6 @@
 """Bounded Windows Job Object probes for the trusted test runner only."""
 import ctypes as c
+from contextlib import ExitStack
 from ctypes import wintypes as w
 from enum import Enum
 import os
@@ -156,6 +157,21 @@ def _wait_empty(api, job, deadline):
         sleep(0.01)
 
 
+def _cleanup(api, job, info, drained):
+    with ExitStack() as handles:
+        handles.callback(lambda: _require(api.CloseHandle(job)))
+        if info.process:
+            handles.callback(lambda: _require(api.CloseHandle(info.process)))
+        if info.thread:
+            handles.callback(lambda: _require(api.CloseHandle(info.thread)))
+        if info.process and not drained:
+            # Accounting failure must not prevent attempting termination.
+            _require(api.TerminateJobObject(job, KILL_EXIT))
+            if (_wait_empty(api, job, monotonic() + CLEANUP_LIMIT).active
+                    or api.WaitForSingleObject(info.process, 1000) != 0):
+                raise Blocked("Owned Job cleanup is unverified")
+
+
 def _run_probe(fixture, cwd, record_created, cancel_requested):
     """Run a fixed synthetic fixture while its caller owns the durable fence."""
     if not isinstance(fixture, Probe) or not Path(cwd).is_absolute():
@@ -163,6 +179,7 @@ def _run_probe(fixture, cwd, record_created, cancel_requested):
     api = _api()
     job = _require(api.CreateJobObjectW(None, None))
     info = ProcessInfo()
+    drained = False
     try:
         limits = ExtendedLimits()
         limits.basic.flags = (JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_JOB_MEMORY
@@ -201,6 +218,7 @@ def _run_probe(fixture, cwd, record_created, cancel_requested):
             counts = _wait_empty(api, job, monotonic() + CLEANUP_LIMIT)
         if counts.active or api.WaitForSingleObject(info.process, 1000) != 0:
             raise Blocked("Owned Job drain could not be verified")
+        drained = True
         exit_code = w.DWORD()
         _require(api.GetExitCodeProcess(info.process, c.byref(exit_code)))
         return {"result": stop or ("OK" if exit_code.value == 0 else "FAIL"),
@@ -209,17 +227,4 @@ def _run_probe(fixture, cwd, record_created, cancel_requested):
                 "active_processes": counts.active, "total_processes": counts.total,
                 "job_memory_limit": configured.job_memory, "job_process_limit": configured.basic.active_limit}
     finally:
-        # A failed launch, receipt or query must never leave a resumable orphan.
-        try:
-            if info.process and _account(api, job).active:
-                _require(api.TerminateJobObject(job, KILL_EXIT))
-                if _wait_empty(api, job, monotonic() + CLEANUP_LIMIT).active:
-                    raise Blocked("Owned Job cleanup is unverified")
-        finally:
-            try:
-                if info.thread:
-                    _require(api.CloseHandle(info.thread))
-                if info.process:
-                    _require(api.CloseHandle(info.process))
-            finally:
-                _require(api.CloseHandle(job))
+        _cleanup(api, job, info, drained)

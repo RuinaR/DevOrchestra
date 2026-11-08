@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.1 기준 `24fc3e7`. `job_probe._cleanup`은 종료 확인 실패 시 소유 Job을 직접 종료 시도하고 각 핸들을 정리한다. `quarantine`은 합성 승인 목록과 바이트 검증만 제공한다. 게스트 종료 확인과 전송 계층에는 연결되어 있지 않다. A의 소유자 장애 실측과 B/C 게스트 부정 시험은 승인된 전용 VM에서 이어간다. [A/B/C와 승인 범위](ARCHITECTURE-ROADMAP.md#p21-게스트-시험과-산출물-회수)
+
 P2 기준은 `a2f650e56251c6145091d1e4686679af587b63eb`다. `job_probe.py`는 고정 합성 Win32 Job 시험만 수행한다. `_probe_job`은 CLI에 연결되지 않으며 Job 종료 기록이 없으면 `recover`도 UNKNOWN을 보존한다. `RoleAdapter`는 미연결 타입 계약이다. 다음 단계는 승인된 WSB/VM 환경에서 실제 OS 접근 거부, 소유자 장애의 종료 증거 및 안전한 산출물 회수를 검증하는 것이다.
 
 P1.5 기준은 `d256f791f4b1c088a105a7297c5ef960ca64a2f0`이다. `python -B -m devorchestra.gui`가 Tk 콘솔을 연다. `projection.py`는 `Ledger.snapshot()` 기본 읽기 모드에서만 데이터를 받고, 역행이나 계보 변경 시 현재 화면을 지운다. `tests/test_projection.py`는 창을 만들지 않는 합성 검증이다. `sandbox_profile.py`는 Windows Sandbox 제한 XML만 만들며 실행 코드가 없다. 실제 창과 P2 집행 검증은 별도다.

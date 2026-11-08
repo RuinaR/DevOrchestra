@@ -1,5 +1,9 @@
 # 현재 상태
 
+P2.1 기준 `24fc3e74f8f1ef483b00c4677a97639b02061a6f`. 실제 Win32 합성 Job 회귀와 새 Mock 정리 실패·영수증 유실 및 번들 검역을 포함해 26건 PASS. Command Center는 격리 방식, 파일·네트워크·자격증명 차단과 역사적 Job 기준 SHA를 표시한다. 실제 창은 NOT VERIFIED다.
+
+게이트 A는 제한된 Job 시나리오만 PASS다. B는 BLOCKED이며 C는 합성 검역만 PASS, 실제 게스트 보호·반출은 BLOCKED다. Windows 에디션 `Core`, Sandbox 표준 실행 파일 및 `Get-VM` 미확인으로 현재 호스트의 게스트 실행 시험을 보류했다. 시스템 설정을 변경하지 않았다. P2 전체 및 P3 진입은 BLOCKED다. [별도 승인 범위](ARCHITECTURE-ROADMAP.md#p21-게스트-시험과-산출물-회수)
+
 P1 구현 `0ebe8db5ca7a05715862383dff09cd9492cef4c5`. P1.5 기준 Git SHA `d256f791f4b1c088a105a7297c5ef960ca64a2f0`. 시작 시 로컬 main, origin/main 추적 참조 및 GitHub main이 일치했고 미커밋·무시 파일은 없었다.
 
 P2 기준은 `a2f650e56251c6145091d1e4686679af587b63eb`이다. P2 시험을 포함한 18건과 기존 CLI 흐름을 검증했다. 화면의 제품 마일스톤은 P1/P1.5 검증 커밋에 귀속되며 Mock 실행 성공으로 바뀌지 않는다.
