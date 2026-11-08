@@ -113,10 +113,17 @@ class Catalog:
 
     @staticmethod
     def _project(events):
-        projects, limits = {}, dict(DEFAULT_BUDGET)
+        projects, setups, limits = {}, {}, dict(DEFAULT_BUDGET)
         for index, event in enumerate(events, 1):
-            if event["kind"] == "project_saved":
+            if event["kind"] in ("project_saved", "setup_saved"):
                 data = event["data"]
+                if event["kind"] == "setup_saved":
+                    from .setup import validate_setup
+                    validate_setup(data)
+                    setups[data["project"]["project_id"]] = {
+                        "replica": data["replica"], "wait_seconds": data["wait_seconds"],
+                    }
+                    data = data["project"]
                 validate_project(data)
                 projects[data["project_id"]] = {"revision": index, "data": data}
             elif event["kind"] == "limits_saved":
@@ -124,7 +131,7 @@ class Catalog:
                 limits = event["data"]
             else:
                 raise Blocked("Unknown catalog event")
-        return {"projects": projects, "global_budget": limits, "version": len(events)}
+        return {"projects": projects, "setups": setups, "global_budget": limits, "version": len(events)}
 
     def read(self):
         snapshot = self._snapshot()
@@ -138,6 +145,13 @@ class Catalog:
         validate_budget(data)
         return self._save("limits_saved", data, revision)
 
+    def save_setup(self, data):
+        from .setup import environment_status, validate_setup
+        if not environment_status()["windows_x64"]:
+            raise Blocked("Setup requires Windows x64")
+        validate_setup(data, self.ledger.path.parent)
+        return self._save("setup_saved", data, 0)
+
     def _save(self, kind, data, revision):
         with execution_slot() as abandoned:
             if abandoned:
@@ -150,8 +164,13 @@ class Catalog:
                 snapshot = ([], "")
             events, tail = snapshot
             current = self._project(events)
-            if kind == "project_saved":
-                latest = current["projects"].get(data["project_id"], {"revision": 0})["revision"]
+            if kind in ("project_saved", "setup_saved"):
+                project = data["project"] if kind == "setup_saved" else data
+                latest = current["projects"].get(project["project_id"], {"revision": 0})["revision"]
+                if kind == "project_saved" and project["project_id"] in current["setups"]:
+                    from .setup import validate_setup
+                    validate_setup({"project": project, **current["setups"][project["project_id"]]},
+                                   self.ledger.path.parent)
             else:
                 latest = current["version"]
             if type(revision) is not int or latest != revision:

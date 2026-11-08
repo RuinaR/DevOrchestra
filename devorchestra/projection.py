@@ -8,7 +8,8 @@ from .event_journal import OPEN_ROLE_EVENTS
 from .lease import Blocked
 from .ledger import digest
 from .policy import live_preflight
-from .runtime import PHASES, PROJECTS
+from .runtime import PHASES, POLICY_HASH, PROJECTS
+from .shutdown import resume_problem, shutdown_state
 
 
 def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None):
@@ -62,6 +63,15 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     latest_stream = next((e for e in reversed(project_events)
                           if e["kind"] in ("stream_event", "stream_interrupted")), None)
     live = live_preflight()
+    shutdown = dict(shutdown_state(events))
+    if shutdown["state"] == "READY":
+        saved = shutdown["checkpoint"]
+        shutdown["resume_problem"] = (
+            "Checkpoint configuration changed"
+            if (saved["catalog_hash"] != digest(catalog) or saved["policy_hash"] != POLICY_HASH
+                or events[-1]["kind"] != "shutdown_ready")
+            else resume_problem(saved, datetime.fromisoformat(observed_at).timestamp())
+        )
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -71,6 +81,8 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "project_name": names[project_id],
         "project_names": names,
         "registration": registration,
+        "shutdown": shutdown,
+        "setup": catalog.get("setups", {}).get(project_id),
         "catalog_version": catalog["version"],
         "configured_global_budget": catalog["global_budget"],
         "development": session_view(events, project_id),

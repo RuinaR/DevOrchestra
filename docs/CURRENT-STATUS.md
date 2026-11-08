@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.19에서 합성 종료 예약·체크포인트·명시적 재개와 Windows x64 초기 설정 마법사를 구현했다. Windows 회귀 68건(기존 56건 및 신규 12건) PASS다. 실제 자식 취소·회수, GUI 시각 검증, 독립 패키지와 P2/P3 실연동은 미완료다. P2.18 실패 판정은 유지한다. [종료 및 배포 경계](ARCHITECTURE-ROADMAP.md#p219-종료-예약과-배포-경계)
+
 P2.18 고정 네이티브 EXE의 MXC 자기 점검 1회는 종료 1 및 기대 표식 미확인으로 FAIL이다. 정제 오류는 OTHER_REDACTED_STDERR이며 실패 단계는 미확정이다. 파일 시험·P2 전체·P3는 BLOCKED다. [진단 기록](P2-MXC-FILE-TEST.md#p218-승인된-네이티브-mxc-자기-점검)
 
 P2.17 기존 MSVC/Windows SDK로 네이티브 시험기 빌드와 PE·import 검사, 합성 호스트 확인 4건 PASS. MXC 실행 0회이며 다음 승인은 고정 바이너리 자기 점검 1회다. P2 전체와 P3는 BLOCKED다. [빌드 및 호스트 증거](P2-MXC-FILE-TEST.md#p217-빌드-및-호스트-검증-결과)

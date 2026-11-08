@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from time import monotonic
 import tkinter as tk
 from tkinter import ttk
 
@@ -11,7 +12,8 @@ from .catalog import Catalog, new_project
 from .lease import Blocked
 from .ledger import Ledger
 from .projection import ProjectionReader
-from .runtime import PROJECTS
+from .runtime import PROJECTS, Runner
+from .setup import environment_status, validate_setup
 
 BG, PANEL, TILE, EDGE = "#09121f", "#111f30", "#172a40", "#395575"
 INK, MUTED, CYAN = "#f1f6ff", "#b9cde4", "#82d8ff"
@@ -87,6 +89,7 @@ class CommandCenter:
         self.event_lookup = {}
         self.project_ids = list(PROJECTS)
         self.run_options = {}
+        self.controller = Runner(reader.ledger)
         root.title("DevOrchestra | Command Center")
         root.configure(bg=BG)
         root.geometry("1220x830")
@@ -117,6 +120,7 @@ class CommandCenter:
         ttk.Button(projects, text="Register", command=lambda: self.edit_settings("new")).pack(fill="x")
         ttk.Button(projects, text="Project settings", command=lambda: self.edit_settings("edit")).pack(fill="x")
         ttk.Button(projects, text="Global limits", command=lambda: self.edit_settings("limits")).pack(fill="x")
+        ttk.Button(projects, text="초기 설정", command=self.setup_wizard).pack(fill="x")
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
 
@@ -135,6 +139,17 @@ class CommandCenter:
         self.safety.pack(fill="x", pady=(5, 0))
         self.resources = label(safety)
         self.resources.pack(fill="x")
+        controls = tk.Frame(safety, bg=PANEL)
+        controls.pack(fill="x")
+        self.shutdown_label = label(safety, fg=AMBER)
+        self.shutdown_label.pack(fill="x")
+        self.shutdown_buttons = {}
+        for action, title in (("request", "종료 예약"), ("cancel", "예약 취소"),
+                              ("finalize", "체크포인트 저장"), ("resume", "이어서 개발")):
+            button = ttk.Button(controls, text=title, state="disabled",
+                                command=lambda action=action: self.shutdown_command(action))
+            button.pack(side="left")
+            self.shutdown_buttons[action] = button
 
         operations = tk.Frame(root, bg=BG)
         operations.grid(row=2, column=0, sticky="ew", padx=16, pady=8)
@@ -253,12 +268,18 @@ class CommandCenter:
             self.project.configure(values=[f"{name} [{key}]" for key, name in view["project_names"].items()])
             self.project.current(self.project_ids.index(project_id))
             self.render()
+        else:
+            self.view = view
         seq, tail = view["snapshot_version"]
+        if hasattr(self, "shutdown_buttons"):
+            self.render_shutdown()
         self.observation.configure(text=f"MOCK LEDGER  /  Seq {seq} · "
                                    f"{tail[:12] or 'empty'}  /  Verified {view['as_of_utc']}")
 
     def clear(self, reason):
         self.view = None
+        if hasattr(self, "shutdown_buttons"):
+            self.render_shutdown()
         self.global_badge.configure(text="GLOBAL / BLOCKED", fg=RED)
         self.observation.configure(text="READ ONLY / Ledger unavailable · no current evidence")
         self.mission.configure(text="Ledger unavailable", fg=RED)
@@ -410,6 +431,97 @@ class CommandCenter:
                                  f"Model tokens · {resources['measured_tokens']}\n"
                                  f"Cost · {resources['cost']} / cap {resources['cost_limit']}")
 
+    def render_shutdown(self):
+        state = self.view["shutdown"]["state"] if self.view else "UNAVAILABLE"
+        titles = {"RUNNING": "실행 입장 가능 · 합성 전용", "SCHEDULED": "종료 예약됨 · 신규 입장 차단",
+                  "READY": "종료 가능 · 체크포인트 저장됨", "RECOVERY_REQUIRED": "복구 확인 필요",
+                  "CANCELLED": "종료 예약 취소됨", "RESUMED": "재개 확인됨 · 자동 실행 없음",
+                  "UNAVAILABLE": "종료 제어 BLOCKED"}
+        problem = self.view["shutdown"].get("resume_problem") if self.view else None
+        self.shutdown_label.configure(text=("복구 확인 필요 · " + problem) if problem else titles[state])
+        allowed = {"RUNNING": ("request",), "RESUMED": ("request",), "CANCELLED": ("request",),
+                   "SCHEDULED": ("cancel", "finalize"), "READY": () if problem else ("resume",)}
+        for action, button in self.shutdown_buttons.items():
+            button.configure(state="normal" if action in allowed.get(state, ()) else "disabled")
+
+    def shutdown_command(self, action, *, expected=None, until=None):
+        if self.view is None:
+            return
+        state = self.view["shutdown"]
+        if expected is not None and (state.get("request_id") != expected or state["state"] != "SCHEDULED"):
+            return
+        active = self.view["global_run"]
+        configured = self.view.get("setup") if active and active["project_id"] == self.view["project_id"] else None
+        wait_seconds = (configured or {}).get("wait_seconds", 10)
+        if until is None:
+            until = monotonic() + wait_seconds
+        try:
+            if action == "finalize":
+                self.shutdown_label.configure(text="현재 작업 정리 중 · 체크포인트 저장 중")
+            event = self.controller.shutdown(action, state.get("request_id"),
+                                             wait_seconds=wait_seconds)
+        except (Blocked, OSError, sqlite3.Error, ValueError) as error:
+            if (action in ("request", "finalize") and isinstance(error, Blocked)
+                    and "Execution slot busy" in str(error) and monotonic() < until):
+                self.shutdown_label.configure(text="현재 작업 정리 중 · 안전 경계 대기")
+                self.root.after(200, lambda: self.shutdown_command(action, expected=expected, until=until))
+                return
+            self.shutdown_label.configure(text=f"복구 또는 재확인 필요 · {type(error).__name__}")
+            return
+        self.refresh()
+        if action == "request" and event["state"] == "SCHEDULED":
+            self.root.after(900, lambda: self.shutdown_command("finalize", expected=event["request_id"]))
+        elif action == "finalize" and event["state"] == "READY" and self.view is not None:
+            self.root.destroy()
+
+    def setup_wizard(self):
+        wizard = tk.Toplevel(self.root)
+        wizard.title("DevOrchestra · 초기 설정")
+        wizard.configure(bg=PANEL, padx=12, pady=12)
+        steps = ttk.Notebook(wizard)
+        steps.pack(fill="both", expand=True)
+        environment, paths, project = (tk.Frame(steps, bg=PANEL, padx=12, pady=12) for _ in range(3))
+        for tab, title in zip((environment, paths, project), ("1. 환경", "2. 복제본", "3. 프로젝트")):
+            steps.add(tab, text=title)
+        facts = environment_status()
+        label(environment, f"Windows x64 · {facts['windows_x64']}\n"
+              f"Codex on PATH · {facts['codex_found']}\nCLI 서명·버전 / MXC · NOT VERIFIED\n"
+              "실제 실행 BLOCKED · 인증정보를 입력하지 마세요.").pack(fill="x")
+        label(paths, "승인할 복제본 경로 (등록만, 복사·실행 없음)").pack(fill="x")
+        replica = ttk.Entry(paths, width=60)
+        replica.pack(fill="x")
+        label(paths, "종료 대기 상한(초, 1–60)").pack(fill="x")
+        wait = ttk.Entry(paths)
+        wait.insert(0, "10")
+        wait.pack(fill="x")
+        label(paths, f"원장 및 체크포인트 · {self.reader.ledger.path}", wraplength=520).pack(fill="x")
+        label(project, "local_path에 원본 경로를 입력하세요. 도구·네트워크·Git은 차단으로 저장합니다.").pack(fill="x")
+        editor = tk.Text(project, width=76, height=21, wrap="none")
+        self.scrollable(project, editor)
+        editor.insert("1.0", json.dumps(new_project("new-project", "New project", "Project goal"),
+                                        indent=2, ensure_ascii=False))
+        status = label(wizard, fg=AMBER)
+        status.pack(fill="x")
+
+        def save():
+            try:
+                raw = editor.get("1.0", "end")
+                if len(raw) > 131_072:
+                    raise ValueError("Configuration input too large")
+                data = {"project": json.loads(raw), "replica": replica.get(), "wait_seconds": int(wait.get())}
+                validate_setup(data, self.reader.ledger.path.parent)
+                if not self.reader.ledger.path.exists():
+                    self.controller.command("init")
+                Catalog(self.reader.ledger).save_setup(data)
+            except (Blocked, OSError, sqlite3.Error, ValueError) as error:
+                status.configure(text=str(error))
+                return
+            wizard.destroy()
+            self.refresh()
+
+        ttk.Button(wizard, text="설정 저장 · 실제 실행 차단 유지", command=save,
+                   state="normal" if facts["windows_x64"] else "disabled").pack(anchor="e")
+
     def edit_settings(self, mode):
         if self.view is None:
             return
@@ -500,7 +612,9 @@ def main():
         raise SystemExit("Windows LOCALAPPDATA required")
     path = Path(os.environ["LOCALAPPDATA"]) / "DevOrchestra" / "p1.sqlite3"
     root = tk.Tk()
-    CommandCenter(root, ProjectionReader(Ledger(path)))
+    center = CommandCenter(root, ProjectionReader(Ledger(path)))
+    if not path.exists():
+        root.after_idle(center.setup_wizard)
     root.mainloop()
 
 

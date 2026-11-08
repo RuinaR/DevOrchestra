@@ -14,6 +14,7 @@ from .event_journal import EventJournal, OPEN_ROLE_EVENTS
 from .lease import Blocked, execution_slot
 from .ledger import digest
 from .policy import Capability, Grant, Request
+from .shutdown import HELD, UNKNOWN, checkpoint, shutdown_state, transition
 
 
 class State(str, Enum):
@@ -89,7 +90,7 @@ ROLE_TOKENS = 1
 def last_run(events):
     for index in range(len(events) - 1, -1, -1):
         if events[index]["kind"] == "run_started":
-            return [e for e in events[index:] if not e["kind"].startswith("session_")]
+            return [e for e in events[index:] if not e["kind"].startswith(("session_", "shutdown_"))]
     return []
 
 
@@ -154,6 +155,11 @@ class Runner:
         self.ledger = ledger
 
     def command(self, action, project="fixture-a", scenario=Scenario.NORMAL, expected_run=None):
+        if action == "run":
+            event = self.command("step", project, scenario, expected_run)
+            while event["state"] in PHASES:
+                event = self.command("step", project, scenario, expected_run)
+            return event
         with execution_slot() as abandoned:
             if action == "init":
                 if abandoned:
@@ -161,6 +167,9 @@ class Runner:
                 self.ledger.initialize()
                 return None
             events, tail = self.ledger.snapshot(recover_journal=True)
+            shutdown = shutdown_state(events)["state"]
+            if shutdown in HELD and not (shutdown == "SCHEDULED" and action in ("cancel", "recover")):
+                raise Blocked("Shutdown has closed admission")
             session = _Session(self.ledger, len(events), tail, last_run(events))
             if session.pending_job:
                 return session.recover_job(action, expected_run)
@@ -168,13 +177,47 @@ class Runner:
                 development = session_view(events)
                 if development and not development["end"]:
                     raise Blocked("Development session owns admission")
-            if action == "run":
-                event = session.apply("step", project, scenario, expected_run, abandoned)
-                while session.state in PHASES:
-                    event = session.apply("step", project, scenario, expected_run, False)
-                return event
             catalog = Catalog(self.ledger).read() if action == "start" else None
             return session.apply(action, project, scenario, expected_run, abandoned, catalog)
+
+    def shutdown(self, action, request_id=None, *, wait_seconds=10):
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            current = shutdown_state(events)
+            run = last_run(events)
+            unresolved = (abandoned or any(event["kind"] in UNKNOWN for event in run[-1:])
+                          or any(event["kind"] == "recovery" for event in run))
+            if current.get("abandoned"):
+                unresolved = True
+            evidence = None
+            if (action == "finalize" and current["state"] == "SCHEDULED" and not unresolved
+                    or action == "resume" and current["state"] == "READY"):
+                # READY must be the latest event. Rebuild its exact input
+                # checkpoint from the preceding, independently verified prefix.
+                prefix = events
+                evidence_tail = tail
+                if action == "resume":
+                    if events[-1] != current:
+                        raise Blocked("Checkpoint is no longer the ledger head")
+                    prefix = events[:-1]
+                    evidence_tail = ""
+                    for sequence, event in enumerate(prefix, 1):
+                        evidence_tail = digest([sequence, evidence_tail, event])
+                evidence = checkpoint(run, Catalog(self.ledger).read(), session_view(prefix),
+                                      POLICY_HASH, len(prefix), evidence_tail)
+            if abandoned and current["state"] == "READY":
+                event = {**current, "kind": "shutdown_recovery_required", "state": "RECOVERY_REQUIRED",
+                         "reason": "ABANDONED_SLOT", "child_drain": "UNKNOWN", "external_requests": "UNKNOWN"}
+                del event["checkpoint"]
+                self.ledger.append(len(events), tail, event)
+                return event
+            event = transition(action, current, evidence, request_id=request_id, unresolved=unresolved,
+                               now=time(), wait_seconds=wait_seconds)
+            if event is not current:
+                if abandoned and action == "request":
+                    event["abandoned"] = True
+                self.ledger.append(len(events), tail, event)
+            return event
 
     def development(self, action, *, project="fixture-a", development_id=None, limits=None,
                     cycles=2, retries=0, task_limits=None, scenario=Scenario.NORMAL):
@@ -182,6 +225,8 @@ class Runner:
         from .catalog import validate_budget
         with execution_slot() as abandoned:
             events, tail = self.ledger.snapshot(recover_journal=True)
+            if shutdown_state(events)["state"] in HELD:
+                raise Blocked("Shutdown has closed session admission")
             work = _Session(self.ledger, len(events), tail, last_run(events))
             if abandoned or work.pending_job or work.state not in (State.IDLE, *TERMINAL):
                 raise Blocked("Previous work must be resolved before a session transition")
@@ -274,6 +319,8 @@ class Runner:
             raise Blocked("Only fixed Job fixtures are supported")
         with execution_slot() as abandoned:
             events, tail = self.ledger.snapshot(recover_journal=True)
+            if shutdown_state(events)["state"] in HELD:
+                raise Blocked("Shutdown has closed child admission")
             session = _Session(self.ledger, len(events), tail, last_run(events))
             if (abandoned or session.pending_job or session.state != State.PLANNING
                     or session.ids["project_id"] not in PROJECTS

@@ -20,6 +20,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("init")
+    shutdown = commands.add_parser("shutdown")
+    shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
+    shutdown.add_argument("--request-id")
     preflight = commands.add_parser("live-preflight", help="Check declared capabilities without running anything")
     preflight.add_argument("--requires", action="append", default=[], metavar="CAPABILITY")
     start = commands.add_parser("start")
@@ -61,6 +64,9 @@ def main():
         if os.name != "nt" or not os.environ.get("LOCALAPPDATA"):
             raise Blocked("Windows LOCALAPPDATA required")
         ledger = Ledger(Path(os.environ["LOCALAPPDATA"]) / "DevOrchestra" / "p1.sqlite3")
+        if args.action == "shutdown":
+            print(canonical(Runner(ledger).shutdown(args.transition, args.request_id)))
+            return
         if args.action == "session-start":
             print(canonical(Runner(ledger).development(
                 "start", project=args.project, cycles=args.cycles, retries=args.retries,

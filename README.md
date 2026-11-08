@@ -1,5 +1,11 @@
 # DevOrchestra
 
+## 다른 Windows PC에서 시작하기
+
+GitHub에서 소스를 내려받고 Windows x64에 Python 3.10 이상과 Tk를 준비한다. 저장소에서 `python -m devorchestra.gui`를 실행하면 새 로컬 원장에서는 초기 설정 마법사가 열린다. 기존 로컬 설정과 원장은 저장소와 별도로 유지한다. 마법사는 경로와 프로젝트 정책을 등록하며 인증정보를 받지 않는다. 설정 완료 후에도 실제 실행은 BLOCKED다. Python이 포함된 포터블 배포본은 아직 제공하지 않는다.
+
+Command Center의 종료 예약은 합성 작업의 다음 역할 입장을 막고, 안전한 체크포인트를 기록하면 Command Center를 닫는다. 재시작한 뒤 이어서 개발을 확인하면 같은 합성 세대의 입장이 다시 열리며, 역할 진행에는 기존 CLI의 명시적 명령이 필요하다. [안전 계약](docs/ARCHITECTURE-ROADMAP.md#p219-종료-예약과-배포-경계)
+
 **한 번에 한 프로젝트 · 한 작업 · 한 에이전트만 실행하는 로컬 AI 개발 오케스트레이터.**
 
 > 현재 상태는 **P2.7 네이티브 Windows MXC 우선 검토**입니다. VirtualBox 도입은 보류했습니다. 장치 호환성 시험은 별도 승인 대기이며 실제 Codex, 외부 프로젝트 실행 및 OS 격리는 BLOCKED입니다. [MXC 검토와 승인 범위](docs/P2-MXC-VALIDATION.md)
