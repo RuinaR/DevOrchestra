@@ -36,6 +36,7 @@ EVIDENCE_FIELDS = (
     "development_id", "cycle", "selection", "selection_ref", "goal_hash", "guidance_hash",
     "selected_task", "manager_proposal", "provider_audit_fixture", "limits", "max_cycles", "max_retries",
     "cycles", "completed", "acceptance", "task_limits",
+    "stream_role", "stream_receipt", "stream_settlement",
 )
 
 
@@ -49,10 +50,11 @@ def color(state):
     return CYAN
 
 
-def audit_rows(view, run_id=None, role=None):
+def audit_rows(view, run_id=None, role=None, *, include_stream=False):
     return [event for event in reversed(view["events"])
             if (run_id is None or event["run_id"] == run_id)
-            and (role is None or event.get("role", event.get("request", {}).get("role")) == role)]
+            and (role is None or event.get("role", event.get("request", {}).get("role")) == role
+                 or (include_stream and event.get("stream_role") == role))]
 
 
 def evidence_text(event):
@@ -373,8 +375,18 @@ class CommandCenter:
             job_status = "Owned Job · no receipt"
         recovery_status = (f"Recovery/stop #{recovery['sequence']} · {recovery.get('result', recovery['state'])}"
                            if recovery else "")
+        stream = view["latest_stream"]
+        stream_status = ""
+        if stream:
+            receipt = stream["stream_receipt"]
+            item = receipt.get("record")
+            if item:
+                stream_status = (f"Mock committed #{stream['sequence']} · {item['method']}\n"
+                                 f"Event {item['event_id'][:10]} · provider usage UNKNOWN")
+            else:
+                stream_status = f"Mock stream #{stream['sequence']} · recovery pending"
         self.safety.configure(text="\n".join(filter(None, (
-            live, f"Slot · {safety['lease']}", job_status, recovery_status,
+            live, f"Slot · {safety['lease']}", job_status, recovery_status, stream_status,
             f"Real execution BLOCKED · {safety['block_reason']}",
             safety["isolation_mode"],
             f"Files {safety['files']} / Net {safety['network']} / Credentials {safety['credentials']}",
@@ -458,12 +470,12 @@ class CommandCenter:
         if self.view:
             role = self.role_filter.get()
             rows = audit_rows(self.view, self.run_options.get(self.run_filter.get()),
-                              None if role == "All roles" else role)
+                              None if role == "All roles" else role, include_stream=True)
         self.audit_count.configure(text=f"{len(rows)} verified receipts")
         for event in rows:
             key = str(event["sequence"])
             self.event_lookup[key] = event
-            actor = event.get("role", event.get("request", {}).get("role", "Runner"))
+            actor = event.get("role", event.get("stream_role", event.get("request", {}).get("role", "Runner")))
             self.tree.insert("", "end", iid=key,
                              values=(key, actor, event["kind"], event["state"]))
         key = selected[0] if selected and selected[0] in self.event_lookup else next(iter(self.event_lookup), None)

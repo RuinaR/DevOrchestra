@@ -1,6 +1,8 @@
 """Pure development-session projection and Manager decision checks."""
 from datetime import datetime
 
+from .event_audit import FIXTURE_USAGE
+from .event_journal import OPEN_ROLE_EVENTS
 from .lease import Blocked
 
 DECISIONS = {
@@ -11,6 +13,22 @@ DECISIONS = {
     "GOAL_COMPLETE": "COMPLETED",
     "NO_PROGRESS": "NO_PROGRESS",
 }
+
+
+def usage_totals(events):
+    tokens, cost = {}, {}
+    for event in events:
+        if event["kind"] == "role_finished":
+            amounts = event
+        elif event["kind"] == "stream_event" and event["stream_receipt"]["record"]["method"] == FIXTURE_USAGE:
+            record = event["stream_receipt"]["record"]
+            amounts = {"synthetic_tokens": record["tokens"], "synthetic_cost_microunits": record["cost_microunits"]}
+        else:
+            continue
+        key = event["agent_run_id"]
+        tokens[key] = max(tokens.get(key, 0), amounts["synthetic_tokens"])
+        cost[key] = max(cost.get(key, 0), amounts["synthetic_cost_microunits"])
+    return sum(tokens.values()), sum(cost.values())
 
 
 def session_view(events, project=None):
@@ -27,15 +45,15 @@ def session_view(events, project=None):
     completed = sum(run[-1]["state"] == "COMPLETED" for run in runs.values())
     end = next((e for e in history if e["kind"] == "session_ended"), None)
     finishes = [e for e in history if e["kind"] == "role_finished"]
-    usage_unknown = (bool(latest and latest[-1]["kind"] == "role_started")
+    tokens, cost = usage_totals(history)
+    usage_unknown = (bool(latest and latest[-1]["kind"] in OPEN_ROLE_EVENTS)
                      or any(e["kind"] in ("recovery", "job_recovery_blocked") for e in history))
     return {
         "start": start, "end": end, "cycles": len(runs), "completed": completed,
         "runs": [{"run_id": run[0]["run_id"], "state": run[-1]["state"],
-                   "tokens": sum(e.get("synthetic_tokens", 0) for e in run),
+                   "tokens": usage_totals(run)[0],
                    "selection": run[0]["selection"]} for run in runs.values()],
-        "current": latest, "tokens": sum(e["synthetic_tokens"] for e in finishes),
-        "cost": sum(e["synthetic_cost_microunits"] for e in finishes),
+        "current": latest, "tokens": tokens, "cost": cost,
         "role_seconds": sum(e["elapsed_seconds"] for e in finishes),
         "recorded_wall_seconds": max(0, datetime.fromisoformat(history[-1]["timestamp"]).timestamp()
                                      - start["started_epoch"]),

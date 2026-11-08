@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from .catalog import Catalog, DEFAULT_BUDGET
 from .dashboard import project_view
 from .development import session_view
+from .event_journal import OPEN_ROLE_EVENTS
 from .lease import Blocked
 from .ledger import digest
 from .runtime import PHASES, PROJECTS
@@ -24,7 +25,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     latest = current[-1] if current else {}
     global_events = global_view["events"]
     global_latest = global_events[-1] if global_events else {}
-    pending = global_latest if global_latest.get("kind") == "role_started" else {}
+    pending = global_latest if global_latest.get("kind") in OPEN_ROLE_EVENTS else {}
     phases = []
     for phase, role in PHASES.items():
         began = next((e for e in current if e.get("phase") == phase.value
@@ -34,7 +35,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         if ended:
             status = ended["state"] if ended["state"] in ("FAILED", "BLOCKED") else "RECORDED OK"
         elif began:
-            status = "UNKNOWN" if latest["kind"] == "role_started" else latest["state"]
+            status = "UNKNOWN" if latest["kind"] in OPEN_ROLE_EVENTS else latest["state"]
         else:
             status = "NEXT" if view["state"] == phase.value else "WAITING"
         phases.append({"phase": phase.value, "role": role, "state": status,
@@ -57,6 +58,8 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     recovery = next((dict(event, sequence=seq) for seq, event in reversed(list(enumerate(events, 1)))
                      if event["kind"] in ("recovery", "job_recovery_blocked", "cancelled")
                      or (event["kind"] == "job_drained" and event.get("result") == "CANCELLED")), None)
+    latest_stream = next((e for e in reversed(project_events)
+                          if e["kind"] in ("stream_event", "stream_interrupted")), None)
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -77,7 +80,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "run": start,
         # P1 records intent, not a live liveness observation. Never assert an active role.
         "active_role": None,
-        "unconfirmed_role": pending.get("role"),
+        "unconfirmed_role": pending.get("role", pending.get("stream_role")),
         "unconfirmed_agent_run_id": pending.get("agent_run_id"),
         "pipeline_phases": phases,
         "milestone_gates": [
@@ -121,6 +124,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
             "latest": latest,
         },
         "events": project_events,
+        "latest_stream": latest_stream,
     }
 
 

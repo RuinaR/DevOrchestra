@@ -8,7 +8,8 @@ from uuid import uuid4
 from .adapter import Budget, MockAdapter, RoleRequest, Scope, normalize_mock
 from .catalog import Catalog
 from .development import session_view, validate_proposal
-from .event_audit import Binding, Packet, normalize_stream
+from .event_audit import Binding, FIXTURE_USAGE, Packet
+from .event_journal import EventJournal, OPEN_ROLE_EVENTS
 
 from .lease import Blocked, execution_slot
 from .ledger import digest
@@ -229,6 +230,17 @@ class Runner:
                 last = previous[-1]
                 if last["state"] != "COMPLETED" or view["usage_kind"] == "UNKNOWN":
                     return finish("BLOCKED", last.get("reason", f"PREVIOUS_{last['state']}"))
+                approval = next((e for e in reversed(previous) if e["kind"] == "owner_approved_mock"), None)
+                if approval is None or not approval["issued"] <= time() < approval["expires"]:
+                    return finish("BLOCKED", "PREVIOUS_APPROVAL_EXPIRED")
+                if "stream_settlement" in last:
+                    roles = [e for e in previous if e["kind"] == "role_finished"]
+                    if (len(roles) != len(PHASES) or any(
+                        not e.get("stream_settlement", {}).get("synthetic_usage_final")
+                        or e.get("scope_released") is not True or e.get("owned_children") != []
+                        or e.get("result") not in ("OK", "PASS") for e in roles
+                    )):
+                        return finish("BLOCKED", "INCOMPLETE_ROLE_EVIDENCE")
                 proof = next((e["handoff_ref"] for e in previous if e["kind"] == "role_finished"
                               and e.get("role") == "Verifier" and e.get("result") == "PASS"), None)
                 try:
@@ -354,14 +366,14 @@ class _Session:
         if not self.run or expected_run != self.ids["run_id"]:
             raise Blocked("Explicit current run ID required")
         latest = self.run[-1]
-        interrupted = latest["kind"] == "role_started" or (
+        interrupted = latest["kind"] in OPEN_ROLE_EVENTS or (
             abandoned and self.state not in TERMINAL and self.state != State.RECOVERING
         )
         if interrupted:
             if action != "recover":
                 raise Blocked("Unfinished execution requires explicit recovery")
             return self.emit("recovery", State.RECOVERING,
-                             agent_run_id=latest.get("agent_run_id"), role=latest.get("role"),
+                             agent_run_id=latest.get("agent_run_id"), role=latest.get("role", latest.get("stream_role")),
                              result="UNKNOWN", reason="Interrupted owner", owned_children=[])
         if self.state in TERMINAL:
             raise Blocked("Run already terminal")
@@ -423,6 +435,8 @@ class _Session:
         role_limits = preference["budget"] if preference else task_budget
         role_budget = {key: min(value, task_budget[key]) for key, value in role_limits.items()}
         role_budget["tokens"] = min(role_budget["tokens"], start["token_limit"] - used)
+        spent = sum(e.get("synthetic_cost_microunits", 0) for e in self.run)
+        role_budget["cost_microunits"] = min(role_budget["cost_microunits"], task_budget["cost_microunits"] - spent)
         if ROLE_TOKENS > role_budget["tokens"]:
             return self.emit("budget", State.BLOCKED, reason="TOKEN_LIMIT")
         # Persist intent before role entry. A crash before the finish event leaves UNKNOWN.
@@ -452,20 +466,45 @@ class _Session:
         evidence.update(input_contract_hash=digest(asdict(request)), input_refs=refs)
         started = monotonic()
         self.emit("role_started", phase, **evidence)
-        adapter = MockAdapter(lambda: mock_role(phase, Scenario(start["scenario"]), self.run))
-        result, tool_audit = normalize_mock(adapter.stream(request))
-        status = "failed" if result["result"] == "FAIL" else "completed"
         binding = Binding(self.ids["project_id"], self.development_id, self.ids["run_id"],
                           self.ids["generation"], evidence["agent_run_id"], evidence["context_id"],
                           evidence["context_id"], evidence["agent_run_id"])
-        audit = normalize_stream(binding, tuple(
-            Packet(binding, seq, uuid4().hex, {"method": method, "params": {
-                "turn": {"id": binding.turn_id, "status": state}}})
-            for seq, (method, state) in enumerate((
-                ("turn/started", "inProgress"), ("turn/completed", status)), 1)
-        ))
+
+        def commit_stream(kind, receipt):
+            return self.emit(kind, phase, agent_run_id=binding.agent_run_id, stream_role=role,
+                             phase=phase.value, stream_receipt=receipt)
+
+        journal = EventJournal(binding, commit_stream, fixture_usage=True)
+        journal.receive(Packet(binding, 1, uuid4().hex, {"method": "turn/started", "params": {
+            "turn": {"id": binding.turn_id, "status": "inProgress"}}}))
+        adapter = MockAdapter(lambda: mock_role(phase, Scenario(start["scenario"]), self.run))
+        try:
+            result, tool_audit = normalize_mock(adapter.stream(request))
+        except (Exception, KeyboardInterrupt):
+            journal.disconnect()
+            raise
+        status = "failed" if result["result"] == "FAIL" else "completed"
+        context = {"threadId": binding.thread_id, "turnId": binding.turn_id}
+        item = {"id": "fixture-command", "type": "commandExecution"}
+        messages = (
+            {"method": "item/started", "params": {**context, "item": {**item, "status": "inProgress"}}},
+            {"method": "item/commandExecution/requestApproval", "id": 1,
+             "params": {**context, "itemId": item["id"]}},
+            {"method": "serverRequest/resolved", "params": {"threadId": binding.thread_id, "requestId": 1}},
+            {"method": "item/completed", "params": {**context, "item": {**item, "status": "declined"}}},
+            {"method": FIXTURE_USAGE, "params": {**context, "tokens": ROLE_TOKENS,
+                                                 "cost_microunits": 0, "final": True}},
+            {"method": "turn/completed", "params": {"turn": {"id": binding.turn_id, "status": status}}},
+        )
+        for sequence, message in enumerate(messages, 2):
+            journal.receive(Packet(binding, sequence, uuid4().hex, message))
+        settlement = journal.fixture_settlement(expected_status=status, resources_released=True)
         elapsed = monotonic() - started
-        if result["result"] == "FAIL":
+        if (settlement["synthetic_tokens"] > role_budget["tokens"]
+                or settlement["synthetic_cost_microunits"] > role_budget["cost_microunits"]):
+            next_state = State.BLOCKED
+            result["reason"] = "USAGE_LIMIT"
+        elif result["result"] == "FAIL":
             next_state = State.FAILED
         elif (time() >= start["deadline"] or elapsed >= min(start["deadline"] - now, role_budget["seconds"])):
             next_state = State.BLOCKED
@@ -493,10 +532,11 @@ class _Session:
         return self.emit(
             "role_finished", next_state, **evidence, **result, elapsed_seconds=elapsed,
             commands=[], exit_code="NOT_APPLICABLE", resource_peaks="UNKNOWN",
-            measured_tokens="NOT_APPLICABLE", synthetic_tokens=ROLE_TOKENS,
+            measured_tokens="NOT_APPLICABLE", synthetic_tokens=settlement["synthetic_tokens"],
             cost="NOT_APPLICABLE", retries=0, handoff=next_state.value,
-            usage_kind="SYNTHETIC", estimated_tokens="UNKNOWN", synthetic_cost_microunits=0,
+            usage_kind="SYNTHETIC", estimated_tokens="UNKNOWN",
+            synthetic_cost_microunits=settlement["synthetic_cost_microunits"],
             tool_audit=tool_audit, diff_ref=digest(result["diff"]) if "diff" in result else None,
             handoff_ref=handoff_ref, scope_released=True,
-            provider_audit_fixture=audit,
+            stream_settlement=settlement,
         )
