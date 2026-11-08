@@ -101,3 +101,7 @@ python -B -m unittest discover -s tests -v
 ## 라이선스·보안
 
 라이선스와 배포 정책은 아직 확정하지 않았습니다. 토큰/운영 DB/프로젝트 원문/개인 대화/실행 로그는 이 공개 저장소에 올리지 않습니다. `.gitignore`는 보조 방어선이며 실제 푸시 전 내용 검사와 GitHub push protection을 별도로 적용해야 합니다.
+
+### 게임형 Windows 운영 콘솔
+
+[GAME-UI-DESIGN](docs/GAME-UI-DESIGN.md)에 원장 기반 프로젝트 진행도, 에이전트 역할 카드, 퀘스트형 파이프라인, 상세 감사 드릴다운과 성능·안전 경계를 정의했습니다. **현재 실제 GUI는 아직 미구현**이며, P1 Mock 터미널 대시보드가 기준입니다.
