@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P1.5 기준은 `d256f791f4b1c088a105a7297c5ef960ca64a2f0`이다. `python -B -m devorchestra.gui`가 Tk 콘솔을 연다. `projection.py`는 `Ledger.snapshot()` 기본 읽기 모드에서만 데이터를 받고, 역행이나 계보 변경 시 현재 화면을 지운다. `tests/test_projection.py`는 창을 만들지 않는 합성 검증이다. `sandbox_profile.py`는 Windows Sandbox 제한 XML만 만들며 실행 코드가 없다. 실제 창과 P2 집행 검증은 별도다.
+
 - [현재 상태](CURRENT-STATUS.md)에서 판정과 차단을 확인한다. 기준 SHA는 `becd2f7abaca1b8af521d6536259a6faaadbeddc`다.
 - `Runner.command`가 Windows 전역 뮤텍스를 소유하고 이벤트 상태 전이를 수행한다. 원장의 이벤트 순번과 끝 해시가 쓰기 펜스이며 실행 세대와 소유자는 각 이벤트에 남는다.
 - 역할 시작과 종료 사이에 중단되면 결과는 UNKNOWN이다. `recover RUN_ID`로 복구 이벤트를 남기고 `cancel RUN_ID`로 종결한다. PAUSED에서만 명시적 재개가 가능하다.

@@ -1,0 +1,118 @@
+"""Versioned, read-only evidence contract for the Windows console."""
+from datetime import datetime, timezone
+
+from .dashboard import project_view
+from .lease import Blocked
+from .ledger import digest
+from .runtime import PHASES, PROJECTS
+
+
+def dashboard_projection_v1(events, tail, project_id, observed_at):
+    view = project_view(events, project_id)
+    global_view = project_view(events)
+    project_events = [dict(event, sequence=seq) for seq, event in enumerate(events, 1)
+                      if event["project_id"] == project_id]
+    start = view["run"]
+    current = [e for e in project_events if start and e["run_id"] == start["run_id"]]
+    latest = current[-1] if current else {}
+    global_events = global_view["events"]
+    global_latest = global_events[-1] if global_events else {}
+    pending = global_latest if global_latest.get("kind") == "role_started" else {}
+    phases = []
+    for phase, role in PHASES.items():
+        began = next((e for e in current if e.get("phase") == phase.value
+                      and e["kind"] == "role_started"), None)
+        ended = next((e for e in current if e.get("phase") == phase.value
+                      and e["kind"] == "role_finished"), None)
+        if ended:
+            status = ended["state"] if ended["state"] in ("FAILED", "BLOCKED") else "RECORDED OK"
+        elif began:
+            status = "UNKNOWN" if latest["kind"] == "role_started" else latest["state"]
+        else:
+            status = "NEXT" if view["state"] == phase.value else "WAITING"
+        phases.append({"phase": phase.value, "role": role, "state": status,
+                       "started_seq": began["sequence"] if began else None,
+                       "finished_seq": ended["sequence"] if ended else None,
+                       "completed_with_evidence": phase.value in view.get("completed_phases", [])})
+
+    roles = {}
+    for role in dict.fromkeys(PHASES.values()):
+        begins = [e for e in project_events if e.get("role") == role and e["kind"] == "role_started"]
+        began = begins[-1] if begins else None
+        evidence = [e for e in project_events if began and e.get("agent_run_id") == began["agent_run_id"]]
+        ended = next((e for e in evidence if e["kind"] == "role_finished"), None)
+        roles[role] = {"start": began, "finish": ended, "latest": evidence[-1] if evidence else None}
+
+    completed = next((e for e in reversed(project_events)
+                      if e["kind"] == "role_finished" and e["phase"] == "CHECKPOINTING"
+                      and e["state"] == "COMPLETED" and e["result"] == "PASS"), None)
+    return {
+        "schema_version": 1,
+        "as_of_utc": observed_at,
+        "snapshot_version": (len(events), tail),
+        "observation_kind": "VERIFIED_MOCK_LEDGER",
+        "project_id": project_id,
+        "project_name": start["project"]["name"] if start else PROJECTS[project_id].name,
+        "project_state": view["state"],
+        "project_states": {key: project_view(events, key)["state"] for key in PROJECTS},
+        "global_state": global_view["state"],
+        "global_run": global_view["run"],
+        "run": start,
+        # P1 records intent, not a live liveness observation. Never assert an active role.
+        "active_role": None,
+        "unconfirmed_role": pending.get("role"),
+        "unconfirmed_agent_run_id": pending.get("agent_run_id"),
+        "pipeline_phases": phases,
+        "milestone_gates": [
+            {"name": "P1 · Mock pipeline", "state": "PASS" if completed else "UNVERIFIED",
+             "evidence_seq": completed["sequence"] if completed else None},
+            {"name": "P1.5 · GUI validation", "state": "NO LEDGER EVIDENCE"},
+            {"name": "P2 · OS isolation", "state": "BLOCKED"},
+        ],
+        "role_cards": roles,
+        "resources": {
+            "elapsed": view.get("elapsed_seconds"),
+            "time_budget": start["project"]["seconds"] if start and start["scenario"] != "time-limit"
+            else 0 if start else None,
+            "deadline": start["deadline"] if start else None,
+            "synthetic_tokens": view.get("synthetic_tokens"),
+            "token_limit": start["token_limit"] if start else None,
+            "cost_limit": start["project"]["cost_limit"] if start else None,
+            "measured_tokens": "NOT_APPLICABLE" if start else "UNKNOWN",
+            "cost": "NOT_APPLICABLE" if start else "UNKNOWN",
+        },
+        "safety": {
+            "lease": "NOT OBSERVED",
+            "sandbox": "BLOCKED",
+            "approval": next((e for e in reversed(current)
+                              if e["kind"] in ("permission", "owner_approved_mock")), None),
+            "latest": latest,
+        },
+        "events": project_events,
+    }
+
+
+class ProjectionReader:
+    """Keep a verified watermark for the lifetime of the window."""
+    def __init__(self, ledger):
+        self.ledger = ledger
+        self.version = (0, "")
+
+    def read(self, project_id):
+        events, tail = self.ledger.snapshot()
+        count, previous = self.version
+        if len(events) < count:
+            raise Blocked("Ledger sequence moved backwards")
+        if len(events) == count:
+            if tail != previous:
+                raise Blocked("Ledger snapshot changed at the same sequence")
+        else:
+            prefix = ""
+            for seq, event in enumerate(events[:count], 1):
+                prefix = digest([seq, prefix, event])
+            if prefix != previous:
+                raise Blocked("Ledger snapshot replaced its verified history")
+        view = dashboard_projection_v1(events, tail, project_id,
+                                       datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        self.version = view["snapshot_version"]
+        return view

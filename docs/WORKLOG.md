@@ -1,5 +1,12 @@
 # 작업 기록
 
+## 2026-11-08 KST · P1.5 / P2 준비
+
+- 기준 `d256f791f4b1c088a105a7297c5ef960ca64a2f0`. 시작 시 로컬과 GitHub main이 일치했고 변경 파일은 없었다. 변경 SHA는 이 기록을 포함하는 커밋에서 조회한다.
+- `gui.py` 및 `projection.py`에 Tk Command Center, 읽기 전용 Projection V1, 감사 필터, 워터마크와 오류 차단을 추가했다. `sandbox_profile.py`는 호스트 통합을 제한하는 고정 XML만 생성한다. P1 원장·잠금·권한 코드는 그대로다.
+- `python -B -m unittest discover -s tests -v`로 기존 P1 8건과 신규 Projection/GUI 연결 5건 및 XML 계약 1건을 실행했다. 임시 원장 CLI 흐름도 검증했다.
+- GUI 창, DPI/접근성, OS 격리 및 실제 Codex는 미검증이다. 다음 우선순위는 승인된 격리 환경에서 P2 부정 테스트다.
+
 ## 2026-11-08 KST · P1
 
 - 기준 `becd2f7abaca1b8af521d6536259a6faaadbeddc`. 변경 Git SHA는 이 기록을 포함하는 커밋으로 조회한다.

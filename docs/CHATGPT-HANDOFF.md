@@ -1,5 +1,5 @@
 # ChatGPT 전달용 요약
 
-DevOrchestra는 Windows 우선 로컬 AI 개발 관리 앱이다. 기준 SHA는 `becd2f7abaca1b8af521d6536259a6faaadbeddc`다. P1은 관리자 → 개발자 → 검토자 → 결정적 검증기 → 관리자 판정의 Mock 파이프라인, Win32 단일 실행 슬롯, SQLite 이벤트 원장, 합성 승인, 복구, 읽기 전용 터미널 대시보드를 제공한다.
+DevOrchestra는 Windows 우선 로컬 AI 개발 관리 앱이다. P1 구현은 `0ebe8db`, P1.5 기준 설계는 `d256f79`다. 기존 Mock 역할 파이프라인, Win32 단일 슬롯, SQLite 감사, 합성 승인, 복구와 CLI를 유지한다. P1.5는 Tk Command Center와 읽기 전용 Projection V1, 마일스톤·단계·역할 카드, 프로젝트/실행/역할별 영수증 조회를 제공한다.
 
-검증은 Windows에서 합성 데이터와 임시 저장소로 수행한다. 두 프로세스의 슬롯 경쟁, 역할 도중 종료, 재시작 시 UNKNOWN, 감사 저장 실패와 변조, 권한 거부, 시간·합성 토큰 한도, 프로젝트 및 역할 패널을 검사한다. 실제 모델, 임의 코드, 운영 프로젝트, GPU, 외부 계정은 BLOCKED다. 그래픽 UI, 시스템 다중 사용자 공용 원장 및 실제 자식 프로세스 회수는 미검증이다. 다음 단계는 P2 OS 격리의 부정 테스트다. 상세 판정은 [현재 상태](CURRENT-STATUS.md), 명령은 [README](../README.md)를 참조한다.
+Windows 임시 원장에서 기존 8건, 신규 6건 및 CLI 흐름을 검증했다. 실제 GUI 창 시각 검증은 NOT VERIFIED다. P2는 Windows Sandbox 제한 XML 계약만 준비했고 Job/VM/Sandbox 집행, 실제 Codex 및 임의 코드는 BLOCKED다. 다음 작업은 승인된 격리 환경에서 자체 자식 트리 종료 및 호스트 파일·네트워크·자격증명 접근 거부를 검증하는 것이다. [현재 상태](CURRENT-STATUS.md) · [실행 방법](../README.md)

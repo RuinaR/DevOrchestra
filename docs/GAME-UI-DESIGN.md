@@ -1,7 +1,7 @@
 # DevOrchestra — Game-like Operations Console UI/UX Specification v1.0
 
 작성: 2026-11-08 KST. 기준: `main@0ebe8db5ca7a05715862383dff09cd9492cef4c5`.
-범위: **설계 및 구현 기준**, 실제 네이티브 UI는 아직 미구현. P1에서는 Windows 전역 뮤텍스, SQLite 검증 원장, 결정적 Mock 역할 및 터미널 읽기 전용 대시보드가 구현되어 있다. P2 OS sandbox는 BLOCKED/NOT VERIFIED이다.
+범위: **설계 및 P1.5 구현 기준**. Tk 기반 읽기 전용 Windows Command Center, 버전 1 Projection과 역할·실행별 감사 조회를 구현했다. 실제 창의 시각·DPI 검증은 NOT VERIFIED이며 P2 OS 격리는 BLOCKED다.
 
 ## 1. 제품 경험 목표
 
@@ -46,7 +46,7 @@
 
 ## 5. 상태 데이터 계약
 
-`DashboardProjectionV1`을 코드의 순수 읽기 투영으로 정의한다(향후 구현). P1 `project_view(events,project)` 기반 필드만 사용하고 원장의 정합성 검증 오류는 오류 화면과 BLOCKED로 전파한다.
+`projection.dashboard_projection_v1`을 순수 읽기 투영으로 구현했다. P1 `project_view(events, project)`와 검증된 원장 이벤트가 근거다. 읽기 오류, 순번 역행과 다른 원장 계보를 감지하면 화면을 BLOCKED로 바꾸고 현재 결과를 지운다. 워터마크는 창 수명 동안 유지되며 재시작을 넘는 외부 앵커는 없다.
 
 권장 항목:
 - `schema_version, as_of_utc, observation_kind, project_id, run_id, task_id, generation, global_state, active_role, active_agent_run_id?`
@@ -62,7 +62,9 @@
 
 ## 6. UI 컨트롤 동작
 
-- `Run`: 실행 전 현재 run/generation, 잠금·승인·허용 명령·프로젝트 확인. 승인 없는 P1 mock만 허용.
+P1.5 화면에는 프로젝트 선택, 감사 필터, 역할 상세, 새로고침만 제공한다. 아래 실행 제어 계약은 향후 쓰기 경로 설계이며, 이번 버전의 실행 제어는 기존 CLI에서 수행한다.
+
+- `Run`: 실행 전 현재 run/generation, 잠금·승인·허용 명령·프로젝트 확인. 현재 P1 합성 읽기도 기존 소유자 승인 게이트를 적용한다.
 - `Pause`: 소유 Runner가 단계 경계에서 상태를 보존했을 때 완료 표시. 진행 중 실제 child에 대한 중단은 P2 집행이 검증될 때까지 비활성.
 - `Cancel`: 정확한 대상 ID + 영향·유실 경고; 현재 지원하는 모의 상태만.
 - `Approve`: 권한 요청/대상/만료·사용량 한도를 표시하고 사용자 명시 클릭 후 Runner가 승인을 기록한 다음에만 적용. 다른 주체 승격 안 됨.
@@ -73,10 +75,12 @@
 ## 7. P1 실제 코드 통합 지점
 
 - `ledger.py`: SQLite 검증 읽기는 변경하지 않고 그대로 사용. 새로운 화면 때문에 쓰기 원장 형식을 임의 변경하거나 해시 체인을 깨지 않는다.
-- `dashboard.py`: `project_view`를 순수 함수로 유지하면서 `DashboardProjectionV1`으로 버전 확장. 기존 터미널 `render` 경로는 계속 지원한다.
+- `dashboard.py`: 기존 순수 `project_view`와 터미널 `render`는 그대로 유지한다. `projection.py`가 GUI용 버전 1 읽기 계약을 제공한다.
 - `runtime.py`: 상태·PHASES 및 role_started/finished, owner gate, milestone·초기 설정을 사실 원천으로 재사용. UI가 `mock_role` 또는 상태 전이를 직접 호출하는 구조 금지.
 - `__main__.py`: 기존 CLI/Mock smoke regression 유지. GUI 진입점을 별도 모듈로 구성하고 UI 미설치 환경에서도 핵심 실행 테스트 가능해야 한다.
-- GUI 기술 선택: Windows에서 WPF/.NET과 Python UI(PySide6 등)의 배포, 타입 안정성, 기존 순수 Python Runtime 연동, 자체 사용자 PC 자원 영향을 비교 후 결정한다. 프레임워크는 라이선스·공식 지원 확인 후 도입하며 프로젝트 내부에 격리 설치. 화려한 게임 엔진/별도 GPU 런타임을 기본 의존성으로 만들지 않는다.
+- GUI 기술 선택: Tcl/Tk 8.6과 Python `tkinter`를 사용한다. 기존 Python Projection을 직접 재사용하고 별도 패키지, IPC, 게임 엔진 없이 구현할 수 있다. `ttk` 사용자 테마와 자체 색·글꼴·레이아웃 토큰을 사용한다. 별도 이미지·아이콘·폰트 파일을 배포하지 않는다. [Python tkinter](https://docs.python.org/3/library/tkinter.html)
+- WPF는 XAML 템플릿, 해상도 독립 렌더링 및 Windows 통합이 강점이다. 현 Python 원장 검증과 결합하려면 추가 .NET 빌드 및 IPC 계약이 필요하다. PySide6은 동일 프로세스에서 Python을 재사용하고 테마 및 접근성 도구가 풍부하나 Qt 런타임 패키징과 라이선스 검토가 추가된다. [Microsoft WPF](https://learn.microsoft.com/en-us/dotnet/desktop/wpf/overview/) · [Qt for Python 라이선스](https://doc.qt.io/qtforpython-6/licenses.html)
+- P1.5는 정적 장식과 1.5초 폴링을 사용한다. 색 외 텍스트 배지, 키보드 탐색 및 스크롤을 제공한다. 스크린리더 연동, 다중 DPI 레이아웃과 장시간 원장 폴링 비용은 미검증이다. 모델의 실시간 생존 여부는 관측하지 않으며 열려 있는 역할 의도 하나만 UNKNOWN으로 구분한다.
 
 ## 8. 품질 게이트 / 시각화 테스트
 

@@ -1,6 +1,6 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
-상태: **P1 Mock 실행 기반 구현**. 아래 장기 구조 중 실제 프로젝트 실행과 OS 격리는 설계 단계다.
+상태: **P1 Mock 실행 기반 및 P1.5 Windows 읽기 전용 콘솔 구현**. 실제 프로젝트 실행과 OS 격리 집행은 차단 상태다.
 
 ## P1 구현 및 기술 선택
 
@@ -79,6 +79,7 @@ run_one(project, task):
 |---|---|---|
 | P0 | README/안전/위협 모델·역할 정의 | 문서 링크·일관성·공개 diff 검사 |
 | P1 | 단일 스케줄러·mock 에이전트·상태 원장·잠금 | 중복 실행 0, 중단·재시작 누락·중복·고아 작업 없는 격리 시험 |
+| P1.5 | 원장 기반 Windows Command Center | 상태 일치·프로젝트/역할 분리·손상 차단의 합성 검사 PASS, 실제 창 검증 별도 |
 | P2 | 실제 OS 권한 격리·path/net allowlist·자원 제한 | 허용 외 경로/네트워크/프로세스 접근 부정 시험, 재시작·reparse 거부 |
 | P3 | Codex CLI/SDK 연동과 역할별 문맥/로그/사용량 | 관리자→개발자→검토자 각 1회 순차·지표·승인 검증 |
 | P4 | 독립 리뷰·검증·Git 확정·보고서 | 최신 커밋·PASS/FAIL 명확, 원본 미커밋 자료 보존 |
@@ -105,4 +106,18 @@ run_one(project, task):
 
 ## 게임형 UI 확정 설계 (2026-11-08)
 
-[GAME-UI-DESIGN](GAME-UI-DESIGN.md)은 P1 원장 기반 게임형 대시보드와 역할 카드, 정직한 진행도, 상태 드릴다운, 가벼운 효과와 GUI 안전 게이트를 규정한다. P1.5에서 순수 읽기 모델/Mock 시각화, P2에서 OS 격리 검증을 우선, P2.5에서 네이티브 GUI 완성도를 향상한다. UI가 잠금·상태·권한의 소유자가 되어서는 안 된다. GUI 자체가 아직 구현되었다고 주장하지 않는다.
+[GAME-UI-DESIGN](GAME-UI-DESIGN.md)의 P1.5 콘솔은 읽기 전용 SQLite 스냅샷을 검증하고 버전 1 Projection으로 표시한다. UI에는 잠금·실행·승인 권한이 없다. 실제 창 시각·접근성은 후속 격리 검사 항목이다.
+
+## P2 격리 검증 계획
+
+`sandbox_profile.restricted_profile()`은 네트워크·vGPU·클립보드·오디오/비디오·프린터 리디렉션을 끄고 Protected Client를 켜는 고정 XML을 메모리에서 만든다. 매핑 경로, 자동 로그인 명령, 저장 및 실행 API는 없다. 출력 계약만 합성 검증했다. [Windows Sandbox 설정](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-configure-using-wsb-file)
+
+| 경계 | 다음 구현·부정 테스트 |
+| --- | --- |
+| 소유 자식과 단일 슬롯 | 신뢰 실행기가 전역 슬롯을 잡은 채 자체 시험 자식을 중지 상태로 생성하고 소유 Job에 편입한 뒤 시작한다. Job에 이탈 허용 플래그를 설정하지 않고 소유 핸들·실행 세대를 기록한다. 자식·손자 생성과 비정상 종료 시험에서 Job 내 활성 프로세스 0을 확인한 뒤에만 다음 역할을 허용한다. Job은 게스트/VM 종료 관측을 대체하지 않는다. |
+| 파일·재분석 지점 | 최초 검증은 호스트 공유 폴더 없이 시작한다. 후속 전달기는 합성 파일의 해시와 상대 경로를 고정하고 허용 루트 및 열린 핸들의 최종 경로/볼륨을 검증한다. junction, 심볼릭 링크, 하드 링크, ADS, 경로 바꿔치기 및 쓰기 제한 우회가 거부되는지 시험한다. |
+| 네트워크·자격증명 | 공유 클립보드·계정·환경·홈 디렉터리 없이 시작한다. 외부·호스트·사설 주소와 DNS, 호스트 환경·자격증명 표식 조회를 합성 표식으로 거부 시험한다. P3에서 네트워크가 필요하면 별도 게이트와 전용 제한 자격증명이 필요하다. |
+| Sandbox / VM | 승인된 Windows 환경에서 설치 여부, OS 버전과 Protected Client 지원을 확인한다. WSB로 수명주기 및 종료를 증명하기 어렵다면 전용 VM의 관측 가능한 부팅·종료 계약을 비교한다. 실행 중인 다른 앱에 대한 프로세스 조사나 제어를 사용하지 않는다. |
+| 복구 | 재시작 후 남은 소유 프로세스 또는 격리 세션을 확인할 수 없으면 BLOCKED를 유지한다. 종료 증거를 받은 뒤에만 명시 복구하고 이전 역할을 자동 재실행하지 않는다. |
+
+Job Object 편입과 종료 집계는 프로세스·자원 제어이며 파일·네트워크에는 독립 OS 경계가 필요하다. 이 차수에는 Job 또는 VM/Sandbox 실행기를 연결하지 않았다. [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)

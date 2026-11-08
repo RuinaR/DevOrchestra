@@ -2,7 +2,19 @@
 
 **한 번에 한 프로젝트 · 한 작업 · 한 에이전트만 실행하는 로컬 AI 개발 오케스트레이터.**
 
-> 현재 상태는 **P1 Windows Mock 실행 기반**입니다. 실제 Codex, 외부 프로젝트 실행과 OS 샌드박스는 BLOCKED입니다.
+> 현재 상태는 **P1 Mock 실행기 + P1.5 Windows Command Center**입니다. 실제 Codex, 외부 프로젝트 실행 및 OS 샌드박스 집행은 BLOCKED입니다.
+
+## Windows Command Center
+
+Windows의 Python 3.10 이상과 Tk가 필요합니다. P1 원장을 초기화한 뒤 다음 명령으로 읽기 전용 콘솔을 엽니다.
+
+```powershell
+python -B -m devorchestra.gui
+```
+
+프로젝트를 선택하면 미션·마일스톤·퀘스트 단계·역할 카드·예산·승인/차단 근거를 볼 수 있습니다. 역할 카드를 선택하거나 실행·역할 필터를 바꾸면 해당 감사 이벤트가 표시됩니다. 이벤트를 선택하면 순번, ID, 결정 및 검증 영수증이 열립니다. `Tab`과 방향키로 탐색하고 `F5`로 갱신할 수 있습니다. 콘솔은 원장 상태를 1.5초마다 확인합니다.
+
+프로젝트·역할 실행 제어와 승인은 기존 CLI에서 수행합니다. 시작 이벤트만 있고 실시간 생존 증거가 없는 역할은 `UNKNOWN`입니다. 화면의 Mock 지표는 실제 모델 사용량과 별개입니다. GUI 시각·DPI 검증은 NOT VERIFIED입니다.
 
 ## P1 실행 방법
 
@@ -20,7 +32,7 @@ python -B -m devorchestra audit --run $run --role Verifier
 
 `run` 대신 `step`을 쓰면 단계 사이에 `pause`, `resume`, `cancel`을 같은 실행 ID로 요청할 수 있습니다. 강제 종료로 시작만 기록된 역할은 `recover`로 UNKNOWN 상태를 기록한 뒤 `cancel`로 닫습니다. 재시작은 작업을 자동 실행하지 않습니다.
 
-`dashboard --watch`는 변경된 원장 스냅샷을 출력합니다. 단계 배지와 역할 패널은 기록된 전이에서 읽고, 합성 역할의 설명과 사용량은 Mock으로 구분합니다. 테마와 아이콘은 표시 수단이며 근거는 개별 감사 이벤트입니다. 게임형 그래픽 테마는 후속 단계입니다.
+`dashboard --watch`는 변경된 원장 스냅샷을 출력합니다. 단계 배지와 역할 패널은 기록된 전이에서 읽고, 합성 역할의 설명과 사용량은 Mock으로 구분합니다.
 
 ```powershell
 python -B -m unittest discover -s tests -v
@@ -104,4 +116,4 @@ python -B -m unittest discover -s tests -v
 
 ### 게임형 Windows 운영 콘솔
 
-[GAME-UI-DESIGN](docs/GAME-UI-DESIGN.md)에 원장 기반 프로젝트 진행도, 에이전트 역할 카드, 퀘스트형 파이프라인, 상세 감사 드릴다운과 성능·안전 경계를 정의했습니다. **현재 실제 GUI는 아직 미구현**이며, P1 Mock 터미널 대시보드가 기준입니다.
+[GAME-UI-DESIGN](docs/GAME-UI-DESIGN.md)에 원장 기반 프로젝트 진행도, 에이전트 역할 카드, 퀘스트형 파이프라인, 상세 감사와 남은 시각 검증 범위를 기록했습니다.
