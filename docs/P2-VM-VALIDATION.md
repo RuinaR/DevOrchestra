@@ -1,5 +1,7 @@
 # P2.5 격리 실행 환경과 인수 시험
 
+P2.7에서 [현재 PC의 네이티브 MXC](P2-MXC-VALIDATION.md)를 우선 경로로 선정했다. 이 문서의 VirtualBox 다운로드·설치·VM 승인안은 보류한 이력이다.
+
 ## P2.6 현재 PC 도입 사전 점검
 
 소유자는 현재 Windows PC에 도입하는 방향을 선택했다. 아래 항목은 P2.5 전용 PC 선정 이후의 우선 경로를 기록한다. Windows Core 25H2 x64와 AMD-V 지원 CPU는 Oracle Windows x64 호스트 후보에 해당한다. Windows의 펌웨어 가상화 API가 활성 상태를 보고했고 CPUID에 실행 중인 Microsoft 하이퍼바이저가 보였다. 현재 실행 문맥에서 직접 SVM/NPT 및 SLAT 표식은 노출되지 않았다. 이 결과만으로 물리 CPU의 지원 여부를 부정할 수 없다. 메모리 무결성(HVCI)의 레지스트리 설정은 활성 값이었다. Device Guard 및 선택적 기능 CIM 조회, WHP 기능 조회는 접근 제한으로 실제 VBS/HVCI 서비스 실행과 WHP 활성 여부를 확정하지 못했다. VirtualBox는 PATH, 기본 설치 위치, Oracle의 두 레지스트리 뷰에서 발견되지 않았다. 사용자 지정 설치 여부는 미확인이다. [AMD CPU 사양](https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-7-7800x3d.html) · [Microsoft CPUID 탐색](https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/feature-discovery) · [WHP 조회](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvgetcapability) · [메모리 무결성](https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity)

@@ -1,5 +1,9 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
+## P2.7 네이티브 MXC 우선 검토
+
+현재 PC에서 명시적 MXC를 우선 검토한다. 전역 단일 슬롯과 Win32 Job을 유지하며, 외부 Job과 MXC의 결합을 별도로 검증한다. 유효 파일·네트워크 프로필 외에도 데스크톱 비간섭, Controller·원장 보호, 소유 자식 회수 및 검역이 입장 조건이다. 폴백은 차단한다. VirtualBox는 보류한 후보이며 이전 P2.5/P2.6 계획은 이력이다. [호환성·시험·P3 조건](P2-MXC-VALIDATION.md)
+
 ## P2.5 환경 선정과 P3 입장
 
 [P2.5 격리 실행 환경과 인수 시험](P2-VM-VALIDATION.md)이 후보 비교, 자원 한도, 승인 범위, A/B/C 양성 대조와 실패 조건, 반출·검역, 독립 GUI 시험을 정의한다. 우선 환경은 전용 x64 테스트 PC의 VirtualBox 7.2 계열과 Windows 11 테스트 게스트다. 이전 Sandbox 우선 검토는 지원 에디션에서의 B 초기 시험 후보로 한정한다.

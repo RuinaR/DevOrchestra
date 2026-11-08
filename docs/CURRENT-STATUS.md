@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.7 기준 `71abfd91f6ac80dcd46548e44d13a4b0866eaa76`. Windows 11 25H2 빌드 및 설치 CLI 버전이 공식 MXC 시작 진단의 수치 기준을 충족한다. 장치 호환성·유효 정책·Job 결합은 NOT VERIFIED다. VirtualBox 계획은 보류했다. MXC 진단은 별도 승인 대기이며 P2 실측과 P3는 BLOCKED다. [MXC 사전 검토](P2-MXC-VALIDATION.md)
+
 P2.6 기준 `9c748eb4b78923e083dfe9340984071d7379c922`. 현재 Windows Core x64의 AMD-V 펌웨어 표시와 Microsoft 하이퍼바이저 실행을 확인했다. WHP·VBS 런타임과 VirtualBox 실제 부팅은 미확인이다. 기본 패키지의 최소 설치 승인안을 작성했다. 설치, 다운로드, 설정 변경, VM 실행은 수행하지 않았다. 현재 PC의 부팅은 승인·자원 여유·WHP 확인 전 BLOCKED다. 기존 A 일부 Job 실측과 C 합성 검역만 PASS이며 OS 격리·반출·P3는 BLOCKED다. [P2.6 사전 점검](P2-VM-VALIDATION.md#p26-현재-pc-도입-사전-점검)
 
 P2.5 기준 `1519b7874d6e6716aef33746b94d7b79adb24ece`. Windows Core x64에서 VirtualBox·VMware 관리 도구를 PATH와 표준 경로에서 찾지 못했다. 전용 x64 테스트 PC의 VirtualBox 7.2 계열과 Windows 11 게스트를 1순위로 선정했다. 설치·설정 변경 및 VM 실행은 하지 않았다. A는 일부 Win32 Job 실측만 PASS, B는 BLOCKED, C는 합성 검역만 PASS이며 실제 반출은 BLOCKED다. GUI는 NOT VERIFIED, P3는 BLOCKED다. [시험과 승인 범위](P2-VM-VALIDATION.md)
