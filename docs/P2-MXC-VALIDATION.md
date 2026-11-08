@@ -1,5 +1,22 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.21 네이티브 자기 점검 실패 분석
+
+기준 `60bb7f8fd15ebeea9f1de70ca8c63941ba548c20`. P2.18의 런처 인자, 새 합성 홈·작업 폴더, 바이너리 고정, 프로필 및 오류 처리 기록을 P2.10·P2.13·P2.15·P2.17과 대조했다. P2.18은 명시적 `mxc`, 관리 구성 포함, `mxc-file-test` 및 절대 EXE 경로와 `--self-test`를 사용했다. 소유 CLI 종료 1과 표식 미확인만 남았고 원시 stderr는 보존되지 않았다. 이전 분류는 접근 거부·호스트 변수·프로필/정책 표현 외의 오류를 단일 범주로 접었다. 원문과 실패 위치는 복원할 수 없다.
+
+우선 가설은 MXC가 작업 공간의 실행 이미지나 의존성을 준비하거나 프로세스를 생성하는 경계에서 실패했다는 것이다. 동일 프로필의 System32 cmd.exe는 성공했으며, 외부 CPython은 `0xC0000022`, 작업 공간 안 네이티브 EXE는 종료 1이었다. 네이티브 EXE의 호스트 검증과 PE 검사는 통과했으므로 Python/CRT 하나로 공통 원인을 설명할 수 없다. 두 실패의 종료 코드와 실행 대상이 달라 동일 원인이라고 볼 수도 없다. MXC 초기화, 관리 정책 합성, 경로 해석 또는 SDK/CLI 빌드 문제는 여전히 가능하다.
+
+- `mxc-file-test`의 구성은 workspace 상속, 루트 읽기 거부, `:minimal` 예외, 임시 루트 제한, 네트워크 비활성 및 승인 요청 금지다. 공식 문서는 최소 읽기 집합을 Codex가 정한다고 설명한다. 현재 공개 소스는 Windows 디렉터리 등을 플랫폼 읽기 후보로 수집하고 정책을 네이티브 요청으로 변환한다. 현재 소스는 호스트에 고정된 알파 바이너리의 정확한 구현을 입증하지 않는다. System32의 한 이미지 시작으로 전체 System32나 작업 공간 EXE 실행 권한을 인증할 수 없다. [OpenAI 권한 프로필](https://learn.chatgpt.com/docs/permissions) · [공개 MXC 호스트 경로 처리](https://github.com/openai/codex/blob/main/codex-rs/mxc-sandbox/src/windows.rs)
+- EXE 읽기, DLL 매핑, 프로세스 생성 및 초기화는 별개다. Win32 프로세스 생성 성공도 초기화 완료를 보장하지 않는다. 다음 런처는 새 합성 루트의 상위 경로와 reparse 여부, 실제 절대 경로, 원본·배치 해시를 다시 확인한다. 관리 정책 충돌이나 추가 workspace root가 확인되거나 유효 설정을 확정할 수 없으면 호출 전 중단한다. `--include-managed-config`와 로컬 TOML 확인은 OS 집행 증거가 아니다. [Microsoft CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) · [OpenAI Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+
+### 정제 진단 영수증
+
+`devorchestra/mxc_diagnostic.py`는 실행 기능이 없는 순수 분류기다. 사전검사, 소유 CLI 시작, MXC 초기화·프로필, 이미지 준비, 명령 시작, 명령 결과, 소유 CLI 종료를 별도로 기록한다. 호스트가 직접 확인한 사실과 stderr가 보고한 실패를 구분한다. 이미지 준비·유효 정책을 직접 입증하는 자료가 없으면 UNKNOWN이다. 정확한 표식, 종료 0 및 완결된 깨끗한 스트림만 해당 자기 점검 PASS로 인정한다. 파일 경계나 소유 트리 회수는 판정하지 않는다.
+
+정확한 호스트 변수·플랫폼 경로·정책 준비·SDK 프로세스 생성·대기 오류 패턴과 일부 숫자 코드만 허용한다. 공개 소스의 문구 및 공개 보고에서 확인된 SDK 오류 형식을 참고했으며, 해당 문구가 설치 빌드에 반드시 나온다고 가정하지 않는다. 불일치·상충·상한 초과는 별도 범주로 남긴다. 다음 승인 런처는 stdout/stderr를 동시에 배출하면서 메모리 캡처에 상한을 적용하고 초과 시 불완전으로 표시한다. 원문·경로·환경·토큰을 기록하지 않으며 분류기에는 소유 CLI에서 수집한 결과만 전달한다. [공개 MXC 네이티브 런처](https://github.com/openai/codex/blob/main/codex-rs/mxc-sandbox/src/native.rs) · [공개 SDK 생성 오류 보고](https://github.com/openai/codex/issues/53188)
+
+다음 별도 승인 후보는 기존 OpenAI 서명 CLI와 EXE SHA-256 `5bcaf68f8f75cc58db781812ff84c85e541042b3b7e6504f7d6d09816e598357`을 재확인하고, 새 합성 홈·작업 폴더에서 같은 제한 환경과 명시적 MXC·동일 프로필로 `--self-test` **정확히 1회** 호출하는 것이다. 정제 영수증만 남기고 첫 실패에서 멈춘다. 파일·Python 시험이나 폴백은 별도 범위다. 이 단계에서는 실제 실행이 없었으며 P2.18 FAIL과 P2 A/B/C 전체·P3 BLOCKED를 유지한다.
+
 ## P2.10 승인된 시작 진단 결과
 
 기준 `bbfe379be2408712fcf0294aa33e2dd45879b772`. 별도 승인 범위에서 OpenAI OpCo, LLC의 유효 서명, 앞서 확인한 실행 위치, `codex-cli 0.167.0-alpha.3.2` 및 SHA-256 `4b3286e35d7fe866c6b0eb3f07d7a4cdb5e96489576170dfd6b3a15aa1c67382`를 재확인했다. 실행 직전 바이너리 해시·합성 프로필 원문·빈 작업 디렉터리를 대조했다. 표준 위치의 관리 요구 파일은 발견되지 않았으며 명령에는 `--include-managed-config`를 유지했다.
