@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.11 기준 `be6db0e712b0857d52bd4316af2c86630ce1b0f7`. 전용 합성 원장 기반 커밋 후보 등록·재확인을 구현했다. 실제 커밋 실행 및 스테이징은 미연결이며 P2.10은 별도 승인 대기, P2 A/B/C와 P3는 BLOCKED다. [커밋 후보 계약](ARCHITECTURE-ROADMAP.md#p211-오프라인-커밋-후보)
+
 기준 `41043393e954d97e8087acbddeff38a6734a91b3`. 최우선 인수 조건을 사용자 앱 비간섭으로 확정했다. 오프라인 CLI 사전 검사와 Command Center에서 실제 실행 BLOCKED를 표시한다. MXC는 후보이며 비간섭은 NOT VERIFIED다. P2.10은 별도 1회 승인 대기다. [실제 자동 개발 우선순위](ARCHITECTURE-ROADMAP.md#실제-자동-개발까지의-우선순위)
 
 P2.10 기준 `cf6ab48d48fcb53717b239138e35aa7a2a5a97a0`. Known Folder·SystemDrive 사전 점검은 통과했다. 현재 CLI 경로는 이전 관측과 다르고 파일 버전 메타데이터가 없어 정확한 버전 확인이 남았다. 실행은 별도 승인 대기이며 P2 A/B/C 및 P3는 BLOCKED다. [최소 시작 진단](P2-MXC-VALIDATION.md#p210-최소-시작-진단-사전-점검)
