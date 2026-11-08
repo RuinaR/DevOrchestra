@@ -1,5 +1,26 @@
 # P2.8 MXC 합성 파일 인수 시험
 
+## P2.14 Python 시작 경로의 정적 분석
+
+기준 `0d6b124ed6528004fbf7ea38fc2a1a8694f93441`. P2.10과 P2.13은 동일 SHA-256의 OpenAI 서명 CLI `0.167.0-alpha.3.2`, 명시적 MXC, `mxc-file-test`, 동일 런처 환경 변수 목록을 사용했다. 둘 다 새 합성 CODEX_HOME을 사용했으나 P2.10 작업 디렉터리는 비어 있었고 P2.13에는 프로브, 표식과 두 junction이 있었다. 성공한 P2.10 명령은 System32의 cmd.exe와 내장 echo였다. P2.13은 작업 공간 밖의 사용자별 Python 설치 경로에서 `python.exe -I -S -B .\probe.py`를 실행했다. 실제 LOCALAPPDATA는 신뢰 런처 초기화 입력이며 설치 디렉터리에 대한 읽기 또는 실행 권한을 부여하지 않는다.
+
+승인된 Python 설치 파일의 메타데이터와 PE 정적 import만 확인했다. 현재 인터프리터는 x64 CPython 3.10.11이며 SHA-256은 `3cce33d75d6fdae4e004d0bdf149320b3147482a9caf370079dcb9c191a1b260`이다. 설치 루트의 python.exe는 같은 루트에 존재하는 python310.dll과 VCRUNTIME140.dll을 import한다. `Lib/encodings` 및 `Lib/ctypes`가 있고, `DLLs/_ctypes.pyd`는 같은 DLLs 디렉터리에 존재하는 libffi-7.dll에 의존한다. 확인 범위에서 python310.zip, python310._pth 및 pyvenv.cfg는 없었다. 사용자별 일반 설치의 배치와 일치한다. 정적 import는 실제 로더가 선택한 DLL 경로나 접근 결과를 보여주지 않는다. `-I`는 Python 환경·사용자 패키지 경로의 영향을 제한하고, `-S`는 site 자동 import를 끄며, `-B`는 .pyc 쓰기를 방지한다. 이 옵션들은 실행 이미지, DLL 또는 필수 표준 라이브러리 접근을 없애지 않는다. [Python 3.10 CLI](https://docs.python.org/3.10/using/cmdline.html) · [Microsoft DLL 검색 순서](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order)
+
+가장 유력한 가설은 작업 공간 밖 Python 실행 이미지 또는 앱 로컬 DLL에 대한 접근이 MXC에서 거부됐다는 것이다. 프로필의 `:root` 거부와 `:minimal` 예외에는 해당 Python 설치에 대한 명시적 허용이 없다. 공식 문서는 최소 읽기 집합을 Codex가 결정한다고 설명하며 이 설치가 포함되는지는 확인되지 않았다. PATH를 System32로 고정해도 실행 파일 옆 DLL에 읽기 권한을 부여하지 않는다. P2.13의 `0xC0000022`는 대상별 Win32 오류가 아니며, Python 생성 거부, 로더·DLL 거부, 표준 라이브러리·프로브 초기화 접근 거부, MXC 프로세스 정책 충돌 또는 다른 초기화 오류를 구분하지 못한다. 두 실행의 작업 공간 배치도 달라 단일 변수 비교가 아니다. [OpenAI 권한 프로필](https://learn.chatgpt.com/docs/permissions)
+
+### 별도 승인으로 진행할 최소 진단
+
+각 단계는 직전 단계가 PASS이고 해당 단계의 실행이 별도 승인된 경우에만 한 번 실행한다. P2.10의 고정 CLI 해시·서명, 환경 변수 목록, 전역 슬롯, 명시적 MXC·기존 프로필을 유지한다. 새 합성 CODEX_HOME과 작업 폴더를 사용하고 승인된 Python 경로·해시를 재확인한다. 관리 정책·작업 루트·경로 또는 종료가 불명확하거나, 종료 코드가 0이 아니거나, 예상 출력이 없으면 중단한다. 정제된 표준 오류와 종료 코드만 기록하고 권한 확대·폴백·재시도를 하지 않는다.
+
+| 단계 | 고정 내부 명령 | PASS 범위 |
+| --- | --- | --- |
+| 1 | 승인된 절대 python.exe 경로와 `-V` | `Python 3.10.11` 및 종료 0. 버전 출력 경로만 확인 |
+| 2 | 동일 Python, `-I -S -B -c "print('MXC_PY_OK')"` | 표식 및 종료 0. 명령에 파일 접근 코드는 없으며 인터프리터 자체의 초기화 읽기는 여전히 필요 |
+| 3 | 동일 Python, `-I -S -B -c "print(open('allowed.txt', 'rb').read(1).hex())"` | 새 합성 표식의 예상 첫 바이트와 종료 0. 허용 파일 읽기만 확인 |
+| 4 | 호스트 양성 대조 1회 후 복원, 기존 일곱 경로 MXC 프로브 1회 | 파일별 Win32 결과와 해시·junction 검사로 판정 |
+
+다음 승인 요청은 1단계에만 해당한다. 1단계 PASS도 표준 라이브러리·ctypes·파일 경계를 검증하지 않는다. 실패 시 동일 조건 재실행 대신 합성 전용 런타임의 배치·의존성·허용 경로를 정적으로 검토할 수 있다. 다운로드·설치·복사·실행은 별도 승인 전 차단한다. 이번에는 Python과 MXC 실행 0회다. P2.10 시작 PASS 및 기존 증거는 유지하며 B 파일 경계와 C 원장 보호는 NOT VERIFIED, P2 A/B/C 전체와 P3는 BLOCKED다.
+
 ## P2.13 승인된 파일 시험 결과
 
 기준 `53e446e095dc1f954c15ba7021d3b35b07230b90`. P2.10과 동일한 OpenAI 서명 CLI 바이너리(`0.167.0-alpha.3.2`, 동일 SHA-256), 명시적 MXC, `mxc-file-test` 및 제한 런처 환경을 사용했다. 새 GUID 루트와 합성 홈을 만들고 전역 뮤텍스를 유지했다. 고정 Python 프로브에서 `CreateFileW`로 `GENERIC_READ`와 `GENERIC_WRITE`를 별도로 요청하고 각각 한 바이트를 읽거나 썼다. 기존 파일만 열도록 `OPEN_EXISTING`을 사용했다. 프로브가 실행되면 API별 Win32 오류를 기록한다.

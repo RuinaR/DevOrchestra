@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.14 정적 분석에서 작업 공간 밖의 Python 실행 이미지와 앱 로컬 DLL 접근을 우선 가설로 좁혔다. 거부 단계는 미확인이다. 다음은 별도 승인된 MXC 내부 Python `-V` 1회이며, 이번 실행은 0회다. [정적 분석 및 단계별 시험](P2-MXC-FILE-TEST.md#p214-python-시작-경로의-정적-분석)
+
 P2.13 호스트 대조 1회에서 7개 경로 읽기·쓰기 성공. MXC 1회는 `0xC0000022`로 종료됐으며 대상 결과가 없었다. 표식·junction은 불변이지만 B 파일 경계와 C의 MXC 원장 보호는 NOT VERIFIED다. P2 A/B/C 전체와 P3는 BLOCKED다. [시험 결과](P2-MXC-FILE-TEST.md#p213-승인된-파일-시험-결과)
 
 P2.10 승인 진단 1회에서 명시적 MXC와 `mxc-file-test` 조합으로 `MXC_OK` 및 종료 코드 0을 확인했다. 시작만 PASS다. OS 접근 거부·비간섭·외부 Job 결합은 NOT VERIFIED이며 P2 A/B/C 전체 및 P3는 BLOCKED다. [시작 진단 결과](P2-MXC-VALIDATION.md#p210-승인된-시작-진단-결과)
