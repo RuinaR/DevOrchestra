@@ -43,9 +43,13 @@ def dashboard_projection_v1(events, tail, project_id, observed_at):
         ended = next((e for e in evidence if e["kind"] == "role_finished"), None)
         roles[role] = {"start": began, "finish": ended, "latest": evidence[-1] if evidence else None}
 
-    completed = next((e for e in reversed(project_events)
-                      if e["kind"] == "role_finished" and e["phase"] == "CHECKPOINTING"
-                      and e["state"] == "COMPLETED" and e["result"] == "PASS"), None)
+    job_events = [dict(event, sequence=seq) for seq, event in enumerate(events, 1)
+                  if event.get("source") == "WINDOWS_SYNTHETIC_JOB"]
+    last_job = job_events[-1] if job_events else None
+    job_pending = last_job is not None and last_job["kind"] != "job_drained"
+    recovery = next((dict(event, sequence=seq) for seq, event in reversed(list(enumerate(events, 1)))
+                     if event["kind"] in ("recovery", "job_recovery_blocked", "cancelled")
+                     or (event["kind"] == "job_drained" and event.get("result") == "CANCELLED")), None)
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -64,9 +68,10 @@ def dashboard_projection_v1(events, tail, project_id, observed_at):
         "unconfirmed_agent_run_id": pending.get("agent_run_id"),
         "pipeline_phases": phases,
         "milestone_gates": [
-            {"name": "P1 · Mock pipeline", "state": "PASS" if completed else "UNVERIFIED",
-             "evidence_seq": completed["sequence"] if completed else None},
-            {"name": "P1.5 · GUI validation", "state": "NO LEDGER EVIDENCE"},
+            {"name": "P1 · Mock regression", "state": "PASS",
+             "git_sha": "0ebe8db5ca7a05715862383dff09cd9492cef4c5", "scope": "8 + CLI"},
+            {"name": "P1.5 · Headless UI", "state": "PASS",
+             "git_sha": "a2f650e56251c6145091d1e4686679af587b63eb", "scope": "14 + CLI"},
             {"name": "P2 · OS isolation", "state": "BLOCKED"},
         ],
         "role_cards": roles,
@@ -82,8 +87,15 @@ def dashboard_projection_v1(events, tail, project_id, observed_at):
             "cost": "NOT_APPLICABLE" if start else "UNKNOWN",
         },
         "safety": {
-            "lease": "NOT OBSERVED",
+            "lease": "DRAIN UNVERIFIED" if job_pending else "NOT OBSERVED",
             "sandbox": "BLOCKED",
+            "files": "REAL ACCESS BLOCKED / OS NOT VERIFIED",
+            "network": "REAL ACCESS BLOCKED / OS NOT VERIFIED",
+            "real_execution": "BLOCKED",
+            "block_reason": "Owned Job drain unverified" if job_pending else "OS isolation not verified",
+            "job": last_job,
+            "job_pending": job_pending,
+            "recovery": recovery,
             "approval": next((e for e in reversed(current)
                               if e["kind"] in ("permission", "owner_approved_mock")), None),
             "latest": latest,

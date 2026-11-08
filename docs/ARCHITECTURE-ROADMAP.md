@@ -1,6 +1,6 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
-상태: **P1 Mock 실행 기반 및 P1.5 Windows 읽기 전용 콘솔 구현**. 실제 프로젝트 실행과 OS 격리 집행은 차단 상태다.
+상태: **P1/P1.5 구현 및 P2 소유 Job 제어 검증**. 실제 프로젝트 실행과 OS 격리 집행은 차단 상태다.
 
 ## P1 구현 및 기술 선택
 
@@ -110,14 +110,18 @@ run_one(project, task):
 
 ## P2 격리 검증 계획
 
+Win32 Job 제어는 고정 합성 시험에서 집행한다. 전역 뮤텍스 안에서 실행 세대와 Job 의도를 원장에 저장한다. `PROC_THREAD_ATTRIBUTE_JOB_LIST`로 자식을 생성과 동시에 Job에 편입하고 중지 상태에서 생성 영수증을 기록한다. 이어서 실행을 재개한다. Job의 동시 활성 상한은 2, 커밋 메모리 상한은 96 MiB이며 커널 API로 설정값을 읽어 확인한다. 사용자 핸들과 환경 변수는 상속하지 않고 Windows 부트스트랩용 `SystemRoot`만 넘긴다. 루트 종료와 활성 0을 확인하고 소유 핸들을 닫은 후에만 종료 영수증을 쓴다. 다음 작업은 이 조건을 통과해야 한다. [프로세스 생성 특성](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute) · [Job 메모리 제한](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information)
+
+Job 소유자가 비정상 종료되면 커널의 kill-on-close를 사용하도록 설정되어 있다. 현재 익명 Job의 종료를 재시작 뒤 독립적으로 증명하는 복구 수단은 없다. 원장에 시작 기록만 남으면 복구는 같은 UNKNOWN 영수증을 반복 반환하며 원장 입장 차단을 유지한다. 실제 OS 전원 상실, 소유자 강제 종료 후 kill-on-close, 메모리 한도 초과는 미검증이다. 영속 입장 범위는 기존 단일 프로필 원장 계약을 따른다. P3의 `RoleAdapter`는 계약만 정의하며 등록·실행 경로가 없다.
+
 `sandbox_profile.restricted_profile()`은 네트워크·vGPU·클립보드·오디오/비디오·프린터 리디렉션을 끄고 Protected Client를 켜는 고정 XML을 메모리에서 만든다. 매핑 경로, 자동 로그인 명령, 저장 및 실행 API는 없다. 출력 계약만 합성 검증했다. [Windows Sandbox 설정](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-configure-using-wsb-file)
 
 | 경계 | 다음 구현·부정 테스트 |
 | --- | --- |
-| 소유 자식과 단일 슬롯 | 신뢰 실행기가 전역 슬롯을 잡은 채 자체 시험 자식을 중지 상태로 생성하고 소유 Job에 편입한 뒤 시작한다. Job에 이탈 허용 플래그를 설정하지 않고 소유 핸들·실행 세대를 기록한다. 자식·손자 생성과 비정상 종료 시험에서 Job 내 활성 프로세스 0을 확인한 뒤에만 다음 역할을 허용한다. Job은 게스트/VM 종료 관측을 대체하지 않는다. |
+| 소유 자식과 단일 슬롯 | 고정 시험에서 정상·비정상 루트 종료, 남은 자식, 시간 한도·취소 시 트리 회수와 재진입 거부를 확인했다. 이후 호스트 소유자 강제 종료의 독립 종료 증거와 게스트/VM 종료 관측을 검증한다. |
 | 파일·재분석 지점 | 최초 검증은 호스트 공유 폴더 없이 시작한다. 후속 전달기는 합성 파일의 해시와 상대 경로를 고정하고 허용 루트 및 열린 핸들의 최종 경로/볼륨을 검증한다. junction, 심볼릭 링크, 하드 링크, ADS, 경로 바꿔치기 및 쓰기 제한 우회가 거부되는지 시험한다. |
 | 네트워크·자격증명 | 공유 클립보드·계정·환경·홈 디렉터리 없이 시작한다. 외부·호스트·사설 주소와 DNS, 호스트 환경·자격증명 표식 조회를 합성 표식으로 거부 시험한다. P3에서 네트워크가 필요하면 별도 게이트와 전용 제한 자격증명이 필요하다. |
-| Sandbox / VM | 승인된 Windows 환경에서 설치 여부, OS 버전과 Protected Client 지원을 확인한다. WSB로 수명주기 및 종료를 증명하기 어렵다면 전용 VM의 관측 가능한 부팅·종료 계약을 비교한다. 실행 중인 다른 앱에 대한 프로세스 조사나 제어를 사용하지 않는다. |
+| Sandbox / VM | 파일·네트워크 부정 시험의 첫 후보로 공유 없는 Windows Sandbox를 선택했다. 별도 VM은 자동화된 수명주기와 게스트 출력 회수에 유리하나 이미지·가상 네트워크 관리가 추가된다. AppContainer는 호스트에서 권한을 축소하는 후보로, 게스트 OS 경계와 동일한 보장을 전제하지 않는다. 승인된 환경에서 WSB의 Protected Client 지원과 종료를 검증하고 증거 회수에 한계가 있으면 전용 VM을 평가한다. |
 | 복구 | 재시작 후 남은 소유 프로세스 또는 격리 세션을 확인할 수 없으면 BLOCKED를 유지한다. 종료 증거를 받은 뒤에만 명시 복구하고 이전 역할을 자동 재실행하지 않는다. |
 
-Job Object 편입과 종료 집계는 프로세스·자원 제어이며 파일·네트워크에는 독립 OS 경계가 필요하다. 이 차수에는 Job 또는 VM/Sandbox 실행기를 연결하지 않았다. [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+Job Object 편입과 종료 집계는 프로세스·자원 제어이며 파일·네트워크에는 독립 OS 경계가 필요하다. VM/Sandbox 실행 및 증거 회수는 BLOCKED다. 회수 경로는 게스트 종료 증거 이후 허용 목록·크기·해시·파일 형식을 검사한 합성 산출물만 격리 검역소에서 읽어야 한다. 게스트가 호스트 감사 원장에 직접 쓸 수 없어야 한다. [Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)

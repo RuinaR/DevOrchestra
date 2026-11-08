@@ -125,12 +125,41 @@ class Runner:
                 return None
             events, tail = self.ledger.snapshot(recover_journal=True)
             session = _Session(self.ledger, len(events), tail, last_run(events))
+            if session.pending_job:
+                return session.recover_job(action, expected_run)
             if action == "run":
                 event = session.apply("step", project, scenario, expected_run, abandoned)
                 while session.state in PHASES:
                     event = session.apply("step", project, scenario, expected_run, False)
                 return event
             return session.apply(action, project, scenario, expected_run, abandoned)
+
+    def _probe_job(self, expected_run, fixture, cancel_requested=lambda: False):
+        """Internal synthetic test seam. There is no CLI or adapter dispatch to it."""
+        from .job_probe import Probe, _run_probe
+        if not isinstance(fixture, Probe):
+            raise Blocked("Only fixed Job fixtures are supported")
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            session = _Session(self.ledger, len(events), tail, last_run(events))
+            if (abandoned or session.pending_job or session.state != State.PLANNING
+                    or session.run[-1]["kind"] not in ("permission", "job_drained")
+                    or session.ids["run_id"] != expected_run
+                    or time() >= session.run[0]["deadline"]):
+                raise Blocked("Synthetic Job preconditions unmet")
+            probe_id = uuid4().hex
+            evidence = {"probe_id": probe_id, "fixture": fixture.value, "phase": session.state.value}
+            session.emit("job_intent", session.state, **evidence)
+
+            def created(active):
+                if active != 1:
+                    raise Blocked("Synthetic child assignment unverified")
+                session.emit("job_created", session.state, **evidence, active_processes=active)
+
+            receipt = _run_probe(fixture, self.ledger.path.parent, created, cancel_requested)
+            if receipt["active_processes"] != 0:
+                raise Blocked("Previous Job is not drained")
+            return session.emit("job_drained", session.state, **evidence, **receipt)
 
 
 class _Session:
@@ -143,10 +172,26 @@ class _Session:
         self.state = State(run[-1]["state"]) if run else State.IDLE
         self.ids = {key: run[0][key] for key in ("project_id", "run_id", "task_id", "generation")} if run else {}
 
+    @property
+    def pending_job(self):
+        return self.run[-1] if self.run and self.run[-1]["kind"] in (
+            "job_intent", "job_created", "job_recovery_blocked") else None
+
+    def recover_job(self, action, expected_run):
+        previous = self.pending_job
+        if action != "recover" or self.ids["run_id"] != expected_run:
+            raise Blocked("Owned Job drain unverified; explicit recovery required")
+        if previous["kind"] == "job_recovery_blocked":
+            return previous
+        return self.emit("job_recovery_blocked", State.RECOVERING,
+                         probe_id=previous["probe_id"], phase=previous["phase"],
+                         result="UNKNOWN", reason="Owned Job drain evidence missing")
+
     def emit(self, kind, state, **details):
         event = {
             **self.ids, **details, "kind": kind, "state": state.value,
-            "owner": self.owner, "source": "MOCK", "timestamp": datetime.now(timezone.utc).isoformat(),
+            "owner": self.owner, "source": "WINDOWS_SYNTHETIC_JOB" if kind.startswith("job_") else "MOCK",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self.ledger.append(self.count, self.tail, event)
         self.count += 1

@@ -27,7 +27,8 @@ EVIDENCE_FIELDS = (
     "decision", "result", "reason", "request", "approval_id", "issued", "expires",
     "safe_args_hash", "diff", "test", "commands", "exit_code", "elapsed_seconds",
     "synthetic_tokens", "measured_tokens", "cost", "resource_peaks", "retries",
-    "handoff", "resume_phase", "owned_children",
+    "handoff", "resume_phase", "owned_children", "probe_id", "fixture", "active_processes",
+    "active_before_stop", "total_processes", "root_exited_before_stop", "job_memory_limit", "job_process_limit",
 )
 
 
@@ -267,7 +268,7 @@ class CommandCenter:
                                   if run else "No recorded mission"), wraplength=350)
         self.gates.configure(text="\n".join(
             f"{gate['name']}   {gate['state']}" +
-            (f" · #{gate['evidence_seq']}" if gate.get("evidence_seq") else "")
+            (f" · {gate['git_sha'][:7]} ({gate['scope']})" if gate.get("git_sha") else "")
             for gate in view["milestone_gates"]))
         self.render_safety(view)
         for (name, badge), phase in zip(self.phases, view["pipeline_phases"]):
@@ -304,11 +305,25 @@ class CommandCenter:
         latest = view["safety"]["latest"]
         approval = view["safety"]["approval"]
         pending = view["unconfirmed_role"]
+        safety = view["safety"]
         live = f"Live role UNKNOWN · {pending} intent" if pending else "No recorded open role"
         gate = approval.get("decision", approval["kind"]) if approval else "NO RECORD"
         reason = latest.get("reason")
-        self.safety.configure(text=f"{live}\nOS isolation BLOCKED · lease unobserved\n"
-                              f"Approval {gate}" + (f" · {reason}" if reason else ""))
+        job, recovery = safety["job"], safety["recovery"]
+        if safety["job_pending"]:
+            job_status = f"Owned Job #{job['sequence']} · drain UNKNOWN"
+        elif job:
+            job_status = f"Last synthetic Job #{job['sequence']} · drained ({job['active_processes']})"
+        else:
+            job_status = "Owned Job · no receipt"
+        recovery_status = (f"Recovery/stop #{recovery['sequence']} · {recovery.get('result', recovery['state'])}"
+                           if recovery else "")
+        self.safety.configure(text="\n".join(filter(None, (
+            live, f"Slot · {safety['lease']}", job_status, recovery_status,
+            f"Real execution BLOCKED · {safety['block_reason']}",
+            "Files / network · OS NOT VERIFIED",
+            f"Approval {gate}" + (f" · {reason}" if reason else ""),
+        ))))
         if resources["elapsed"] is None:
             self.resources.configure(text="Time, tokens, cost · UNKNOWN")
             return

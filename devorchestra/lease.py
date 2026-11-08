@@ -3,8 +3,10 @@ import ctypes
 import os
 from contextlib import contextmanager
 from ctypes import wintypes
+from threading import local
 
 MUTEX_NAME = r"Global\DevOrchestra.P1.Execution.v1"
+_thread_slot = local()
 
 
 class Blocked(RuntimeError):
@@ -15,6 +17,8 @@ class Blocked(RuntimeError):
 def execution_slot():
     if os.name != "nt":
         raise Blocked("Windows execution slot unavailable")
+    if getattr(_thread_slot, "owned", False):
+        raise Blocked("Execution slot busy (recursive entry)")
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
     kernel.CreateMutexW.restype = wintypes.HANDLE
@@ -31,9 +35,11 @@ def execution_slot():
         result = kernel.WaitForSingleObject(handle, 0)
         if result not in (0, 0x80):  # WAIT_OBJECT_0 / WAIT_ABANDONED
             raise Blocked("Execution slot busy or unverifiable")
+        _thread_slot.owned = True
         try:
             yield result == 0x80
         finally:
+            _thread_slot.owned = False
             if not kernel.ReleaseMutex(handle):
                 raise Blocked("Execution slot release failed")
     finally:
