@@ -42,6 +42,43 @@ class ChangeResult:
     after: tuple[FileSpec, ...]
 
 
+@dataclass(frozen=True)
+class ControllerTestReceipt:
+    """Reserved for the trusted local executor, never decoded from provider events."""
+
+    approval_ref: str  # Binds project, session, task, generation and role IDs.
+    verifier_run_id: str
+    replica_id: str
+    before_inventory_ref: str
+    after_inventory_ref: str
+    argv: tuple[str, ...]
+    exit_code: int
+    owned_process_drain_ref: str
+    audit_sequence: int
+    audit_event_hash: str
+
+
+def require_live_commit_evidence(receipts: tuple[ControllerTestReceipt, ...]) -> None:
+    """Fail closed until the controller can verify local receipt provenance."""
+    if (type(receipts) is not tuple or not receipts
+            or any(type(receipt) is not ControllerTestReceipt for receipt in receipts)):
+        raise Blocked("Trusted Controller test receipts required")
+    # A typed record is only a claim until a fenced, trusted writer and OS
+    # evidence are available. Neither a provider journal nor a caller can opt in.
+    raise Blocked("Live receipt provenance and OS isolation not verified")
+
+
+def _synthetic_receipt(approval_ref, tail, manifest_ref):
+    return {
+        "kind": "synthetic_commit_candidate",
+        "approval_ref": approval_ref,
+        "evidence_tail": tail,
+        "manifest_ref": manifest_ref,
+        "evidence_source": "SYNTHETIC",
+        "live_commit": "BLOCKED",
+    }
+
+
 def _verify(approval, result, events, tail, before_bundle, after_bundle, now):
     """Only the controller supplies approval, clock, and the dedicated ledger."""
     if (approval.commit_allowed is not True or not isfinite(now)
@@ -108,12 +145,7 @@ def nominate(ledger, approval, result, before_bundle, after_bundle, *, clock):
             raise Blocked("Abandoned execution slot")
         events, tail = ledger.snapshot()
         manifest_ref = _verify(approval, result, events, tail, before_bundle, after_bundle, clock())
-        receipt = {
-            "kind": "synthetic_commit_candidate",
-            "approval_ref": result.approval_ref,
-            "evidence_tail": tail,
-            "manifest_ref": manifest_ref,
-        }
+        receipt = _synthetic_receipt(result.approval_ref, tail, manifest_ref)
         ledger.append(len(events), tail, receipt)
         return receipt
 
@@ -130,6 +162,8 @@ def recheck(ledger, approval, result, receipt, before_bundle, current_bundle, *,
         for seq, event in enumerate(events[:-1], 1):
             prefix_tail = digest([seq, prefix_tail, event])
         manifest_ref = _verify(approval, result, events[:-1], prefix_tail, before_bundle, current_bundle, clock())
-        if receipt != {"kind": "synthetic_commit_candidate", "approval_ref": result.approval_ref,
-                       "evidence_tail": prefix_tail, "manifest_ref": manifest_ref}:
+        expected = _synthetic_receipt(result.approval_ref, prefix_tail, manifest_ref)
+        # Pre-P2.12 receipts already identify themselves as synthetic by kind.
+        legacy = {key: expected[key] for key in ("kind", "approval_ref", "evidence_tail", "manifest_ref")}
+        if receipt not in (expected, legacy):
             raise Blocked("Candidate receipt mismatch")

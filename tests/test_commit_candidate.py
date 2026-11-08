@@ -9,7 +9,9 @@ import unittest
 from zipfile import ZipFile, ZipInfo
 
 from devorchestra.adapter import Budget
-from devorchestra.commit_candidate import Approval, ChangeResult, ROLES, nominate, recheck
+from devorchestra.commit_candidate import (
+    Approval, ChangeResult, ControllerTestReceipt, ROLES, nominate, recheck, require_live_commit_evidence,
+)
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
 from devorchestra.quarantine import FileSpec, package_inputs
@@ -17,6 +19,18 @@ from devorchestra.quarantine import FileSpec, package_inputs
 
 def spec(path, data):
     return FileSpec(path, len(data), sha256(data).hexdigest())
+
+
+class LiveEvidenceTests(unittest.TestCase):
+    def test_provider_and_synthetic_claims_cannot_admit_live_commit(self):
+        for evidence in ((), ("PASS",), ({"record": {"method": "turn/completed"}},),
+                         ({"kind": "synthetic_commit_candidate"},)):
+            with self.subTest(evidence=evidence), self.assertRaisesRegex(Blocked, "Controller test receipts"):
+                require_live_commit_evidence(evidence)
+        plausible = ControllerTestReceipt("approval", "verifier", "replica", "before", "after",
+                                          ("test",), 0, "drain", 1, "audit")
+        with self.assertRaisesRegex(Blocked, "provenance and OS isolation"):
+            require_live_commit_evidence((plausible,))
 
 
 @unittest.skipUnless(os.name == "nt", "Windows ledger and global slot")
@@ -68,6 +82,7 @@ class CommitCandidateTests(unittest.TestCase):
     def test_nomination_reopen_replay_and_changed_bytes(self):
         self.seed()
         receipt = self.nominate()
+        self.assertEqual(("SYNTHETIC", "BLOCKED"), (receipt["evidence_source"], receipt["live_commit"]))
         reopened = Ledger(self.ledger.path)
         recheck(reopened, self.approval, self.result, receipt, self.before, self.after, clock=lambda: 15)
         with self.assertRaises(Blocked):
@@ -125,6 +140,16 @@ class CommitCandidateTests(unittest.TestCase):
         self.seed(bad_test=True)
         with self.assertRaisesRegex(Blocked, "Verifier"):
             self.nominate()
+
+    def test_legacy_candidate_rechecks_as_synthetic(self):
+        self.seed()
+        receipt = {"kind": "synthetic_commit_candidate", "approval_ref": self.approval_ref,
+                   "evidence_tail": self.result.audit_tail,
+                   "manifest_ref": digest([asdict(self.manifest[0])])}
+        self.ledger.append(5, self.result.audit_tail, receipt)
+        recheck(self.ledger, self.approval, self.result, receipt, self.before, self.after, clock=lambda: 15)
+        with self.assertRaises(Blocked):
+            require_live_commit_evidence((receipt,))
 
     def test_failed_review(self):
         self.seed(bad_review=True)

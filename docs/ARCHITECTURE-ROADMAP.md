@@ -1,5 +1,13 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
+## P2.12 제공자 감사와 로컬 테스트 영수증
+
+App Server 이벤트 저널은 제공자의 턴·도구 관측을 보존한다. `turn/completed`, 도구 종료 보고 및 모델 PASS 문자열은 Controller 테스트 영수증으로 승격하지 않는다. App Server의 Windows sandbox 준비 상태 역시 MXC 구현을 단독으로 식별하지 못한다. [OpenAI Codex App Server](https://learn.chatgpt.com/docs/app-server)
+
+향후 신뢰 Controller만 같은 전역 슬롯과 작업 세대에서 승인된 복제본의 전체 전후 파일 집합과 해시를 독립 수집하고, 검증된 OS 경계에서 승인된 정확한 테스트 인자를 실행한다. `ControllerTestReceipt` 계약은 동결 승인, Verifier 실행, 복제본, 전후 인벤토리, 실제 종료 코드, 소유 프로세스 회수 증거와 감사 순번·해시를 연결한다. 발행 전에 CLI/App Server 및 자식 소유권을 증명하고, 원장 추가 이후에만 영수증을 인정한다. 범위·귀속·해시·회수·원장 중 하나라도 불명확하면 차단한다. 스테이징 전에 전체 인벤토리를 재확인하고 검사 이후 변경도 막아야 한다.
+
+현재 실제 영수증 발행과 검증된 출처 조회는 미연결이다. 새 합성 후보는 `SYNTHETIC` 및 `live_commit=BLOCKED`로 기록한다. 이전 후보도 합성 재확인만 허용한다. 형식상 맞는 Controller 영수증을 직접 제출해도 실사용 게이트는 BLOCKED다.
+
 ## P2.11 오프라인 커밋 후보
 
 신뢰 Controller가 선택한 전용 합성 원장, 현재 승인, 시각 및 변경 전후 번들을 사용한다. 동결 승인 해시는 프로젝트·세션·작업·실행 세대·역할 실행 ID·목표·테스트 인자·허용 파일의 변경 전 해시·예산·유효기간·커밋 허가를 묶는다. 후보 입력은 승인 해시, 감사 체인 끝 해시 및 변경 후 목록을 제출한다.

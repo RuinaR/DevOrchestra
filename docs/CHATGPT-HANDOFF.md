@@ -1,5 +1,9 @@
 # ChatGPT 전달용 요약
 
+## P2.12 연동 준비
+
+현재 CLI `0.167.0-alpha.3.2`, OpenAI 서명 Valid, 실행 파일 해시는 MXC 검증 문서에 있다. P2.10은 별도 승인 대기다. 제공자 이벤트와 합성 후보는 실제 테스트 증거가 아니다. 다음 단계는 명시적 MXC 시작 확인, A/B/C와 비간섭 실측, 단일 슬롯 아래 승인 복제본 인벤토리·소유 프로세스 회수·신뢰 원장 발행을 결합하는 것이다. 실제 Codex·커밋 경로는 BLOCKED다.
+
 ## P2.11 커밋 후보
 
 `devorchestra/commit_candidate.py`는 신뢰 Controller가 지정한 합성 원장과 동결 승인으로 Manager → Developer → Reviewer → Verifier → Manager 증거를 검증한다. 승인된 텍스트 수정과 전후 해시를 확인하고 후보를 한 번 기록하며, 재확인에서 변경·만료를 거부한다. 실제 복제본 전체 변경 수집·Git 적용은 후속 단계다. P2.10은 별도 승인 대기이며 P2 A/B/C·P3는 BLOCKED다.

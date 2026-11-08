@@ -1,5 +1,11 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.12 현재 CLI 확인
+
+PATH가 해석한 OpenAI Codex 설치 트리의 절대 실행 파일에서 `--version`으로 `0.167.0-alpha.3.2`를 확인했다. Windows Authenticode는 Valid, 서명자는 OpenAI OpCo, LLC였다. SHA-256은 `4b3286e35d7fe866c6b0eb3f07d7a4cdb5e96489576170dfd6b3a15aa1c67382`다. 실제 사용자 경로는 공개 기록에서 제외했다. 버전 조회 중 기존 홈의 임시 별칭 정리와 생성 시도가 접근 거부됐다는 경고가 있었다. 후속 조회와 승인된 진단에는 처음부터 전용 합성 홈을 지정한다.
+
+공식 진단의 CLI 최소 버전 0.162.0을 넘지만, 현재 바이너리·장치·유효 프로필 조합의 MXC 시작은 아직 검증되지 않았다. 별도 승인 후 실행 직전 경로와 해시를 다시 대조하고, 변경 또는 유효 정책 불명 시 중단한다. P2.10의 제한 환경, Known Folder로 확인한 `LOCALAPPDATA`의 런처 초기화 입력, 고정 echo 1회 및 폴백 금지를 유지한다. 런처 입력은 내부 파일 접근 허가가 아니며 내부 환경 노출 여부도 미검증이다. [OpenAI Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+
 ## P2.10 최소 시작 진단 사전 점검
 
 기준 `cf6ab48d48fcb53717b239138e35aa7a2a5a97a0`. Windows LocalApplicationData Known Folder와 호스트 `LOCALAPPDATA`가 일치했고, `SystemDrive` 및 System32 `cmd.exe` 사전 점검도 통과했다. 경로 값은 기록하지 않았다. 현재 PATH에서 확인한 CLI 위치는 이전 관측과 다르고, 파일 버전 메타데이터가 없어 이전 `0.167.0-alpha.3.2`를 현재 버전으로 확정할 수 없다. 이 차이가 설치 버전 변경을 증명하지는 않는다. CLI 및 MXC를 실행하지 않았다.
