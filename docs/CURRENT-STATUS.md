@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.8 기준 `ac306f4ef05e0e939b4e9cf5c7f9c5f4794f90f4`. 별도 승인으로 명시적 MXC·`:workspace` 시작 진단 1회에서 `MXC_OK` 및 종료 코드 0을 관측했다. 파일 시험의 프로필·양성 대조·명령·판정은 확정했으며 실행은 별도 승인 대기다. A는 기존 제한 Job 및 MXC 시작 증거만 있다. B와 MXC/Job 결합은 미검증, C는 기존 합성 검역만 PASS다. P3는 BLOCKED다. [합성 파일 시험](P2-MXC-FILE-TEST.md)
+
 P2.7 기준 `71abfd91f6ac80dcd46548e44d13a4b0866eaa76`. Windows 11 25H2 빌드 및 설치 CLI 버전이 공식 MXC 시작 진단의 수치 기준을 충족한다. 장치 호환성·유효 정책·Job 결합은 NOT VERIFIED다. VirtualBox 계획은 보류했다. MXC 진단은 별도 승인 대기이며 P2 실측과 P3는 BLOCKED다. [MXC 사전 검토](P2-MXC-VALIDATION.md)
 
 P2.6 기준 `9c748eb4b78923e083dfe9340984071d7379c922`. 현재 Windows Core x64의 AMD-V 펌웨어 표시와 Microsoft 하이퍼바이저 실행을 확인했다. WHP·VBS 런타임과 VirtualBox 실제 부팅은 미확인이다. 기본 패키지의 최소 설치 승인안을 작성했다. 설치, 다운로드, 설정 변경, VM 실행은 수행하지 않았다. 현재 PC의 부팅은 승인·자원 여유·WHP 확인 전 BLOCKED다. 기존 A 일부 Job 실측과 C 합성 검역만 PASS이며 OS 격리·반출·P3는 BLOCKED다. [P2.6 사전 점검](P2-VM-VALIDATION.md#p26-현재-pc-도입-사전-점검)

@@ -1,5 +1,7 @@
 # ChatGPT 전달용 요약
 
+P2.8 기준 `ac306f4ef05e0e939b4e9cf5c7f9c5f4794f90f4`. 앞선 명시적 MXC·`:workspace` 시작 진단은 `MXC_OK`/0이었다. 별도 합성 프로필과 파일·junction 양성 대조, 실행 명령, 전후 해시 기준을 준비했다. 파일 시험은 별도 승인 대기이며 시스템 경로 및 MXC/Job 결합은 미검증이다. P3는 BLOCKED다. [시험 계약](P2-MXC-FILE-TEST.md)
+
 P2.7 기준 `71abfd91f6ac80dcd46548e44d13a4b0866eaa76`. 현재 Windows PC의 MXC를 우선 검토하고 VirtualBox 계획은 보류했다. OS와 CLI 수치 기준을 충족했지만 장치·유효 정책·Job 결합은 미검증이다. 다음은 소유자 승인 후 합성 폴더에서 공식 명시적 MXC 시작 진단 한 번이다. 파일·네트워크·데스크톱·소유 Job·원장 보호와 검역이 입증될 때까지 P3와 실제 Codex 실행은 BLOCKED다. [MXC 시험 계약](P2-MXC-VALIDATION.md)
 
 P2.6 기준 `9c748eb4b78923e083dfe9340984071d7379c922`. 현재 PC의 Windows Core x64와 AMD-V 펌웨어 표시, Microsoft 하이퍼바이저 실행을 읽기 전용으로 확인했다. WHP 및 VBS 런타임 조회는 제한됐고 VirtualBox는 표준 위치에서 확인되지 않았다. Oracle 7.2.22 x64의 `VBoxApplication`만 포함하는 설치안과 별도 승인·자원·A/B/C 순서를 기록했다. 다운로드·설치·VM 실행은 미수행이다. 실제 VM 격리·반출과 P3는 BLOCKED다. [사전 점검](P2-VM-VALIDATION.md#p26-현재-pc-도입-사전-점검)

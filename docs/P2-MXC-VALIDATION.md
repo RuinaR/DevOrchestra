@@ -1,5 +1,7 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+P2.8에서는 별도 승인된 시작 진단 1회에서 `MXC_OK`와 종료 코드 0을 관측했다. [합성 파일 시험](P2-MXC-FILE-TEST.md)은 별도 승인 대기이며 시작 관측으로 파일 경계를 판정하지 않는다.
+
 기준 SHA `71abfd91f6ac80dcd46548e44d13a4b0866eaa76`. 현재 PC에서는 MXC를 우선 검토한다. VirtualBox 다운로드·설치·VM 계획은 보류한다. 이 문서는 승인 전 읽기 전용 점검과 시험 계약이며 런타임에는 새 실행 경로가 없다.
 
 ## 확인한 범위
@@ -37,7 +39,7 @@
 
 ## 다음 승인과 시험 순서
 
-**첫 승인 요청은 합성 빈 프로젝트 디렉터리에서 공식 일회성 시작 진단 한 번만 실행하는 범위다.** 필요한 경우 전용 임시 작업 경로와 합성 설정 생성 범위도 지정한다. 사용자 저장 설정 변경이나 로그인 없이 관리 요구사항을 포함한다. OpenAI 공식 명령은 다음과 같다. [OpenAI Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+**이미 완료한 첫 진단의 승인 범위는 빈 합성 프로젝트 디렉터리에서 공식 일회성 시작 진단 한 번이었다.** 사용자 저장 설정 변경이나 로그인 없이 관리 요구사항을 포함했다. OpenAI 공식 명령은 다음과 같다. [OpenAI Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)
 
 ```powershell
 codex -c windows.sandbox=mxc sandbox --include-managed-config --permission-profile :workspace -- cmd.exe /d /c echo MXC_OK
