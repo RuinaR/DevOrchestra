@@ -45,6 +45,9 @@ class ProjectionTests(unittest.TestCase):
                          empty["snapshot_version"], empty["project_state"]))
         self.assertIsNone(empty["resources"]["elapsed"])
         self.assertEqual([], empty["events"])
+        self.assertEqual("NOT_VERIFIED", empty["safety"]["noninterference"])
+        self.assertEqual("BLOCKED", empty["safety"]["real_execution"])
+        self.assertTrue(empty["safety"]["isolation_mode"].startswith("MXC CANDIDATE"))
         self.assertEqual(["BLOCKED"] * 3, [empty["safety"][name]
                          for name in ("files", "network", "credentials")])
         self.assertEqual("24fc3e7", empty["safety"]["security_baseline"]["git_sha"][:7])

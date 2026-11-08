@@ -387,7 +387,8 @@ class CommandCenter:
                 stream_status = f"Mock stream #{stream['sequence']} · recovery pending"
         self.safety.configure(text="\n".join(filter(None, (
             live, f"Slot · {safety['lease']}", job_status, recovery_status, stream_status,
-            f"Real execution BLOCKED · {safety['block_reason']}",
+            f"Real execution {safety['real_execution']} · {safety['block_reason']}",
+            f"Noninterference · {safety['noninterference']}",
             safety["isolation_mode"],
             f"Files {safety['files']} / Net {safety['network']} / Credentials {safety['credentials']}",
             f"Recorded baseline · {baseline['scope']} @ {baseline['git_sha'][:7]}",

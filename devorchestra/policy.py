@@ -15,6 +15,37 @@ class Capability(str, Enum):
     SERVICE = "external-service"
 
 
+FORBIDDEN_LIVE_CAPABILITIES = (
+    "external-process-access", "global-input", "screen-capture", "external-window-control",
+    "outside-workspace-files", "privilege-escalation", "system-settings-change",
+)
+
+
+def live_preflight(required_capabilities=()):
+    """Assess declared requirements without opening files or authorizing execution.
+
+    A declaration is not evidence about what generated code actually does.
+    This release has no verified live admission path, even for an empty plan.
+    """
+    required = tuple(required_capabilities)
+    forbidden = tuple(name for name in FORBIDDEN_LIVE_CAPABILITIES if name in required)
+    known = (*FORBIDDEN_LIVE_CAPABILITIES, *(item.value for item in Capability))
+    unknown = any(name not in known for name in required)
+    if forbidden:
+        reason = "FORBIDDEN_CAPABILITY"
+    elif unknown:
+        reason = "UNKNOWN_CAPABILITY"
+    else:
+        reason = "ISOLATION_UNVERIFIED"
+    return {
+        "status": "BLOCKED",
+        "reason": reason,
+        "forbidden_capabilities": forbidden,
+        "isolation_candidate": "MXC",
+        "noninterference": "NOT_VERIFIED",
+    }
+
+
 @dataclass(frozen=True)
 class Request:
     project: str

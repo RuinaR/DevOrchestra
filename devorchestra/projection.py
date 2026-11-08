@@ -7,6 +7,7 @@ from .development import session_view
 from .event_journal import OPEN_ROLE_EVENTS
 from .lease import Blocked
 from .ledger import digest
+from .policy import live_preflight
 from .runtime import PHASES, PROJECTS
 
 
@@ -60,6 +61,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
                      or (event["kind"] == "job_drained" and event.get("result") == "CANCELLED")), None)
     latest_stream = next((e for e in reversed(project_events)
                           if e["kind"] in ("stream_event", "stream_interrupted")), None)
+    live = live_preflight()
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -105,7 +107,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "safety": {
             "lease": "DRAIN UNVERIFIED" if job_pending else "NOT OBSERVED",
             "sandbox": "BLOCKED",
-            "isolation_mode": "NO GUEST / WINDOWS JOB PROBE ONLY",
+            "isolation_mode": f"{live['isolation_candidate']} CANDIDATE / WINDOWS JOB PROBE ONLY",
             "files": "BLOCKED",
             "network": "BLOCKED",
             "credentials": "BLOCKED",
@@ -114,8 +116,9 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
                 "scope": "Win32 synthetic Job",
                 "evidence": "tests/test_job_probe.py",
             },
-            "real_execution": "BLOCKED",
-            "block_reason": "Owned Job drain unverified" if job_pending else "OS isolation not verified",
+            "real_execution": live["status"],
+            "noninterference": live["noninterference"],
+            "block_reason": "Owned Job drain unverified" if job_pending else "OS noninterference not verified",
             "job": last_job,
             "job_pending": job_pending,
             "recovery": recovery,

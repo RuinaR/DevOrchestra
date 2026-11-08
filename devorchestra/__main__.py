@@ -12,6 +12,7 @@ from .dashboard import project_view, render
 from .development import session_view
 from .lease import Blocked
 from .ledger import Ledger, canonical
+from .policy import live_preflight
 from .runtime import Runner, Scenario
 
 
@@ -19,6 +20,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("init")
+    preflight = commands.add_parser("live-preflight", help="Check declared capabilities without running anything")
+    preflight.add_argument("--requires", action="append", default=[], metavar="CAPABILITY")
     start = commands.add_parser("start")
     start.add_argument("--project", default="fixture-a", help="Run a synthetic workflow only")
     start.add_argument("--scenario", type=Scenario, choices=list(Scenario), default=Scenario.NORMAL)
@@ -51,6 +54,9 @@ def main():
         commands.add_parser(action).add_argument("development_id")
     commands.add_parser("session-status").add_argument("--project")
     args = parser.parse_args()
+    if args.action == "live-preflight":
+        print(canonical(live_preflight(args.requires)))
+        return 2
     try:
         if os.name != "nt" or not os.environ.get("LOCALAPPDATA"):
             raise Blocked("Windows LOCALAPPDATA required")
@@ -111,4 +117,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
