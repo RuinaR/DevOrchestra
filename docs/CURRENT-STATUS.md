@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.18 고정 네이티브 EXE의 MXC 자기 점검 1회는 종료 1 및 기대 표식 미확인으로 FAIL이다. 정제 오류는 OTHER_REDACTED_STDERR이며 실패 단계는 미확정이다. 파일 시험·P2 전체·P3는 BLOCKED다. [진단 기록](P2-MXC-FILE-TEST.md#p218-승인된-네이티브-mxc-자기-점검)
+
 P2.17 기존 MSVC/Windows SDK로 네이티브 시험기 빌드와 PE·import 검사, 합성 호스트 확인 4건 PASS. MXC 실행 0회이며 다음 승인은 고정 바이너리 자기 점검 1회다. P2 전체와 P3는 BLOCKED다. [빌드 및 호스트 증거](P2-MXC-FILE-TEST.md#p217-빌드-및-호스트-검증-결과)
 
 P2.16 Python 독립 Win32 C 프로브와 고정 합성 경로 검증 계약을 추가했다. 기존 Windows 회귀 56건 PASS다. 승인된 C/C++ 빌드 도구가 확인되지 않아 PE 생성·정적 바이너리 검사·네이티브 실행은 BLOCKED다. 빌드·호스트 검증 이후 다음 MXC 승인은 자기 점검 1회다. [빌드 및 판정 계약](P2-MXC-FILE-TEST.md#p216-python-독립-네이티브-프로브)

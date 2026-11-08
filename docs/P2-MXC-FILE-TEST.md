@@ -1,5 +1,13 @@
 # P2.8 MXC 합성 파일 인수 시험
 
+## P2.18 승인된 네이티브 MXC 자기 점검
+
+기준 `dc3e2b55ab63a16808239d77dc46d5a8d7275583`. OpenAI 서명 및 P2.10 CLI 해시를 재확인했다. P2.17 네이티브 원본의 PE32+ AMD64 콘솔 형식과 SHA-256 `5bcaf68f8f75cc58db781812ff84c85e541042b3b7e6504f7d6d09816e598357`을 확인하고 새 GUID 합성 작업 공간에 덮어쓰기 없이 복사했다. 원본·복사본 해시는 일치했다. 새 합성 CODEX_HOME, P2.10 제한 환경, 전역 슬롯과 기존 `mxc-file-test` 프로필을 사용했다.
+
+명시적 MXC에서 승인된 EXE의 `--self-test`를 정확히 1회 호출했다. **FAIL**. 소유 CLI 종료를 확인했고 종료 코드는 `1`이다. 기대 표식 `MXC_NATIVE_OK`는 확인되지 않았다. 정제된 오류는 `OTHER_REDACTED_STDERR`다. 이 기록으로 MXC 준비와 EXE 시작 중 실패 단계를 구분할 수 없다. 후속 실행·재시도·권한 확대·폴백은 없었다. 새 합성 자료와 기존 빌드 결과는 보존했다.
+
+P2.10 cmd.exe 시작과 P2.17 호스트 증거는 유지한다. MXC 파일 시험은 진행 조건을 충족하지 못했다. 외부 Job 결합·OS 파일 경계·비간섭은 NOT VERIFIED이며 P2 전체와 P3는 BLOCKED다.
+
 ## P2.17 빌드 및 호스트 검증 결과
 
 기준 `83f912620593ec13e9ba1d9c4e561f280cc48d6b`. Microsoft 서명이 유효한 vswhere에서 Visual Studio Build Tools 2022 및 Community 2022/2026 등록을 확인했다. 빌드에는 Build Tools 2022의 MSVC 14.44.35207 Hostx64/x64와 Windows SDK 10.0.26100.0만 사용했다. cl 19.44.35228.0, link·dumpbin 14.44.35228.0 및 컴파일러 DLL c1·c2는 AMD64이며 Microsoft 서명이 유효했다. SDK 헤더는 명시적 include 경로로 고정했다. 도구 설치나 영구 환경 변경은 없었다.
