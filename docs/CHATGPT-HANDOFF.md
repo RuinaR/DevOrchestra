@@ -1,5 +1,7 @@
 # ChatGPT 전달용 요약
 
+P2.6 기준 `9c748eb4b78923e083dfe9340984071d7379c922`. 현재 PC의 Windows Core x64와 AMD-V 펌웨어 표시, Microsoft 하이퍼바이저 실행을 읽기 전용으로 확인했다. WHP 및 VBS 런타임 조회는 제한됐고 VirtualBox는 표준 위치에서 확인되지 않았다. Oracle 7.2.22 x64의 `VBoxApplication`만 포함하는 설치안과 별도 승인·자원·A/B/C 순서를 기록했다. 다운로드·설치·VM 실행은 미수행이다. 실제 VM 격리·반출과 P3는 BLOCKED다. [사전 점검](P2-VM-VALIDATION.md#p26-현재-pc-도입-사전-점검)
+
 P2.5 기준 `1519b7874d6e6716aef33746b94d7b79adb24ece`. 전용 x64 테스트 PC의 VirtualBox 7.2 계열·Windows 11 게스트를 1순위로 선정했고 A/B/C 양성 대조, 합성 매체, 오프라인 반출, 네트워크 모드 분리와 GUI 인수 계획을 확정했다. 현재 PC에는 즉시 실행할 후보가 확인되지 않았다. A 일부 Job과 C 합성 검역만 PASS이며 게스트 격리·반출과 P3는 BLOCKED, 실제 GUI는 NOT VERIFIED다. 다음은 [전용 환경 승인과 실측](P2-VM-VALIDATION.md)이다.
 
 P2.4 기준 `07f6ff7d86a3f247d9b8eab35ad6b4743d35c100`. 증분 합성 이벤트 영수증을 기존 SQLite 원장에 개별 커밋하고, 커밋된 접두사만 복구하며 새 이벤트 이어받기는 차단한다. 합성 사용량 최고치와 승인·종료·검증 근거를 후속 작업 게이트에 연결했다. 전체 44건 및 CLI PASS. 실제 GUI·제공자 계측·재접속은 미검증이며 OS 격리·반출·Codex는 BLOCKED다.

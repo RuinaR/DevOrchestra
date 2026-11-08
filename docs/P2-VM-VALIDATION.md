@@ -1,8 +1,33 @@
 # P2.5 격리 실행 환경과 인수 시험
 
+## P2.6 현재 PC 도입 사전 점검
+
+소유자는 현재 Windows PC에 도입하는 방향을 선택했다. 아래 항목은 P2.5 전용 PC 선정 이후의 우선 경로를 기록한다. Windows Core 25H2 x64와 AMD-V 지원 CPU는 Oracle Windows x64 호스트 후보에 해당한다. Windows의 펌웨어 가상화 API가 활성 상태를 보고했고 CPUID에 실행 중인 Microsoft 하이퍼바이저가 보였다. 현재 실행 문맥에서 직접 SVM/NPT 및 SLAT 표식은 노출되지 않았다. 이 결과만으로 물리 CPU의 지원 여부를 부정할 수 없다. 메모리 무결성(HVCI)의 레지스트리 설정은 활성 값이었다. Device Guard 및 선택적 기능 CIM 조회, WHP 기능 조회는 접근 제한으로 실제 VBS/HVCI 서비스 실행과 WHP 활성 여부를 확정하지 못했다. VirtualBox는 PATH, 기본 설치 위치, Oracle의 두 레지스트리 뷰에서 발견되지 않았다. 사용자 지정 설치 여부는 미확인이다. [AMD CPU 사양](https://www.amd.com/en/products/processors/desktops/ryzen/7000-series/amd-ryzen-7-7800x3d.html) · [Microsoft CPUID 탐색](https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/feature-discovery) · [WHP 조회](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvgetcapability) · [메모리 무결성](https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity)
+
+Oracle 7.2 문서의 Microsoft 하이퍼바이저 백엔드는 WHP가 실행 중일 때 사용되며 성능 저하 가능성이 있다. Microsoft도 공존 시 부팅 실패나 느린 모드를 경고한다. 현재 하이퍼바이저와 보안 설정을 유지한 조합으로만 첫 시험을 계획한다. WHP 비활성, 서명 드라이버 로드 거부, 성능 저하, 부팅 실패가 확인되면 중지하고 별도 결정한다. Windows Home의 Hyper-V 역할 또는 Sandbox를 먼저 설치할 필요는 없다. `HypervisorPlatform`(WHP)과 `VirtualMachinePlatform`, Hyper-V 역할은 서로 별개다. [Oracle Hyper-V 공존](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html) · [Microsoft 공존 제약](https://learn.microsoft.com/en-gb/troubleshoot/windows-client/application-management/virtualization-apps-not-work-with-hyper-v)
+
+### 최초 설치와 부팅 제안
+
+- Oracle이 게시한 후보는 Windows x64 기본 패키지 `VirtualBox-7.2.22-175245-Win.exe`다. 별도 다운로드 승인이 있으면 공식 SHA-256과 Authenticode 서명·서명자·버전을 확인한다. 설치 직전 승인 패키지의 지원·보안 공지를 다시 확인한다. [Oracle 배포 안내](https://www.oracle.com/virtualization/technologies/vm/downloads/virtualbox-downloads.html) · [해당 버전 배포 인덱스](https://download.oracle.com/virtualbox/7.2.22/)
+- 제안하는 최소 MSI 기능은 `ADDLOCAL=VBoxApplication`이다. Oracle이 필수로 지정한 본체와 Windows 호스트 가상화 커널 지원 드라이버가 설치 범위다. 정확한 서명 카탈로그·INF·서비스 목록은 승인 후 해당 패키지에서 확인한다. 핵심 드라이버를 수동 설치하거나 서명 경고를 우회하지 않는다. `VBoxUSB`, `VBoxNetwork` 및 하위 `VBoxNetworkFlt`(브리지 필터)·`VBoxNetworkAdp`(Host-only 어댑터), `VBoxPython`은 제외한다. 파일 연결·바로가기·자동 실행도 승인 범위에서 제외한다. Extension Pack과 Guest Additions는 최초 시험에 포함하지 않는다. [Oracle Windows 설치 옵션](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/installation.html)
+- 브리지 필터의 바인딩·Host-only 어댑터 생성은 호스트 네트워크 상태와 연결에 영향을 줄 수 있다. 해당 기능을 제외해 이 경로를 줄이지만 기본 설치의 영향과 재부팅 여부는 실측 전 미확인이다. 핵심 드라이버 설치는 관리자 승인과 유지보수 시간이 필요하다. 설치 과정에서 네트워크 구성이나 재부팅이 추가로 요구되면 중지한다. [Oracle 네트워크 구성](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/networkingdetails.html) · [Oracle 설치 문제 해결](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/Troubleshooting.html)
+- 최초 단독 부팅의 제안치는 **2 vCPU, CPU 실행 캡 50%, 게스트 RAM 4 GiB, OS 디스크 64 GiB 고정, 반출 디스크 16 MiB 고정, 시험 20분**이다. 4 GiB는 Windows 11 최소 사양이다. GUI 시험용 6 GiB는 별도 승인과 여유 확인 후 검토한다. 시작 직전 호스트 가용 물리 RAM 12 GiB, 커밋 여유 16 GiB, 대상 볼륨 여유 최소 100 GiB와 이미지·복제·로그의 실제 공간 합계를 확인한다. 이 숫자는 보수적인 운용 기준으로 벤더 보장값이 아니다. 관측 시 디스크는 예비 기준을 충족했으나 RAM과 커밋 여유는 모두 시작 기준에 못 미쳤다. 다른 프로그램을 조작해 여유를 확보하지 않는다. [Windows 11 최소 사양](https://www.microsoft.com/en-us/windows/windows-11-specifications) · [Windows 메모리 조회](https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-globalmemorystatusex)
+- VM은 새 합성 전용 저장 루트에 생성한다. 현재 계획은 모든 NIC `none`, 공유 폴더·클립보드·드래그앤드롭·USB 전달·3D 가속·원격 콘솔 끔이다. 라이선스가 승인된 사전 준비 Windows x64 이미지를 우선한다. 개인용 Windows 11 Home/Pro의 초기 설정은 인터넷 및 계정을 요구할 수 있어 현재 무네트워크 시험에서 해결하지 않는다. 자격증명 없는 승인 이미지가 없으면 게스트 준비를 차단한다. [Windows 초기 설정 요구사항](https://www.microsoft.com/en-us/windows/windows-11-specifications)
+- 최초 설치와 부팅은 사용자가 정한 유지보수 시간에 수행하는 안이다. 커널 드라이버 공존 및 자원 경합은 일반 기술 위험이며 게임·안티치트 호환성과 제재 위험은 확인되지 않았다. 앱이나 게임의 상태를 조사하거나 제어해 판단하지 않는다. 최초 시험에 동시 게임 사용을 포함하지 않는다.
+
+### 승인 순서와 현재 PC 인수
+
+1. **다운로드만** 승인한다. Oracle 기본 패키지와 공식 SHA-256 목록을 저장소 밖 `%LOCALAPPDATA%\DevOrchestra-Lab\downloads`에 저장하는 안이다. Windows 게스트 이미지·라이선스·설치 자료는 별도 승인이다.
+2. **기본 설치와 커널 드라이버**를 승인한다. 대상 버전·호스트·유지보수 시간, `VBoxApplication` 범위, 관리자 작업, 설치 로그를 특정한다. BIOS/UEFI·Hyper-V/VBS·WHP·Windows 기능·네트워크 설정과 재부팅은 각각 필요성이 확인된 뒤 별도로 승인한다. 기존 앱·게임 제어는 이 승인에 포함하지 않는다.
+3. **VM 생성·시작과 종료 시험**을 승인한다. 저장 루트는 `%LOCALAPPDATA%\DevOrchestra-Lab\vm`, 검역은 그 밖의 `%LOCALAPPDATA%\DevOrchestra-Lab\quarantine`을 제안한다. 경로·게스트 이미지 해시·소유 VM 및 매체 UUID·자원 한도·시작 전 여유를 확인한다. 단독 합성 부팅으로 실제 백엔드를 관측한 뒤 A에서 정상·시간초과·강제 종료·실행기 장애·중복 입장을 순차 확인한다. 소유 자원 종료가 불명확하면 B/C로 넘기지 않는다.
+4. **B 양성 대조 및 차단**을 실시한다. 게스트 표준 계정의 허용 파일·가짜 프로필·토큰으로 파일·자격증명·통합 대조를 수행한다. 네트워크 없는 기준 VM은 그대로 유지한다. DNS/TCP의 별도 격리 양성 대조망은 네트워크 설정 변경과 합성 수신기 범위를 별도로 승인한 경우에만 수행한다. 대조망이 없으면 B 네트워크를 BLOCKED로 유지한다.
+5. **C 오프라인 반출**을 승인한다. 전원 종료 증거 뒤 지정 반출 매체만 분리해 검역에서 검사한다. 합성 호스트 원장·프로젝트의 해시 불변과 정상/변조 번들 결과를 확인한다. 실제 호스트 프로젝트 적용은 별도다. GUI 인수는 독립 게스트 자체 창에 대한 별도 승인 범위다.
+
+현재는 승인 준비까지 완료했다. A 일부 Win32 Job 실측과 C 합성 검역만 PASS이며 VM A, OS B 및 실제 C 반출과 P3는 BLOCKED다. 공개 문서에는 원시 호스트 진단과 순간 자원 수치를 포함하지 않는다.
+
 기준 DevOrchestra `1519b7874d6e6716aef33746b94d7b79adb24ece`. 이 문서는 실행 계획이다. VM, 반출기, 네트워크 브로커는 아직 연결되지 않았다.
 
-## 환경 결정
+## P2.5 환경 비교와 이전 선정
 
 **1순위는 전용 x64 테스트 PC의 VirtualBox 7.2 계열과 별도 Windows 11 x64 테스트 게스트다.** Oracle의 Windows 호스트 설치 절차와 UUID 기반 VM 상태·저장 매체 제어를 사용할 수 있다. 전용 PC에서는 현재 사용자의 Windows, 게임, 네트워크 설정을 건드리지 않고 부정 시험과 GUI 검증을 수행할 수 있다. 이미 승인된 VMware 전용 환경이 있다면 동일한 A/B/C 증거를 제공하는 조건으로 대체한다. [Oracle 설치 가이드](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/installation.html) · [VBoxManage 7.2](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/vboxmanage.html)
 
