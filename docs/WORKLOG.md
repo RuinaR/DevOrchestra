@@ -1,0 +1,10 @@
+# 작업 기록
+
+## 2026-11-08 KST · P1
+
+- 기준 `becd2f7abaca1b8af521d6536259a6faaadbeddc`. 변경 Git SHA는 이 기록을 포함하는 커밋으로 조회한다.
+- `devorchestra/lease.py`, `ledger.py`, `runtime.py`, `policy.py`에서 Win32 단일 슬롯, 원장 트랜잭션·펜스, 상태 머신, 합성 승인 계약을 구현했다.
+- `dashboard.py`와 `__main__.py`에 원장 기반 읽기 전용 콘솔과 소유자 명령을 추가했다. 상세 기록은 프로젝트·실행·역할 필터를 제공한다.
+- `python -B -m unittest discover -s tests -v`의 Windows 격리 테스트 8건 PASS. 임시 원장의 CLI 초기화 → 승인 대기 → 승인 → 완료 → 대시보드·검증기 감사 조회도 PASS. `git diff --check` PASS.
+- 검증 환경은 Windows NT 10.0.26200.0, Python 3.10.11, SQLite 3.40.1이다. .NET SDK 9.0.315와 10.0.301이 설치되어 있었으며 P1에서 사용하지 않았다.
+- 원격 기준 확인은 GitHub 비교 API를 사용했다. 로컬 Git의 초기 `ls-remote`는 이름 해석 단계에서 실패했다. 실제 운영·GUI·샌드박스는 미검증이다.

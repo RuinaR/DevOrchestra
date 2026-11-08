@@ -2,7 +2,29 @@
 
 **한 번에 한 프로젝트 · 한 작업 · 한 에이전트만 실행하는 로컬 AI 개발 오케스트레이터.**
 
-> 상태: **설계/보안 기준 수립 중**. 실제 실행기, 모델 연결, 샌드박스, 사용량 추적, 자동 검토 및 GUI는 아직 구현되지 않았습니다. 이 저장소의 문서가 기능 구현이나 보안 격리의 증거가 되지 않습니다.
+> 현재 상태는 **P1 Windows Mock 실행 기반**입니다. 실제 Codex, 외부 프로젝트 실행과 OS 샌드박스는 BLOCKED입니다.
+
+## P1 실행 방법
+
+Windows와 Python 3.10 이상이 필요합니다. 추가 패키지는 필요 없습니다. `init`은 `%LOCALAPPDATA%\DevOrchestra\p1.sqlite3`를 최초 한 번 생성합니다. 이미 존재하는 원장은 초기화하지 않습니다.
+
+```powershell
+python -B -m devorchestra init
+$run = (python -B -m devorchestra start | ConvertFrom-Json).run_id
+python -B -m devorchestra step $run     # NEED_APPROVAL 및 합성 읽기 요청 출력
+python -B -m devorchestra approve $run  # 위 요청을 확인한 소유자가 실행
+python -B -m devorchestra run $run      # 승인된 합성 파이프라인 실행
+python -B -m devorchestra dashboard
+python -B -m devorchestra audit --run $run --role Verifier
+```
+
+`run` 대신 `step`을 쓰면 단계 사이에 `pause`, `resume`, `cancel`을 같은 실행 ID로 요청할 수 있습니다. 강제 종료로 시작만 기록된 역할은 `recover`로 UNKNOWN 상태를 기록한 뒤 `cancel`로 닫습니다. 재시작은 작업을 자동 실행하지 않습니다.
+
+`dashboard --watch`는 변경된 원장 스냅샷을 출력합니다. 단계 배지와 역할 패널은 기록된 전이에서 읽고, 합성 역할의 설명과 사용량은 Mock으로 구분합니다. 테마와 아이콘은 표시 수단이며 근거는 개별 감사 이벤트입니다. 게임형 그래픽 테마는 후속 단계입니다.
+
+```powershell
+python -B -m unittest discover -s tests -v
+```
 
 ## 목표
 
@@ -71,6 +93,7 @@
 - [전역 안전 정책](docs/GLOBAL-SAFETY-POLICY.md) — 모든 연결 프로젝트에 적용할 최소 허용 경계
 - [아키텍처·개발 로드맵](docs/ARCHITECTURE-ROADMAP.md) — 실행 구조와 검증 게이트
 - [근거 및 출처](docs/REFERENCES.md) — 참조한 공식 보안 문서와 프로젝트 사례
+- [제품 정의](docs/PROJECT-DEFINITION.md) · [현재 상태](docs/CURRENT-STATUS.md) · [작업 기록](docs/WORKLOG.md) · [개발 인수인계](docs/AI-HANDOFF.md) · [ChatGPT 전달용](docs/CHATGPT-HANDOFF.md)
 - [AGENTS.md](AGENTS.md) — 본 저장소에서 작업하는 Codex 지침
 
 **주의:** 저장소의 `AGENTS.md`는 DevOrchestra 작업에 적용되는 저장소 지침입니다. 다른 저장소의 Codex에 전역 지침을 자동 설치하지 않습니다. 실제 DevOrchestra가 다른 프로젝트를 실행할 때는 등록된 프로젝트 지침과 이 정책을 실행기에서 함께 강제해야 합니다.

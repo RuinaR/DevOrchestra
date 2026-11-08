@@ -55,6 +55,8 @@
 - Work reports go to docs/CURRENT-STATUS.md / WORKLOG.md / AI-HANDOFF.md or equivalent project docs, with a concise ChatGPT handoff. Do not commit user-private transcripts.
 
 ## Test and release gate
+- The P1 runner is Mock-only. Its simulated owner grant can authorize only the built-in fixture inspection. Do not route a model, shell, external project or service through that grant.
+- Test with the repository's disposable fixture storage. Use the verified ledger for dashboard state and label synthetic outputs and unobserved process state explicitly.
 - Test hierarchy: static/pure unit -> synthetic/mock -> isolated integration -> approved real backend -> approved live product. Do not silently promote evidence across layers.
 - Freeze relevant baselines and independent evaluation cases. Re-run affected tests after final change; don't call earlier full-suite success the final HEAD's success.
 - Before changing an existing repo, document expected behaviors and invariants, then validate regressions. In all cases prefer defect fixes and measurable goal progress over arbitrary test-count inflation.

@@ -1,6 +1,15 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
-상태: **계획, 미구현**. 설계 수치·기능·OS 차단 수준은 아직 측정되지 않았으며 허위 PASS를 선언하지 않는다.
+상태: **P1 Mock 실행 기반 구현**. 아래 장기 구조 중 실제 프로젝트 실행과 OS 격리는 설계 단계다.
+
+## P1 구현 및 기술 선택
+
+- Python 표준 라이브러리 `sqlite3`와 `ctypes`를 사용한다. 설치된 Windows 환경에서 추가 종속성 없이 결정적 역할, 트랜잭션 및 Win32 호출을 검증할 수 있다. .NET은 Windows API 형식 안전성 및 GUI 통합의 대안이고, Node/TypeScript는 Codex SDK 연동의 대안이다. 실제 어댑터 선택은 P2 격리 검증 이후 별도로 한다. [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
+- Win32 `Global\` 이름의 뮤텍스를 잡은 동기 호출만 역할을 실행하거나 원장을 변경한다. 커널 소유권 확인 후 작업한다. 진행 중 실행의 세대와 ID, 이벤트 끝 해시를 원장에 보존해 중복 입장과 오래된 쓰기를 거부한다. P1이 지원하는 영속 입장 범위는 단일 Windows 사용자 프로필과 그 고정 원장이다. 별도 프로필 간 공용 영속 상태는 후속 단계다. [Microsoft Mutex Objects](https://learn.microsoft.com/en-us/windows/win32/sync/mutex-objects) · [Kernel object namespaces](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)
+- SQLite의 원자적 커밋으로 상태 이벤트와 끝 앵커를 함께 저장한다. 순번·SHA-256 체인·앵커·SQLite 상태를 검증한다. JSON 파일은 상태와 감사 이벤트의 원자적 쓰기 및 복구 처리를 별도로 구현해야 한다. 해시 체인은 우발 손상 및 단순 삭제를 검출한다. DB 전체를 다시 쓰거나 과거 사본으로 교체할 권한을 가진 주체에 대한 서명·외부 앵커는 미구현이다. 검증은 전체 원장 크기에 비례하며 장기 원장 성능은 미측정이다. [SQLite Atomic Commit](https://www.sqlite.org/atomiccommit.html)
+- P1은 실행기 자체의 고정 함수만 호출하며 자식 프로세스를 생성하지 않는다. 역할 시작 이후 종료 이벤트가 없으면 다음 역할은 차단된다. 재시작으로 자동 재실행하지 않으며 복구 후 취소한다. 실행 중인 실 작업에 대한 강제 종료·자식 회수는 P2 게이트다.
+- P2 후보는 검증된 Windows Sandbox/VM과 파일 전달 정책이다. 네트워크·클립보드·공유 경로는 검증 대상이다. Job Object는 소유 프로세스 트리와 자원 제어에 사용 가능하며, 별도 파일·네트워크 격리가 필요하다. [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/) · [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+- 대시보드의 현재 상태·단계는 검증된 이벤트, 역할 설명은 별도의 Mock 결과, 배지는 장식이다. 상세 감사 JSON에서 원본 근거를 조회한다. 합성 토큰 외 실제 사용량·비용·Git은 미계측으로 표시한다.
 
 ## 1. 컴포넌트
 
