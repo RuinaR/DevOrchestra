@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.26 주력은 호스트 통합을 끈 전용 VirtualBox Windows 게스트, 대체는 명시적 MXC로 결정했다. 두 후보 모두 실사용 BLOCKED. 다음 별도 승인 후보는 준비된 지정 VM의 A 정상 수명주기 1회다. Windows 합성 87건 및 PowerShell 정적 검사 PASS. [백엔드 결정](P2-VM-VALIDATION.md#p226-격리-백엔드-결정)
+
 P2.25 독립 프로필 초안과 PowerShell 정적 검사 추가. 정확한 Windows 런타임 허용 목록 및 유효 정책 증거가 없어 PROFILE_UNSUPPORTED/BLOCKED다. 실제 실행 0회, Python 회귀 미실행. P2 전체와 P3는 BLOCKED다. [독립 프로필 계약](P2-MXC-VALIDATION.md#p225-독립-자기-점검-프로필의-정적-계약)
 
 P2.24 고정 태그에서 루트 거부 삭제 시 상속 루트 읽기가 복원됨을 확인했다. 공개 공유 위반 사례와 P2.23 원인의 일치는 미확정이다. 독립 좁은 프로필은 설계만 검토했으며 실행 0회, P2/P3는 BLOCKED다. [프로필 분석](P2-MXC-VALIDATION.md#p224-루트-권한-및-초기화-가설)

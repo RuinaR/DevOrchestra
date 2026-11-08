@@ -1,5 +1,41 @@
 # P2.5 격리 실행 환경과 인수 시험
 
+## P2.26 격리 백엔드 결정
+
+기준 `416d041b8d95dd1b28b91b93d9cba7920ba47d95`. **주력은 호스트 통합 기능을 끈 전용 VirtualBox Windows x64 게스트, 대체 후보는 명시적 네이티브 MXC**다. 주력 선정은 구현·인수 순서를 정한 것이다. 현재 두 후보 모두 실제 개발에는 BLOCKED이고 자동 전환은 없다. 이전 MXC 우선순위는 이력으로 유지한다.
+
+### MXC 기술 판정
+
+OpenAI는 지원 환경에서 MXC를 권장하며, 기본 시작 확인에는 `:workspace`를 사용한다. 이는 작업 공간 쓰기를 제공하지만 DevOrchestra의 외부 읽기 차단 정책으로 그대로 사용할 수 없다. 공식적으로 사용자 정의 독립 프로필과 `:minimal` 읽기가 지원된다. 고정 태그의 구현은 제한된 정책에서 `:minimal`이 활성화되면 Windows, Program Files 계열과 ProgramData를 플랫폼 읽기 후보로 추가한다. 명시적 읽기 허용은 별도의 규칙이며, 이 태그에는 플랫폼 기본 루트 전체가 사용자별 DLL 목록으로 바뀌는 보장이 없다. 공식 사용에서 모든 DLL 경로를 직접 적어야 한다는 요구는 확인되지 않았다. 반면 DevOrchestra는 플랫폼 예외가 보호 경로와 겹치지 않는다는 증거, 프로세스·데스크톱 비간섭 및 소유 트리 회수를 별도로 요구한다. P2.25의 EXE만 읽는 초안은 이 구현에서 실행 검증되지 않았고, 그 차단 판정은 유지한다. [OpenAI Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox) · [OpenAI 권한 프로필](https://learn.chatgpt.com/docs/permissions) · [고정 태그 MXC 플랫폼 경로](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/windows.rs)
+
+고정 태그는 런타임 호환성을 위해 Win32k와 데스크톱 핸들을 사용할 수 있게 하며 일부 UI 제한을 적용한다. 이 계약만으로 다른 프로세스 탐지·창 접근·입력·화면 금지 전체를 입증할 수 없다. P2.10의 cmd.exe 시작 PASS, P2.15의 Python 실패, P2.18/P2.23의 네이티브 실패와 내부 단계 UNKNOWN은 유지한다. 알파 빌드 결함, MXC 준비, 이미지·로더 및 생성 실패 중 원인은 미확정이다. [고정 태그 MXC 계약](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/README.md)
+
+확인 시 공식 GitHub latest 안정 릴리스는 **0.167.0**이었다. 릴리스 노트는 읽기 전용 볼륨 루트 확장 생략(#57985)과 deny 경로의 누락 부모 처리(#58168)를 열거한다. 고정 알파 태그의 정책 소스에도 두 처리 경로가 보인다. 이 항목들은 설치 바이너리에서의 P2.23 원인 또는 안정판 교체 효과를 입증하지 않는다. 배포에서는 현재 알파의 경로·해시가 영구 요구가 되지 않도록 백엔드별 지원 버전·서명·정책을 별도 확인하고, 새 조합은 다시 인수한다. 이번에 업데이트하지 않았다. [공식 0.167.0 릴리스](https://github.com/openai/codex/releases/tag/rust-v0.167.0) · [고정 태그 정책 소스](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/policy.rs)
+
+### Windows 11 Home x64 후보 판정
+
+| 후보 | 판정 | 비간섭·데이터·네트워크·종료 | 호스트 영향·배포·부담 |
+| --- | --- | --- | --- |
+| 전용 VirtualBox Windows 게스트 | **주력 · 조건부 후보** | 독립 커널과 데스크톱이 호스트 프로세스·창·입력·화면에 대한 직접 경로를 분리한다. NIC·호스트 공유·클립보드·드래그앤드롭·USB/장치 전달·원격 콘솔을 끄고 합성 복제본만 전달한다. 게스트 표준 사용자·ACL, 게스트 Job 및 소유 VM 종료·검역은 별도 인수한다. | x64 호스트 후보이나 펌웨어, 드라이버, 하이퍼바이저 공존, 자원 여유가 필요하다. RAM·CPU·디스크와 드라이버가 게임 환경에 미치는 영향은 미측정이다. 전용 테스트 PC를 우선하고 포터블 Controller는 VM 설치와 분리한다. |
+| 명시적 MXC | **대체 · 조건부 후보** | 파일·네트워크는 유효 프로필을 실측해야 한다. 공유 호스트 커널에서 요구하는 프로세스·데스크톱 비간섭과 외부 Job 결합은 미검증이다. | 별도 VM보다 배포 부담이 작고 지원 호스트에서 관리자 초기화가 요구되지 않는 공식 방식이다. 현재 고정 CLI의 사용자 이미지 실패를 해결하거나 더 새 버전·프로필을 고정해 다시 인수해야 한다. |
+| 제한 Windows 사용자 및 AppContainer | **BLOCKED** | 별도 계정만으로 같은 호스트의 프로세스·창·입력·파일·네트워크를 모두 차단할 수 없다. AppContainer는 Windows 보안 경계지만, Codex와 모든 자식에 필요한 토큰·ACL·capability·세션·Job 구성과 금지 경로를 DevOrchestra에서 검증하지 않았다. | 계정·ACL·패키징 변경은 별도 승인이다. 현재 조합의 실행 호환성과 배포 재현성이 미확인이다. |
+| Windows Sandbox·Hyper-V 역할 | **현재 PC BLOCKED** | 지원 에디션에서는 별도 VM 경계 후보다. 통합 기능, 종료·반출, 프로젝트·자격증명 경계는 별도 인수가 필요하다. | Windows Home은 Windows Sandbox와 Hyper-V 역할을 지원하지 않는다. 기존 Microsoft 하이퍼바이저 관측을 역할 설치 가능성으로 해석하지 않는다. |
+| WSL 2 | **이번 Windows 개발 백엔드 BLOCKED** | Linux 실행 환경 후보이나 Windows 실행 도구의 동등한 대체가 아니며, 자동 마운트·Windows 실행 상호운용 등 호스트 연결을 별도로 차단·검증해야 한다. | 설치·구성이 필요한 경우 별도 승인이다. 현재 Windows 네이티브 프로젝트 인수 경로에는 포함하지 않는다. |
+
+후보 수준의 PASS는 없다. VM도 하이퍼바이저·호스트 통합·게스트 탈출 위험과 자원 경합이 남는다. Job Object·선언 기반 검사·CLI 종료만으로 파일·네트워크·데스크톱·트리 격리를 확정하지 않는다. [Oracle 호스트·게스트 지원](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/Introduction.html) · [Oracle 통합 기능](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/working-with-vms.html) · [Microsoft AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation) · [Windows Sandbox 지원](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/) · [Hyper-V 설치](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/get-started/install-hyper-v) · [WSL 설정](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
+
+### 현재 PC와 다음 단일 승인
+
+현재 PC에서 기본 경로의 VBoxManage는 발견되지 않았다. 사용자 지정 설치는 미확인이다. P2.6의 AMD-V·Microsoft 하이퍼바이저 관측은 이력이며 WHP 활성·호환성과 현재 자원 여유는 확인하지 않았다. 이 PC에 새로 설치하려면 공식 서명 패키지·관리자 승인·핵심 호스트 드라이버 설치가 필요하다. 재부팅 필요 여부는 미확정이며 별도 승인 대상이다. Microsoft 하이퍼바이저를 유지한 조합의 WHP 가용성과 성능을 확인하고 VBS/Hyper-V/보안 설정을 끄는 우회는 사용하지 않는다. 기존 P2.6 자원 상한과 호스트 여유 기준을 시작 전에 대조한다. [P2.6 사전 점검](#p26-현재-pc-도입-사전-점검) · [Oracle 설치](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/installation.html) · [Oracle Hyper-V 공존](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html)
+
+**다음 단 하나의 승인 후보는 준비된 전용 VM의 A 정상 수명주기 시험 1회**다. 사전 확보한 VM UUID와 이미지·구성 해시, NIC·통합 비활성, 자원 여유를 확인한 뒤, 단일 슬롯 아래 읽기 전용 합성 입력으로 지정 VM을 헤드리스로 한 번 시작한다. 고정 게스트 작업의 정상 종료와 같은 UUID의 poweroff 및 해당 소유 실행 핸들의 종료를 확인한다. 다른 VM·프로세스·창을 열거하거나 제어하지 않는다. 소유권·증거·종료가 불명확하거나 기한 초과면 중단하고 차단한다. 이 승인은 VM/이미지 확보, 다운로드, 설치, 드라이버, 재부팅 또는 B/C 시험을 포함하지 않는다. 준비된 환경이 없으면 시험은 BLOCKED다.
+
+A 정상 경계 다음에는 별도 승인으로 A 취소·장애 복구, B 합성 파일·프로필·자격증명·네트워크·데스크톱 비간섭, C 호스트 원장 보호와 종료 후 검역을 증명한다. 이후 최소 한 역할에서 승인된 App Server·모델 송신과 실제 Verifier 영수증을 확인한 뒤 순차 실행·검토·커밋을 연결한다. 호스트 인증정보를 게스트로 전달하지 않고 모델 연결은 별도 제한 브로커와 사용자 승인 범위를 사용한다.
+
+Controller는 Manager → Developer → Reviewer → Verifier → Manager, 전역 단일 슬롯, 승인 복제본, 예산·감사·종료 예약·이어하기·검증 기반 커밋을 소유한다. 백엔드는 버전이 고정된 시작·취소·소유 자원 회수·격리 및 검역 영수증을 반환한다. 다른 PC 초기 설정에서는 Windows 에디션/아키텍처·빌드, 가상화·WHP·보안 정책, 서명된 백엔드/이미지·CLI 버전과 해시, 자원 여유, 통합 기능·네트워크·복제본·원장 경계를 확인한다. 서명 Windows x64 포터블 배포와 초기 설정은 유지하되 설정 완료로 실연동을 열지 않는다.
+
+기존 Windows 합성 회귀 87건 및 PowerShell 독립 프로필 정적 검사 PASS. 신규 MXC·VM·Codex 호출, 설치 및 시스템 변경은 없었다. P2 A/B/C 및 P3는 BLOCKED다.
+
 P2.7에서 [현재 PC의 네이티브 MXC](P2-MXC-VALIDATION.md)를 우선 경로로 선정했다. 이 문서의 VirtualBox 다운로드·설치·VM 승인안은 보류한 이력이다.
 
 ## P2.6 현재 PC 도입 사전 점검
