@@ -2,7 +2,17 @@
 
 **한 번에 한 프로젝트 · 한 작업 · 한 에이전트만 실행하는 로컬 AI 개발 오케스트레이터.**
 
-> 현재 상태는 **P2.1 소유 Job 정리 보강 및 합성 산출물 검역**입니다. 실제 Codex, 외부 프로젝트 실행 및 게스트 OS 격리는 BLOCKED입니다.
+> 현재 상태는 **P2.2 프로젝트 등록부 및 Mock 역할 실행 계약**입니다. 실제 Codex, 외부 프로젝트 실행 및 게스트 OS 격리는 BLOCKED입니다.
+
+Command Center의 `Register`, `Project settings`, `Global limits`에서 JSON 설정을 편집할 수 있습니다. Trusted Controller가 형식과 수정 버전을 검증한 뒤 로컬 등록부에 저장합니다. 등록한 프로젝트에서도 실행은 합성 워크플로와 명시적 승인으로 제한됩니다. 입력 설정에는 비밀이나 원문 로그를 붙여넣지 마세요.
+
+```powershell
+python -B -m devorchestra project-template demo 'Demo' 'Synthetic workflow' | python -B -m devorchestra project-save
+python -B -m devorchestra project-list
+python -B -m devorchestra start --project demo
+```
+
+기존 설정을 갱신할 때는 `project-save --revision N`, 공용 예산은 `limits-save --revision N`에 JSON을 표준 입력으로 전달합니다. 프로젝트 수정에는 해당 프로젝트 revision, 공용 예산에는 등록부 version을 사용합니다. [실행·감사 계약](docs/ARCHITECTURE-ROADMAP.md#p22-등록부와-역할-계약)
 
 P2 시험은 Windows Job에서 고정 합성 프로세스만 실행합니다. 루트와 자식 트리 종료를 검증하며 CLI에는 실제 작업 실행 경로를 추가하지 않았습니다. Command Center의 Job 기록은 관측 당시의 합성 증거입니다. 슬롯의 실시간 점유와 파일·네트워크·자격증명 격리는 별도입니다. [P2 검증 범위](docs/ARCHITECTURE-ROADMAP.md#p2-격리-검증-계획)
 

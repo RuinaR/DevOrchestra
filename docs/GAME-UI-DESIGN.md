@@ -1,5 +1,7 @@
 # DevOrchestra — Game-like Operations Console UI/UX Specification v1.0
 
+P2.2 콘솔은 검증된 등록부의 프로젝트 선택, 등록·설정·전역 예산 JSON 편집을 제공한다. 저장은 revision을 검사하는 Controller를 통한다. 요청 모델·추론, 선언된 목표·Git SHA는 실제 Mock 실행과 분리해 표시한다. 프로젝트별 실행·역할 필터에는 문맥, 계약, 도구 거절, 사용량 출처와 인수인계 증거가 포함된다. 실제 창·DPI 검증은 별도다.
+
 작성: 2026-11-08 KST. 기준: `main@0ebe8db5ca7a05715862383dff09cd9492cef4c5`.
 범위: **설계 및 P1.5 구현 기준**. Tk 기반 읽기 전용 Windows Command Center, 버전 1 Projection과 역할·실행별 감사 조회를 구현했다. 실제 창의 시각·DPI 검증은 NOT VERIFIED이며 P2 OS 격리는 BLOCKED다.
 

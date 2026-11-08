@@ -5,6 +5,9 @@ from enum import Enum
 from time import monotonic, time
 from uuid import uuid4
 
+from .adapter import Budget, MockAdapter, RoleRequest, Scope, normalize_mock
+from .catalog import Catalog
+
 from .lease import Blocked, execution_slot
 from .ledger import digest
 from .policy import Capability, Grant, Request
@@ -132,7 +135,8 @@ class Runner:
                 while session.state in PHASES:
                     event = session.apply("step", project, scenario, expected_run, False)
                 return event
-            return session.apply(action, project, scenario, expected_run, abandoned)
+            catalog = Catalog(self.ledger).read() if action == "start" else None
+            return session.apply(action, project, scenario, expected_run, abandoned, catalog)
 
     def _probe_job(self, expected_run, fixture, cancel_requested=lambda: False):
         """Internal synthetic test seam. There is no CLI or adapter dispatch to it."""
@@ -143,6 +147,7 @@ class Runner:
             events, tail = self.ledger.snapshot(recover_journal=True)
             session = _Session(self.ledger, len(events), tail, last_run(events))
             if (abandoned or session.pending_job or session.state != State.PLANNING
+                    or session.ids["project_id"] not in PROJECTS
                     or session.run[-1]["kind"] not in ("permission", "job_drained")
                     or session.ids["run_id"] != expected_run
                     or time() >= session.run[0]["deadline"]):
@@ -200,20 +205,39 @@ class _Session:
         self.state = state
         return event
 
-    def apply(self, action, project_id, scenario, expected_run, abandoned):
+    def apply(self, action, project_id, scenario, expected_run, abandoned, catalog=None):
         if action == "start":
             if abandoned or (self.state != State.IDLE and self.state not in TERMINAL):
                 raise Blocked("Previous run requires completion or recovery")
-            project = PROJECTS[project_id]
+            registered = catalog["projects"].get(project_id)
+            if project_id in PROJECTS:
+                project = asdict(PROJECTS[project_id])
+                goal = project["priority"]
+                project_budget = {"seconds": project["seconds"], "tokens": project["tokens"], "cost_microunits": 0}
+            elif registered:
+                # Snapshot only synthetic metadata. Never pass owner filesystem paths to a role.
+                config = registered["data"]
+                project_budget = config["budget"]
+                goal = config["goal"]
+                project = {"name": config["name"], "milestone": "MOCK",
+                           "model": "mock-v1", "reasoning": "NOT_APPLICABLE",
+                           "seconds": project_budget["seconds"], "cost_limit": project_budget["cost_microunits"],
+                           "roles": config["roles"], "acceptance": config["acceptance"],
+                           "revision": registered["revision"]}
+            else:
+                raise Blocked("Unknown project")
+            global_budget = catalog["global_budget"]
+            budget = {key: min(value, global_budget[key]) for key, value in project_budget.items()}
             self.run = []
             self.ids = {"project_id": project_id, "task_id": uuid4().hex,
                         "run_id": uuid4().hex, "generation": self.count + 1}
             return self.emit(
-                "run_started", State.PRECHECK, project=asdict(project),
+                "run_started", State.PRECHECK, project=project, budget=budget,
+                global_budget=global_budget, project_budget=project_budget,
                 scenario=scenario.value, deadline=time() + (
-                    0 if scenario is Scenario.TIME_LIMIT else project.seconds),
-                token_limit=0 if scenario is Scenario.TOKEN_LIMIT else project.tokens,
-                goal=project.priority, instruction=INSTRUCTION_VERSION, policy_hash=POLICY_HASH,
+                    0 if scenario is Scenario.TIME_LIMIT else budget["seconds"]),
+                token_limit=0 if scenario is Scenario.TOKEN_LIMIT else budget["tokens"],
+                goal=goal, instruction=INSTRUCTION_VERSION, policy_hash=POLICY_HASH,
                 git_before="NOT_APPLICABLE", git_after="NOT_APPLICABLE", owned_children=[],
             )
         if not self.run or expected_run != self.ids["run_id"]:
@@ -278,31 +302,65 @@ class _Session:
                 approval_id=approval["approval_id"] if allowed else None,
             )
         used = sum(e.get("synthetic_tokens", 0) for e in self.run)
-        if used + ROLE_TOKENS > start["token_limit"]:
+        approval = next((e for e in reversed(self.run) if e["kind"] == "owner_approved_mock"), None)
+        if approval is None or not approval["issued"] <= now < approval["expires"]:
+            return self.emit("permission_expired", State.BLOCKED, reason="APPROVAL_EXPIRED")
+        role = PHASES[phase]
+        preference = start["project"].get("roles", {}).get(role)
+        task_budget = start.get("budget", {"seconds": start["project"]["seconds"],
+                                          "tokens": start["token_limit"], "cost_microunits": 0})
+        role_limits = preference["budget"] if preference else task_budget
+        role_budget = {key: min(value, task_budget[key]) for key, value in role_limits.items()}
+        role_budget["tokens"] = min(role_budget["tokens"], start["token_limit"] - used)
+        if ROLE_TOKENS > role_budget["tokens"]:
             return self.emit("budget", State.BLOCKED, reason="TOKEN_LIMIT")
         # Persist intent before role entry. A crash before the finish event leaves UNKNOWN.
         evidence = {
-            "agent_run_id": uuid4().hex, "role": PHASES[phase], "phase": phase.value,
+            "agent_run_id": uuid4().hex, "context_id": uuid4().hex, "role": role, "phase": phase.value,
             "model": "deterministic" if phase == State.VERIFYING else start["project"]["model"],
             "reasoning": start["project"]["reasoning"], "instruction": start["instruction"],
             "policy_hash": start["policy_hash"], "goal": start["goal"],
             "git_before": start["git_before"], "git_after": start["git_after"],
             "owned_children": [],
+            "requested_model": preference["model"] if preference else None,
+            "requested_reasoning": preference["reasoning"] if preference else None,
+            "role_budget": role_budget, "approval_id": approval["approval_id"],
         }
+        prior = next((event for event in reversed(self.run) if event["kind"] == "role_finished"), None)
+        if prior and "input_contract_hash" in prior and (prior.get("scope_released") is not True
+                                                          or prior.get("owned_children") != []):
+            raise Blocked("Previous synthetic role resources were not released")
+        refs = (prior["handoff_ref"],) if prior and "handoff_ref" in prior else ()
+        request = RoleRequest(**self.ids, agent_run_id=evidence["agent_run_id"], role=role,
+                              model=evidence["model"], reasoning=evidence["reasoning"],
+                              context_id=evidence["context_id"], budget=Budget(**role_budget),
+                              scope=Scope(f"mock://{self.ids['project_id']}", (approval["approval_id"],)),
+                              verified_input_refs=refs, goal=start["goal"],
+                              deadline_utc_epoch=min(start["deadline"], approval["expires"],
+                                                     now + role_budget["seconds"]))
+        evidence.update(input_contract_hash=digest(asdict(request)), input_refs=refs)
         started = monotonic()
         self.emit("role_started", phase, **evidence)
-        result = mock_role(phase, Scenario(start["scenario"]), self.run)
+        adapter = MockAdapter(lambda: mock_role(phase, Scenario(start["scenario"]), self.run))
+        result, tool_audit = normalize_mock(adapter.stream(request))
         elapsed = monotonic() - started
         if result["result"] == "FAIL":
             next_state = State.FAILED
-        elif time() >= start["deadline"] or elapsed >= start["deadline"] - now:
+        elif (time() >= start["deadline"] or elapsed >= min(start["deadline"] - now, role_budget["seconds"])):
             next_state = State.BLOCKED
             result["reason"] = "TIME_LIMIT"
         else:
             next_state = PIPELINE[PIPELINE.index(phase) + 1]
+        if time() >= approval["expires"] and next_state != State.FAILED:
+            next_state = State.BLOCKED
+            result = {**result, "reason": "APPROVAL_EXPIRED"}
+        handoff_ref = digest([evidence["input_contract_hash"], result, next_state.value])
         return self.emit(
             "role_finished", next_state, **evidence, **result, elapsed_seconds=elapsed,
             commands=[], exit_code="NOT_APPLICABLE", resource_peaks="UNKNOWN",
             measured_tokens="NOT_APPLICABLE", synthetic_tokens=ROLE_TOKENS,
             cost="NOT_APPLICABLE", retries=0, handoff=next_state.value,
+            usage_kind="SYNTHETIC", estimated_tokens="UNKNOWN", synthetic_cost_microunits=0,
+            tool_audit=tool_audit, diff_ref=digest(result["diff"]) if "diff" in result else None,
+            handoff_ref=handoff_ref, scope_released=True,
         )

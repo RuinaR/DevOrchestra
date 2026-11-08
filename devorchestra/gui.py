@@ -7,6 +7,7 @@ import sqlite3
 import tkinter as tk
 from tkinter import ttk
 
+from .catalog import Catalog, new_project
 from .lease import Blocked
 from .ledger import Ledger
 from .projection import ProjectionReader
@@ -29,6 +30,9 @@ EVIDENCE_FIELDS = (
     "synthetic_tokens", "measured_tokens", "cost", "resource_peaks", "retries",
     "handoff", "resume_phase", "owned_children", "probe_id", "fixture", "active_processes",
     "active_before_stop", "total_processes", "root_exited_before_stop", "job_memory_limit", "job_process_limit",
+    "context_id", "requested_model", "requested_reasoning", "role_budget", "input_contract_hash", "input_refs",
+    "usage_kind", "estimated_tokens", "synthetic_cost_microunits", "tool_audit", "diff_ref", "handoff_ref",
+    "scope_released", "budget", "global_budget", "project_budget",
 )
 
 
@@ -100,6 +104,9 @@ class CommandCenter:
         self.project.pack(fill="x", pady=(7, 3))
         self.project.current(0)
         self.project.bind("<<ComboboxSelected>>", self.select_project)
+        ttk.Button(projects, text="Register", command=lambda: self.edit_settings("new")).pack(fill="x")
+        ttk.Button(projects, text="Project settings", command=lambda: self.edit_settings("edit")).pack(fill="x")
+        ttk.Button(projects, text="Global limits", command=lambda: self.edit_settings("limits")).pack(fill="x")
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
 
@@ -229,11 +236,15 @@ class CommandCenter:
             self.clear(f"{type(error).__name__}: {error}")
             return
         if (self.view is None or view["snapshot_version"] != self.view["snapshot_version"]
-                or view["project_id"] != self.view["project_id"]):
+                or view["project_id"] != self.view["project_id"]
+                or view["catalog_version"] != self.view["catalog_version"]):
             self.view = view
+            self.project_ids = list(view["project_names"])
+            self.project.configure(values=[f"{name} [{key}]" for key, name in view["project_names"].items()])
+            self.project.current(self.project_ids.index(project_id))
             self.render()
         seq, tail = view["snapshot_version"]
-        self.observation.configure(text=f"READ ONLY  /  MOCK LEDGER  /  Seq {seq} · "
+        self.observation.configure(text=f"MOCK LEDGER  /  Seq {seq} · "
                                    f"{tail[:12] or 'empty'}  /  Verified {view['as_of_utc']}")
 
     def clear(self, reason):
@@ -261,11 +272,20 @@ class CommandCenter:
         global_project = current["project"]["name"] if current else "No run"
         self.global_badge.configure(text=f"GLOBAL / {state} · {global_project}", fg=color(state))
         self.project_states.configure(text="\n".join(
-            f"{PROJECTS[key].name} · {status}" for key, status in view["project_states"].items()))
+            f"{view['project_names'][key]} · {status}" for key, status in
+            view["project_states"].items() if key == view["project_id"]))
         self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}",
                                fg=color(view["project_state"]))
-        self.goal.configure(text=(f"{run['goal']}\nGen {run['generation']} · Run {run['run_id'][:10]}"
-                                  if run else "No recorded mission"), wraplength=350)
+        registration = view["registration"]
+        configured = registration["data"] if registration else None
+        goal = (f"{run['goal']}\nGen {run['generation']} · Run {run['run_id'][:10]}"
+                if run else "No recorded mission")
+        if configured:
+            goal += (f"\nConfigured · {configured['stage']} · {configured['goal']}"
+                     f"\nAcceptance · {configured['acceptance'][0]}"
+                     f"\nDeclared Git SHA · {configured['git_sha'] or 'UNKNOWN'}"
+                     f"\nDeclared block · {configured['block_reason'] or 'none'}")
+        self.goal.configure(text=goal, wraplength=350)
         self.gates.configure(text="\n".join(
             f"{gate['name']}   {gate['state']}" +
             (f" · {gate['git_sha'][:7]} ({gate['scope']})" if gate.get("git_sha") else "")
@@ -277,9 +297,11 @@ class CommandCenter:
         for role, (status, detail) in self.cards.items():
             record = view["role_cards"][role]
             start, finish, latest = record["start"], record["finish"], record["latest"]
+            preference = configured["roles"][role] if configured else None
+            planned = f"\nRequested · {preference['model']} / {preference['reasoning']}" if preference else ""
             if start is None:
                 status.configure(text="NO EXECUTION", fg=MUTED)
-                detail.configure(text="Awaiting ledger evidence")
+                detail.configure(text="Awaiting ledger evidence" + planned, wraplength=185)
                 continue
             outcome = latest.get("result", "UNKNOWN")
             phase = start["phase"]
@@ -288,7 +310,7 @@ class CommandCenter:
             status.configure(text=f"{outcome} · {phase}", fg=color(outcome))
             duration = f"{finish['elapsed_seconds']:.3f}s" if finish else "duration unknown"
             detail.configure(text=f"{start['model']} · {duration}\n"
-                                  f"Receipt #{latest['sequence']} · {start['run_id'][:8]}")
+                                  f"Receipt #{latest['sequence']} · {start['run_id'][:8]}" + planned, wraplength=185)
 
         self.run_options = {"All runs": None}
         for event in reversed(view["events"]):
@@ -327,15 +349,68 @@ class CommandCenter:
             f"Recorded baseline · {baseline['scope']} @ {baseline['git_sha'][:7]}",
             f"Approval {gate}" + (f" · {reason}" if reason else ""),
         ))))
+        def budget_text(title, budget):
+            return f"{title} · {budget['seconds']}s / {budget['tokens']} tokens / {budget['cost_microunits']} µcost"
+
+        configured = budget_text("Global config", view["configured_global_budget"])
+        if view["registration"]:
+            configured += "\n" + budget_text("Project config", view["registration"]["data"]["budget"])
         if resources["elapsed"] is None:
-            self.resources.configure(text="Time, tokens, cost · UNKNOWN")
+            self.resources.configure(text=configured + "\nTime, tokens, cost · UNKNOWN")
             return
-        self.resources.configure(text=f"Role time {resources['elapsed']:.3f}s / "
+        self.resources.configure(text=configured + f"\nRole time {resources['elapsed']:.3f}s / "
                                  f"{resources['time_budget']}s run budget\n"
                                  f"Deadline {datetime.fromtimestamp(resources['deadline'], timezone.utc):%H:%M:%S} UTC\n"
                                  f"Synthetic tokens {resources['synthetic_tokens']} / {resources['token_limit']}\n"
                                  f"Model tokens · {resources['measured_tokens']}\n"
                                  f"Cost · {resources['cost']} / cap {resources['cost_limit']}")
+
+    def edit_settings(self, mode):
+        if self.view is None:
+            return
+        project_id = self.view["project_id"]
+        registration = self.view["registration"]
+        if mode == "edit" and registration is None:
+            self.observation.configure(text="Built-in fixture or missing registration. Use Register for a new project.")
+            return
+        if mode == "limits":
+            value, revision = self.view["configured_global_budget"], self.view["catalog_version"]
+        elif mode == "edit":
+            value, revision = registration["data"], registration["revision"]
+        else:
+            value, revision = new_project("new-project", "New project", "Synthetic workflow goal"), 0
+        editor = tk.Toplevel(self.root)
+        editor.title("Owner configuration · registration grants no execution permission")
+        editor.configure(bg=PANEL, padx=12, pady=12)
+        body = tk.Frame(editor, bg=PANEL)
+        body.pack(fill="both", expand=True)
+        document = tk.Text(body, height=25, width=72, bg=BG, fg=INK, insertbackground=INK,
+                           font=("Consolas", 10), wrap="none")
+        self.scrollable(body, document)
+        document.insert("1.0", json.dumps(value, indent=2, ensure_ascii=False))
+        status = label(editor, fg=AMBER)
+        status.pack(fill="x")
+
+        def save():
+            try:
+                raw = document.get("1.0", "end")
+                if len(raw) > 131_072:
+                    raise ValueError("Configuration input too large")
+                data = json.loads(raw)
+                catalog = Catalog(self.reader.ledger)
+                if mode == "limits":
+                    catalog.save_limits(data, revision)
+                else:
+                    if mode == "edit" and (not isinstance(data, dict) or data.get("project_id") != project_id):
+                        raise ValueError("Project ID cannot be changed")
+                    catalog.save_project(data, revision)
+            except (Blocked, ValueError, OSError, sqlite3.Error) as error:
+                status.configure(text=str(error))
+                return
+            editor.destroy()
+            self.refresh()
+
+        ttk.Button(editor, text="Save configuration", command=save).pack(anchor="e")
 
     def show_role(self, role):
         self.role_filter.set(role)

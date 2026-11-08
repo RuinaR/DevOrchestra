@@ -1,0 +1,161 @@
+"""Trusted, revisioned project metadata. Registration grants no capabilities."""
+from datetime import datetime, timezone
+from pathlib import PureWindowsPath
+import re
+
+from .lease import Blocked, execution_slot
+from .ledger import Ledger, check_path
+
+ROLES = ("Manager", "Developer", "Reviewer", "Verifier")
+FIXTURE_IDS = frozenset(("fixture-a", "fixture-b"))
+BUDGET_FIELDS = ("seconds", "tokens", "cost_microunits")
+DEFAULT_BUDGET = {"seconds": 600, "tokens": 10, "cost_microunits": 0}
+TEXT_FIELDS = ("name", "goal", "stage", "block_reason", "handoff")
+LIST_FIELDS = ("acceptance", "priorities", "roadmap", "checks")
+SCOPE_FIELDS = ("files", "network", "tools")
+FIELDS = frozenset(("project_id", "repository", "local_path", "documents", "git_sha",
+                    "roles", "budget", "requested_scope", "git_policy", *TEXT_FIELDS, *LIST_FIELDS))
+
+
+def _text(value, limit=512):
+    return (isinstance(value, str) and len(value) <= limit
+            and all(char.isprintable() for char in value))
+
+
+def _strings(values):
+    return isinstance(values, list) and len(values) <= 32 and all(_text(value) for value in values)
+
+
+def validate_budget(value):
+    if (not isinstance(value, dict) or set(value) != set(BUDGET_FIELDS)
+            or any(type(amount) is not int or not 0 <= amount <= 10**12 for amount in value.values())
+            or not 1 <= value["seconds"] <= 86_400):
+        raise ValueError("Invalid budget: integer seconds, tokens and cost_microunits required")
+
+
+def validate_project(data):
+    if not isinstance(data, dict) or set(data) != FIELDS:
+        raise ValueError("Unexpected project registration fields")
+    project_id = data["project_id"]
+    if (not _text(project_id, 48) or not re.fullmatch("[a-z0-9][a-z0-9-]*", project_id)
+            or project_id in FIXTURE_IDS):
+        raise ValueError("Invalid or reserved project ID")
+    if any(not _text(data[key]) for key in TEXT_FIELDS) or not data["name"].strip() or not data["goal"].strip():
+        raise ValueError("Invalid project text")
+    if any(not _strings(data[key]) for key in LIST_FIELDS) or not data["acceptance"]:
+        raise ValueError("Invalid project criteria or lists")
+    repo = data["repository"]
+    if not _text(repo, 256) or (repo and not re.fullmatch(
+            r"https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+", repo)):
+        raise ValueError("Use a GitHub repository URL without credentials or parameters")
+    path = data["local_path"]
+    if not _text(path) or (path and (not PureWindowsPath(path).is_absolute()
+                                     or not re.match(r"^[A-Za-z]:[\\/]", path)
+                                     or ".." in PureWindowsPath(path).parts or ":" in path[2:])):
+        raise ValueError("Use a local absolute Windows path")
+    docs = data["documents"]
+    if (not isinstance(docs, dict) or set(docs) - {"vision", "agents", "definition", "architecture"}
+            or any(not _text(doc) or not doc.endswith(".md") or "\\" in doc or ":" in doc
+                   or any(part in ("", ".", "..") for part in doc.split("/"))
+                   for doc in docs.values())):
+        raise ValueError("Documents must be project-relative Markdown paths")
+    sha = data["git_sha"]
+    if sha is not None and (not _text(sha, 40) or not re.fullmatch("[0-9a-f]{40}", sha)):
+        raise ValueError("Invalid Git SHA")
+    validate_budget(data["budget"])
+    scope, git = data["requested_scope"], data["git_policy"]
+    if not isinstance(scope, dict) or set(scope) != set(SCOPE_FIELDS) or not all(map(_strings, scope.values())):
+        raise ValueError("Invalid requested scope")
+    if not isinstance(git, dict) or set(git) != {"commit", "push"} or any(
+            value not in ("disabled", "owner_approval") for value in git.values()):
+        raise ValueError("Invalid Git policy")
+    roles = data["roles"]
+    if not isinstance(roles, dict) or set(roles) != set(ROLES):
+        raise ValueError("All four role settings are required")
+    for role, config in roles.items():
+        if not isinstance(config, dict) or set(config) != {"model", "reasoning", "budget"}:
+            raise ValueError("Invalid role configuration")
+        model, effort = config["model"], config["reasoning"]
+        if (not _text(model, 100) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", model)
+                or effort not in ("default", "minimal", "low", "medium", "high", "xhigh")
+                or (role == "Verifier" and (model, effort) != ("deterministic", "default"))
+                or (role != "Verifier" and model == "deterministic")):
+            raise ValueError("Invalid model or reasoning preference")
+        validate_budget(config["budget"])
+
+
+def new_project(project_id, name, goal):
+    return {
+        "project_id": project_id, "name": name, "goal": goal, "stage": "REGISTERED",
+        "block_reason": "OS isolation unverified", "handoff": "", "git_sha": None,
+        "repository": "", "local_path": "", "documents": {},
+        "acceptance": ["Verify synthetic workflow"], "priorities": [], "roadmap": [], "checks": [],
+        "requested_scope": {key: [] for key in SCOPE_FIELDS},
+        "git_policy": {"commit": "disabled", "push": "disabled"},
+        "budget": dict(DEFAULT_BUDGET),
+        "roles": {role: {"model": "deterministic" if role == "Verifier" else "mock-v1",
+                         "reasoning": "default", "budget": dict(DEFAULT_BUDGET)} for role in ROLES},
+    }
+
+
+class Catalog:
+    """Owner configuration controller with a separate hash-chained local ledger."""
+    def __init__(self, runtime_ledger):
+        self.ledger = Ledger(runtime_ledger.path.with_name(runtime_ledger.path.stem + "-catalog.sqlite3"))
+
+    def _snapshot(self):
+        check_path(self.ledger.path)
+        try:
+            self.ledger.path.lstat()
+        except FileNotFoundError:
+            return None
+        return self.ledger.snapshot()
+
+    @staticmethod
+    def _project(events):
+        projects, limits = {}, dict(DEFAULT_BUDGET)
+        for index, event in enumerate(events, 1):
+            if event["kind"] == "project_saved":
+                data = event["data"]
+                validate_project(data)
+                projects[data["project_id"]] = {"revision": index, "data": data}
+            elif event["kind"] == "limits_saved":
+                validate_budget(event["data"])
+                limits = event["data"]
+            else:
+                raise Blocked("Unknown catalog event")
+        return {"projects": projects, "global_budget": limits, "version": len(events)}
+
+    def read(self):
+        snapshot = self._snapshot()
+        return self._project(snapshot[0] if snapshot else [])
+
+    def save_project(self, data, revision=0):
+        validate_project(data)
+        return self._save("project_saved", data, revision)
+
+    def save_limits(self, data, revision):
+        validate_budget(data)
+        return self._save("limits_saved", data, revision)
+
+    def _save(self, kind, data, revision):
+        with execution_slot() as abandoned:
+            if abandoned:
+                raise Blocked("Abandoned slot requires inspection")
+            snapshot = self._snapshot()
+            if snapshot is None:
+                if revision != 0:
+                    raise Blocked("Catalog revision no longer exists")
+                self.ledger.initialize()
+                snapshot = ([], "")
+            events, tail = snapshot
+            current = self._project(events)
+            if kind == "project_saved":
+                latest = current["projects"].get(data["project_id"], {"revision": 0})["revision"]
+            else:
+                latest = current["version"]
+            if type(revision) is not int or latest != revision:
+                raise Blocked("Stale catalog revision")
+            event = {"kind": kind, "data": data, "timestamp": datetime.now(timezone.utc).isoformat()}
+            self.ledger.append(len(events), tail, event)
+            return len(events) + 1

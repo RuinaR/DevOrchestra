@@ -1,13 +1,19 @@
 """Versioned, read-only evidence contract for the Windows console."""
 from datetime import datetime, timezone
 
+from .catalog import Catalog, DEFAULT_BUDGET
 from .dashboard import project_view
 from .lease import Blocked
 from .ledger import digest
 from .runtime import PHASES, PROJECTS
 
 
-def dashboard_projection_v1(events, tail, project_id, observed_at):
+def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None):
+    catalog = catalog or {"projects": {}, "global_budget": DEFAULT_BUDGET, "version": 0}
+    registration = catalog["projects"].get(project_id)
+    names = {key: project.name for key, project in PROJECTS.items()}
+    names.update((e["project_id"], e["project"]["name"]) for e in events if e["kind"] == "run_started")
+    names.update((key, item["data"]["name"]) for key, item in catalog["projects"].items())
     view = project_view(events, project_id)
     global_view = project_view(events)
     project_events = [dict(event, sequence=seq) for seq, event in enumerate(events, 1)
@@ -56,9 +62,13 @@ def dashboard_projection_v1(events, tail, project_id, observed_at):
         "snapshot_version": (len(events), tail),
         "observation_kind": "VERIFIED_MOCK_LEDGER",
         "project_id": project_id,
-        "project_name": start["project"]["name"] if start else PROJECTS[project_id].name,
+        "project_name": names[project_id],
+        "project_names": names,
+        "registration": registration,
+        "catalog_version": catalog["version"],
+        "configured_global_budget": catalog["global_budget"],
         "project_state": view["state"],
-        "project_states": {key: project_view(events, key)["state"] for key in PROJECTS},
+        "project_states": {key: project_view(events, key)["state"] for key in names},
         "global_state": global_view["state"],
         "global_run": global_view["run"],
         "run": start,
@@ -77,12 +87,12 @@ def dashboard_projection_v1(events, tail, project_id, observed_at):
         "role_cards": roles,
         "resources": {
             "elapsed": view.get("elapsed_seconds"),
-            "time_budget": start["project"]["seconds"] if start and start["scenario"] != "time-limit"
+            "time_budget": start.get("budget", start["project"])["seconds"] if start and start["scenario"] != "time-limit"
             else 0 if start else None,
             "deadline": start["deadline"] if start else None,
             "synthetic_tokens": view.get("synthetic_tokens"),
             "token_limit": start["token_limit"] if start else None,
-            "cost_limit": start["project"]["cost_limit"] if start else None,
+            "cost_limit": start.get("budget", {}).get("cost_microunits", start["project"]["cost_limit"]) if start else None,
             "measured_tokens": "NOT_APPLICABLE" if start else "UNKNOWN",
             "cost": "NOT_APPLICABLE" if start else "UNKNOWN",
         },
@@ -132,6 +142,7 @@ class ProjectionReader:
             if prefix != previous:
                 raise Blocked("Ledger snapshot replaced its verified history")
         view = dashboard_projection_v1(events, tail, project_id,
-                                       datetime.now(timezone.utc).isoformat(timespec="seconds"))
+                                       datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                       Catalog(self.ledger).read())
         self.version = view["snapshot_version"]
         return view

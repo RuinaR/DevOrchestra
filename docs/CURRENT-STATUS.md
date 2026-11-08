@@ -1,5 +1,7 @@
 # 현재 상태
 
+P2.2 기준 `9551db4e7288e9db0a9830c1f370f56d0bb73141`. 프로젝트 등록부·역할/전역 예산·동결된 합성 실행 계약·상세 감사 및 설정 UI를 연결했다. 회귀 26건과 신규 계약 6건, 기존 및 등록 프로젝트 CLI 흐름을 검증했다. OS 파일·네트워크·자격증명 격리, 게스트 반출 및 실제 Codex 실행은 계속 BLOCKED다. 실제 창과 제공자 계측은 NOT VERIFIED다.
+
 P2.1 기준 `24fc3e74f8f1ef483b00c4677a97639b02061a6f`. 실제 Win32 합성 Job 회귀와 새 Mock 정리 실패·영수증 유실 및 번들 검역을 포함해 26건 PASS. Command Center는 격리 방식, 파일·네트워크·자격증명 차단과 역사적 Job 기준 SHA를 표시한다. 실제 창은 NOT VERIFIED다.
 
 게이트 A는 제한된 Job 시나리오만 PASS다. B는 BLOCKED이며 C는 합성 검역만 PASS, 실제 게스트 보호·반출은 BLOCKED다. Windows 에디션 `Core`, Sandbox 표준 실행 파일 및 `Get-VM` 미확인으로 현재 호스트의 게스트 실행 시험을 보류했다. 시스템 설정을 변경하지 않았다. P2 전체 및 P3 진입은 BLOCKED다. [별도 승인 범위](ARCHITECTURE-ROADMAP.md#p21-게스트-시험과-산출물-회수)
