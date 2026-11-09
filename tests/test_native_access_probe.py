@@ -1,5 +1,6 @@
 from base64 import b64decode
 from contextlib import contextmanager, nullcontext
+import json
 import os
 from pathlib import Path
 import sys
@@ -12,7 +13,7 @@ from devorchestra.app_server import NativeInspectionApproval, _owned_stdio
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger
 from devorchestra.native_access_probe import (
-    ALLOWED, PROTECTED, NativeAccessApproval, build_command, probe_receipt,
+    ALLOWED, PROTECTED, NativeAccessApproval, build_command, probe_receipt, validate_restricted_command,
 )
 from devorchestra.runtime import Runner
 
@@ -80,7 +81,29 @@ class NativeAccessProbeTests(unittest.TestCase):
         (self.work / "allowed.txt").write_bytes(b"mutated")
         self.assertEqual("FAIL", probe_receipt(receipt, self.work, self.command)["status"])
 
-    def test_model_free_probe_commits_after_owned_drain_and_cannot_replay(self):
+    def test_legacy_restricted_request_is_blocked_before_launch_and_intent(self):
+        with patch("devorchestra.app_server.prepare_inspection", return_value=(self.work, {}, {})), \
+                patch("devorchestra.native_access_probe.prepare_probe",
+                      return_value=nullcontext((self.command, lambda: None))), \
+                patch("devorchestra.app_server.open_app_server") as launched:
+            with self.assertRaisesRegex(Blocked, "LEGACY_RESTRICTED_READ_UNSUPPORTED"):
+                self.runner.inspect_native(self.approval)
+            launched.assert_not_called()
+        self.assertEqual([], self.ledger.read())
+        (receipt,) = self.ledger.local_directory("logs").glob("app-server-preflight-*.json")
+        self.assertEqual({
+            "request_id": self.approval.inspection.request_id, "status": "BLOCKED",
+            "stage": "COMMAND_POLICY", "failure_code": "LEGACY_RESTRICTED_READ_UNSUPPORTED",
+        }, json.loads(receipt.read_bytes()))
+        for policy in ({"sandboxPolicy": {"type": "readOnly"}},
+                       {"sandboxPolicy": {"type": "dangerFullAccess"}},
+                       {"sandboxPolicy": {"type": "externalSandbox"}},
+                       {"permissionProfile": "unverified-profile"}):
+            with self.subTest(policy=policy):
+                with self.assertRaisesRegex(Blocked, "RESTRICTED_READ_CONTRACT_UNVERIFIED"):
+                    validate_restricted_command(policy)
+
+    def test_synthetic_transport_commits_after_owned_drain_and_cannot_replay(self):
         @contextmanager
         def peer(_binary, cwd, _env, timeout, cancelled, *, explicit_mxc):
             self.assertTrue(explicit_mxc)
@@ -93,6 +116,7 @@ class NativeAccessProbeTests(unittest.TestCase):
         with patch("devorchestra.app_server.prepare_inspection", return_value=(self.work, {}, {})), \
                 patch("devorchestra.native_access_probe.prepare_probe",
                       return_value=nullcontext((self.command, lambda: None))), \
+                patch("devorchestra.native_access_probe.validate_restricted_command"), \
                 patch("devorchestra.app_server.open_app_server", side_effect=peer) as launched:
             result = self.runner.inspect_native(self.approval)
             self.assertEqual("DRAINED", result["owned_tree"])

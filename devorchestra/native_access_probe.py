@@ -4,7 +4,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .app_server import NativeInspectionApproval, inspection_check
+from .app_server import InspectionBlocked, NativeInspectionApproval, inspection_check
 from .lease import Blocked
 from .ledger import check_path, digest
 
@@ -89,12 +89,25 @@ function Invoke-MarkerWrite($Path) {
 
 
 def command_request(work, command):
-    return {
+    request = {
         "command": command, "cwd": str(work), "timeoutMs": COMMAND_TIMEOUT_MS,
         "sandboxPolicy": {"type": "readOnly", "access": {
             "type": "restricted", "includePlatformDefaults": False, "readableRoots": [str(work)],
         }},
     }
+    validate_restricted_command(request)
+    return request
+
+
+def validate_restricted_command(request):
+    """Fail closed until an equivalent restricted-read Windows contract is established."""
+    policy = request.get("sandboxPolicy")
+    if isinstance(policy, dict) and policy.get("type") == "readOnly":
+        access = policy.get("access")
+        # The pinned SandboxPolicyDeserialize rejects LegacyReadOnlyAccess::Restricted.
+        if isinstance(access, dict) and access.get("type") == "restricted":
+            raise InspectionBlocked("COMMAND_POLICY", "LEGACY_RESTRICTED_READ_UNSUPPORTED")
+    raise InspectionBlocked("COMMAND_POLICY", "RESTRICTED_READ_CONTRACT_UNVERIFIED")
 
 
 def probe_receipt(result, work, command):
