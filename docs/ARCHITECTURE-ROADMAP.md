@@ -10,6 +10,8 @@
 
 ## P2.43 모델 없는 App Server 접근 검사
 
+**P2.50 결정.** 일반 개발의 Windows Native Codex 후보는 명시적 MXC와 상속 없는 named permission profile이다. 현재 System32 PowerShell 파일 검사는 BLOCKED다. 아래 P2.43 절차는 이전 설계이며 현 버전의 재시험 명령으로 사용하지 않는다. 엄격한 파일 경계 시험의 다음 후보는 작업 폴더 안의 고정 네이티브 합성 실행 파일이다. 로더 접근이 확인되지 않으면 검증된 별도 Windows 게스트를 강화 격리 후보로 유지한다. [제한 읽기 계약과 승인 범위](P2-MXC-VALIDATION.md#p250-windows-제한-읽기-실행-계약)
+
 다음 실측은 Controller 내부 `inspect_native(NativeAccessApproval(...))` 한 번이다. 기존 CLI 고정 해시 및 서명을 확인하고 명시적 MXC로 App Server를 Windows Job에 생성한다. `initialize`, `initialized`, `config/read`, `configRequirements/read` 뒤 `command/exec` 한 건을 보낸다. 관리 요구사항이 확인되거나 기대 프로필과 다르면 명령 전송을 차단한다. 모델·계정 RPC 및 외부 서비스 요청은 호출하지 않는다. 실제 네트워크 차단은 이 검사 범위 밖이다. [App Server 명령 계약](https://learn.chatgpt.com/docs/app-server#command-execution)
 
 별도 승인 시 새 `.ai-local/temp/app-server-<approval-id>` 아래 합성 `home`, `tmp`, `work`, `protected`만 준비한다. home에는 합성 AGENTS.md와 고정 read-only/never 설정을 두고 인증 파일은 넣지 않는다. work에는 합성 AGENTS.md와 allowed.txt, protected에는 protected.txt만 둔다. 표식 바이트 및 호스트 대조를 확인한다. 승인 해시의 System32 Windows PowerShell을 프로필 없는 고정 인자로 시작하고, `native_access_probe.py`의 인코딩된 파일 명령만 실행한다. 작업 경로 읽기 허용, 같은 파일 쓰기 거부, 보호 파일 읽기 거부(Win32 5), 두 표식 불변을 각각 확인한다. 접근 성공 또는 파일 변조를 별도 실패로 기록한다. 파일 부재·런타임 오류·실행 시작 실패는 거부 증거가 아니다.

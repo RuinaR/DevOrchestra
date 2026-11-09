@@ -1,5 +1,19 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.50 Windows 제한 읽기 실행 계약
+
+고정 CLI `0.167.0-alpha.3.2`의 `command/exec`는 `readOnly.access.restricted`를 거부한다. 지원되는 설정 경로는 상속 없는 named profile의 명시적 파일 읽기 규칙과 비활성 네트워크다. `command/exec.permissionProfile`은 초기화 시 실험적 기능을 명시해야 하고 `sandboxPolicy`와 함께 보낼 수 없다. 서버는 명령 cwd를 기준으로 설정과 관리 제약을 다시 해석한다. `permissionProfile/list`의 `allowed`는 프로필 선택 가능 여부이며, `windowsSandbox/readiness`의 `ready`는 백엔드 준비 상태다. 둘 다 실제 적용 경로 목록이나 접근 거부 영수증을 제공하지 않는다. [고정 요청 스키마](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/app-server-protocol/src/protocol/v2/command_exec.rs) · [프로필 선택 코드](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/app-server/src/request_processors/command_exec_processor.rs#L212-L241) · [프로필 목록 스키마](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/app-server-protocol/schema/json/v2/PermissionProfileListResponse.json)
+
+MXC는 유효 프로필에서 읽기·쓰기·거부 경로를 생성한다. 플랫폼 기본 읽기가 활성화되면 Windows 디렉터리, Program Files 계열과 ProgramData가 추가된다. 이 범위에는 System32와 로더 관련 경로가 포함되지만, 그 자체로 필요한 런타임 파일의 정확한 집합이나 실행 성공을 보장하지 않는다. 합성 작업 폴더만 읽는 시험에는 `:minimal`을 추가하지 않는다. 기본 거부와 쓰기 허용 규칙 부재는 정적 정책 계약이다. OS의 외부 읽기·쓰기 거부, PowerShell 및 자식에서의 권한 전파는 NOT_VERIFIED다. MXC는 정책 수명을 유지하고 소유 자식 회수를 지원하지만, Win32k와 데스크톱 핸들이 남으며 하드링크 권한은 경로별이다. 합성 경로의 링크와 reparse point는 계속 사전 거부한다. [MXC 정책 변환](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/policy.rs#L209-L247) · [Windows 플랫폼 경로](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/windows.rs#L117-L154) · [MXC 수명주기와 제약](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/README.md#L19-L58)
+
+| 후보 | 판정 |
+|---|---|
+| A. 명시적 MXC + named profile | 일반 개발 연결의 주력 후보. 고정 API와 설정 구문은 확인했다. 현재 System32 PowerShell 조합으로 승인 폴더 밖 읽기를 금지하면서 로더를 시작할 근거가 부족하다. 광범위한 플랫폼 읽기를 허용하지 않는다. |
+| B. 검증된 Windows 게스트 + Codex 읽기 전용 | 강화 격리 대안. 호스트와 게스트 경계, 공유·네트워크 차단, 회수 및 반출 검역을 별도로 검증해야 한다. 게스트 내부 작업 폴더 밖 읽기 제한도 별도 조건이다. 호스트 변경과 자원 비용이 크며 자동 전환하지 않는다. |
+| C. 작업 폴더 내 고정 네이티브 프로브 | A를 검증하는 우선 수단. 외부 PowerShell 의존을 줄이지만 Windows 로더 의존성은 남는다. 이전 네이티브 자기 점검 실패는 보존하며, 프로브 성공이 Codex 도구 전체의 인수 증거가 되지는 않는다. |
+
+현재 전송기와 권한 사전검사는 P2.49의 차단 상태를 유지한다. 다음 단일 실측을 제안하기 전에 실행 이미지와 필수 로더 범위, 무상속 프로필의 정확한 바이트와 해시, 유효 cwd와 관리 정책, 네트워크·승인 차단을 확정해야 한다. 이후 별도 승인 범위는 고정 CLI와 해시가 확인된 자체 프로브, 새 독립 원장 및 합성 루트, 명시적 MXC, 고정 모델 없는 명령 1회, 접근 결과·표식 해시·Job/파이프 회수 확인이다. 파일 경계 PASS 이후에도 일반 개발의 소유권·도구·비간섭·예산 인수 및 단일 모델 승인이 필요하며 강화 모드는 P2 A/B/C 전체를 요구한다. Manager·Developer와 P3는 BLOCKED다.
+
 ## P2.25 독립 자기 점검 프로필의 정적 계약
 
 기준 `98fca687baadcd130725554c257a992ec056ccb2`. 고정 태그 `rust-v0.167.0-alpha.3.2`의 named profile 컴파일은 제한된 빈 파일 정책과 제한된 네트워크 정책에서 시작한다. 부모가 없고 매칭되는 경로 규칙이 없으면 파일 접근은 기본 거부다. 더 구체적인 경로가 상위 경로에 우선하고 동일 경로 충돌에서는 거부가 우선한다. 새 초안은 충돌 우선순위에 의존하지 않고 중복·허용/거부 충돌을 전부 거부한다. 절대 Windows 경로를 TOML 문자열 키로 사용할 수 있다. 경로 구분 문자는 TOML에서 이스케이프한다. [고정 태그 프로필 컴파일](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/core/src/config/permissions.rs) · [고정 태그 경로 우선순위](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/protocol/src/permissions.rs) · [OpenAI 권한 프로필](https://learn.chatgpt.com/docs/permissions)

@@ -95,7 +95,9 @@ class NativeAccessProbeTests(unittest.TestCase):
             "request_id": self.approval.inspection.request_id, "status": "BLOCKED",
             "stage": "COMMAND_POLICY", "failure_code": "LEGACY_RESTRICTED_READ_UNSUPPORTED",
         }, json.loads(receipt.read_bytes()))
-        for policy in ({"sandboxPolicy": {"type": "readOnly"}},
+        for policy in ({},
+                       {"sandboxPolicy": {"type": "readOnly"}},
+                       {"sandboxPolicy": {"type": "workspaceWrite"}},
                        {"sandboxPolicy": {"type": "dangerFullAccess"}},
                        {"sandboxPolicy": {"type": "externalSandbox"}},
                        {"permissionProfile": "unverified-profile"}):
