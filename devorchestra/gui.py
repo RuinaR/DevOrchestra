@@ -15,6 +15,7 @@ from .lease import Blocked
 from .instructions import InstructionStore, selected_source, source_ref
 from .ledger import Ledger
 from .projection import ProjectionReader
+from .questions import AUTHORIZATION_TYPES
 from .runtime import PROJECTS, Runner
 from .setup import environment_status, validate_setup
 
@@ -48,7 +49,7 @@ EVIDENCE_FIELDS = (
 def color(state):
     if state in ("FAILED", "FAIL", "BLOCKED", "DENY"):
         return RED
-    if state in ("NEED_APPROVAL", "RECOVERING", "PAUSED", "UNKNOWN"):
+    if state in ("NEED_APPROVAL", "WAITING_FOR_USER", "RECOVERING", "PAUSED", "UNKNOWN"):
         return AMBER
     if state in ("COMPLETED", "PASS", "OK", "RECORDED OK"):
         return TEAL
@@ -95,6 +96,7 @@ class CommandCenter:
         self.controller = Runner(reader.ledger)
         self.shutdown_future = None
         self.shutdown_notice = None
+        self.question_window = None
         root.title("DevOrchestra | Command Center")
         root.configure(bg=BG)
         root.geometry("1220x830")
@@ -142,6 +144,9 @@ class CommandCenter:
         self.goal.pack(fill="x")
         self.gates = label(mission)
         self.gates.pack(fill="x", pady=(3, 0))
+        self.question_button = ttk.Button(mission, text="사용자 응답 대기 없음", state="disabled",
+                                          command=self.answer_question)
+        self.question_button.pack(fill="x", pady=(4, 0))
 
         safety = section(command, "03  /  SAFETY & BUDGET")
         safety.grid(row=0, column=2, sticky="nsew")
@@ -304,6 +309,8 @@ class CommandCenter:
         self.goal.configure(text=reason, wraplength=350)
         self.project_states.configure(text="UNKNOWN")
         self.development_button.configure(text="자동 개발 시작 · 확인 불가", state="disabled")
+        if hasattr(self, "question_button"):
+            self.question_button.configure(state="disabled")
         for widget in (self.gates, self.safety, self.resources):
             widget.configure(text="UNKNOWN")
         for name, badge in self.phases:
@@ -317,6 +324,12 @@ class CommandCenter:
 
     def render(self):
         view = self.view
+        if hasattr(self, "question_button"):
+            pending = view.get("user_question")
+            self.question_button.configure(
+                state="normal" if pending else "disabled",
+                text=f"사용자 응답 대기 · {pending['question']['type']}" if pending else "사용자 응답 대기 없음",
+            )
         run, current = view["run"], view["global_run"]
         state = view["global_state"]
         global_project = current["project"]["name"] if current else "No run"
@@ -404,6 +417,80 @@ class CommandCenter:
         if self.run_filter.get() not in self.run_options:
             self.run_filter.current(0)
         self.render_audit()
+
+    def answer_question(self):
+        pending = self.view.get("user_question") if self.view else None
+        if not pending:
+            return
+        if self.question_window is not None and self.question_window.winfo_exists():
+            return
+        question = pending["question"]
+        permission = question["type"] in AUTHORIZATION_TYPES
+        window = self.question_window = tk.Toplevel(self.root)
+        window.title("권한 승인 요청" if permission else "사용자 판단 요청")
+        window.configure(bg=PANEL, padx=14, pady=12)
+        window.transient(self.root)
+        label(window, f"{pending['project_id']} · {question['type']}", bold=True).pack(fill="x")
+        scope = question["scope"]
+        for heading, value in (
+            ("질문", question["prompt"]), ("이유", question["reason"]), ("영향 범위", question["impact"]),
+            ("권장", question["recommendation"]), ("거부 시", question["decline"]),
+            ("유효 기한", datetime.fromtimestamp(question["expires"], timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")),
+            ("권한 범위", f"{scope['capability']} · {scope['target']}" if scope else "권한 변경 없음"),
+        ):
+            item = label(window, f"{heading} · {value}")
+            item.configure(wraplength=620)
+            item.pack(fill="x", pady=3)
+        answer = ttk.Entry(window, width=65)
+        if not permission and question["type"] != "BLOCKED":
+            label(window, "답변은 로컬 원장에 남습니다. 인증정보는 입력하지 마세요.", fg=MUTED).pack(fill="x")
+            answer.pack(fill="x", pady=5)
+        status = label(window, fg=AMBER)
+        status.pack(fill="x")
+        buttons = []
+
+        def submit(decision):
+            value = answer.get() if decision == "ANSWER" else None
+            for button in buttons:
+                button.configure(state="disabled")
+            status.configure(text="응답 기록 중")
+            future = Future()
+
+            def work():
+                try:
+                    future.set_result(self.controller.respond_question(
+                        question["id"], pending["run_id"], pending["generation"], decision, value,
+                    ))
+                except Exception as error:
+                    future.set_exception(error)
+
+            def check():
+                if not window.winfo_exists():
+                    return
+                if not future.done():
+                    window.after(80, check)
+                    return
+                self.refresh()
+                if future.exception() is not None:
+                    status.configure(text="응답 또는 이어가기 차단 · 최신 원장 상태를 확인하세요")
+                    for button in buttons:
+                        button.configure(state="normal")
+                else:
+                    window.destroy()
+
+            Thread(target=work, daemon=True).start()
+            window.after(80, check)
+
+        controls = tk.Frame(window, bg=PANEL)
+        controls.pack(fill="x")
+        for text, decision in (
+            *((("승인 기록", "APPROVE"),) if permission else
+              (("답변 제출", "ANSWER"),) if question["type"] != "BLOCKED" else ()),
+            ("거부 / 닫기", "DECLINE"),
+        ):
+            button = ttk.Button(controls, text=text, command=lambda decision=decision: submit(decision))
+            button.pack(side="left", padx=3)
+            buttons.append(button)
 
     def render_safety(self, view):
         resources = view["resources"]

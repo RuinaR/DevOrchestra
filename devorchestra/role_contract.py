@@ -31,7 +31,7 @@ def _choice(*values):
 
 OUTPUT_SCHEMAS = {
     "manager-planning": _object(
-        disposition=_choice("PROPOSED", "NEED_APPROVAL", "BLOCKED", "NO_PROGRESS"),
+        disposition=_choice("PROPOSED", "CLARIFICATION", "NEED_APPROVAL", "BLOCKED", "NO_PROGRESS"),
         priority_reason=_text(), task_spec=_text(3000), proposed_paths=_list(_text(240)),
         acceptance_checks=_list(_text()), stop_conditions=_list(_text()),
     ),
@@ -145,6 +145,8 @@ def decide_transition(role, payload, evidence):
         return "BLOCKED"
     decision = output.get("decision", output.get("disposition"))
     if ((decision == "PROPOSED" and not output["acceptance_checks"])
+            or (decision == "CLARIFICATION" and (len(output["task_spec"]) > 1000
+                                                or output["proposed_paths"] or output["acceptance_checks"]))
             or (role == "reviewer" and decision == "REWORK" and not output["findings"])):
         return "BLOCKED"
     if role == "manager-final":

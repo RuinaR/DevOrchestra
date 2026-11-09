@@ -17,6 +17,7 @@ from .lease import Blocked, SlotBlocked, execution_slot
 from .ledger import canonical, digest
 from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
+from .questions import AUTHORIZATION_TYPES, new_question, pending_question, validate_response
 from .shutdown import HELD, UNKNOWN, checkpoint, shutdown_state, transition
 from .token_reserve import DEFAULT_RESERVE, reserve_status
 
@@ -36,6 +37,7 @@ class State(str, Enum):
     CANCELLED = "CANCELLED"
     RECOVERING = "RECOVERING"
     NEED_APPROVAL = "NEED_APPROVAL"
+    WAITING_FOR_USER = "WAITING_FOR_USER"
 
 
 PHASES = {
@@ -128,6 +130,8 @@ def require_admission(events):
         raise Blocked("Native process ownership requires recovery")
     if pending_budget_stop(events):
         raise Blocked("Unsettled budget stop requires a shutdown checkpoint")
+    if pending_question(events):
+        raise Blocked("A user question is pending")
 
 
 def pending_budget_stop(events):
@@ -207,6 +211,85 @@ class Runner:
     def __init__(self, ledger):
         self.ledger = ledger
 
+    def ask_user(self, expected_run, kind, prompt, reason, impact, recommendation, decline,
+                 *, wait_seconds=120, scope=None):
+        if type(wait_seconds) is not int or not 1 <= wait_seconds <= 300:
+            raise Blocked("Invalid question lifetime")
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            require_admission(events)
+            run = last_run(events)
+            work = _Session(self.ledger, len(events), tail, run)
+            if (abandoned or not run or work.ids["run_id"] != expected_run or work.pending_job
+                    or work.state not in PHASES or run[-1]["kind"] in OPEN_ROLE_EVENTS):
+                raise Blocked("Question requires a current safe role boundary")
+            approval = next((event for event in reversed(run) if event["kind"] == "owner_approved_mock"), None)
+            if approval is None:
+                raise Blocked("Question requires an approved task")
+            expires = min(time() + wait_seconds, run[0]["deadline"], approval["expires"])
+            if expires <= time():
+                raise Blocked("Question task approval or deadline expired")
+            question = new_question(kind, prompt, reason, impact, recommendation, decline,
+                                    expires=expires, scope=scope)
+            return work.emit("question_opened", State.WAITING_FOR_USER, admission_check=require_admission,
+                             question=question, resume_phase=work.state.value)
+
+    def respond_question(self, request_id, expected_run, generation, decision, answer=None):
+        """Settle once, then continue only a previously authorized synthetic run."""
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            pending = pending_question(events)
+            if (abandoned or not pending or type(generation) is not int or pending["question"]["id"] != request_id
+                    or pending["run_id"] != expected_run or pending["generation"] != generation):
+                raise Blocked("Question is no longer current")
+            if (shutdown_state(events)["state"] in HELD or native_unresolved(events)
+                    or diagnostic_unresolved(events) or pending_budget_stop(events)):
+                raise Blocked("Question response admission is closed")
+            question = pending["question"]
+            expired = time() >= question["expires"]
+            if not expired:
+                validate_response(question, decision, answer)
+            details = {"question_id": request_id, "question_type": question["type"],
+                       "decision": "EXPIRED" if expired else decision, "answer": None if expired else answer,
+                       "responded_by": None if expired else "OWNER",
+                       "scope": question["scope"], "expires": question["expires"]}
+
+            def admit(current):
+                if shutdown_state(current)["state"] in HELD or pending_question(current) != pending:
+                    raise Blocked("Question response admission changed")
+                if not expired and time() >= question["expires"]:
+                    raise Blocked("Question expired during response")
+
+            if pending["kind"] == "native_manager_result":
+                event = {**{key: pending[key] for key in ("project_id", "run_id", "task_id", "generation")},
+                         **details, "question_development_id": pending.get("question_development_id"),
+                         "kind": "native_manager_question_expired" if expired else "native_manager_question_responded",
+                         "state": "DIAGNOSTIC", "source": "OWNER",
+                         "continuation": "FRESH_MANAGER_APPROVAL_REQUIRED" if not expired and decision == "ANSWER"
+                         else "BLOCKED", "timestamp": datetime.now(timezone.utc).isoformat()}
+                self.ledger.append(len(events), tail, event, allow_shutdown=True, admission=admit)
+                return event
+
+            run = last_run(events)
+            work = _Session(self.ledger, len(events), tail, run)
+            if not run or run[-1] != pending:
+                raise Blocked("Question no longer owns the task boundary")
+            resume = not expired and decision == "ANSWER"
+            if resume:
+                continuation = "RESUMED"
+            elif not expired and decision == "APPROVE" and question["type"] in AUTHORIZATION_TYPES:
+                continuation = "CAPABILITY_EXECUTOR_UNVERIFIED"
+            else:
+                continuation = "BLOCKED"
+            event = work.emit(
+                "question_expired" if expired else "question_responded",
+                State(pending["resume_phase"]) if resume else State.BLOCKED, admission_check=admit,
+                continuation=continuation, **details,
+            )
+        if resume:
+            return self.command("run", project=pending["project_id"], expected_run=expected_run)
+        return event
+
     def manager_context(self, project_id, development_id):
         """Assemble owner-selected documents in memory from a frozen session."""
         events, _ = self.ledger.snapshot()
@@ -222,6 +305,13 @@ class Runner:
                 Catalog(self.ledger).read(), project_id, frozen["requirements"], self.ledger.state_boundary,
             ),
             "previous_cycle": start.get("previous_cycle"),
+            "clarifications": [
+                {"question_id": event["question_id"], "answer": event["answer"]}
+                for event in events if event["kind"] in ("question_responded", "native_manager_question_responded")
+                and event.get("question_development_id", event.get("development_id")) == development_id
+                and event["project_id"] == project_id
+                and event["question_type"] == "CLARIFICATION" and event["decision"] == "ANSWER"
+            ],
         }
 
     def plan_native_manager(self, approval, request):
@@ -253,7 +343,7 @@ class Runner:
             if not setup or Path(setup["replica"]) != approval.replica:
                 raise Blocked("Manager replica does not match Controller registration")
             context = {}
-            if latest_requirements(catalog, request.project_id):
+            if request.project_id in catalog.get("projects", {}):
                 project_session = session_view(events, request.project_id)
                 if not project_session:
                     raise Blocked("Manager requires frozen project requirements")
@@ -271,6 +361,8 @@ class Runner:
                           request_id=approval.request_id, request_hash=approval.request_hash,
                           model=request.model, reasoning=request.reasoning, budget=asdict(request.budget),
                           deadline=request.deadline_utc_epoch, instruction_layers=list(approval.layers))
+            if context:
+                fields["question_development_id"] = context["project_context"]["development_id"]
             count, head = self.ledger.append(len(events), tail, {
                 **fields, "kind": "native_manager_intent",
             }, admission=require_admission)
@@ -325,6 +417,13 @@ class Runner:
                     next_role_and_reserve_funded=False, rework_remaining=0, repeated_failure=False,
                 )
                 result["transition_preview"] = decide_transition(ROLE, canonical(proposal).encode(), evidence)
+                if result["transition_preview"] == "CLARIFICATION":
+                    result["question"] = new_question(
+                        "CLARIFICATION", proposal["task_spec"], proposal["priority_reason"],
+                        "Current requirements baseline", "Provide the intended requirement in your own words",
+                        "Keep the plan blocked pending a new owner decision",
+                        expires=min(time() + 300, approval.expires_epoch),
+                    )
                 if context and proposal["disposition"] == "PROPOSED":
                     frozen = project_session["start"]["frozen"]
                     # Catalog scope is a ceiling for review; it does not authorize Developer access.
@@ -413,6 +512,8 @@ class Runner:
                 raise InspectionBlocked("ADMISSION", "PRIOR_DIAGNOSTIC_UNRESOLVED")
             if pending_budget_stop(current):
                 raise InspectionBlocked("ADMISSION", "PENDING_BUDGET_STOP")
+            if pending_question(current):
+                raise InspectionBlocked("ADMISSION", "USER_QUESTION_PENDING")
 
         check_approval()
         with execution_slot() as abandoned, ExitStack() as resources:
@@ -1111,6 +1212,8 @@ class _Session:
                                                           or prior.get("owned_children") != []):
             raise Blocked("Previous synthetic role resources were not released")
         refs = (prior["handoff_ref"],) if prior and "handoff_ref" in prior else ()
+        refs += tuple(digest([event["question_id"], event["answer"]]) for event in self.run
+                      if event["kind"] == "question_responded" and event["decision"] == "ANSWER")
         request = RoleRequest(**self.ids, agent_run_id=evidence["agent_run_id"], role=role,
                               model=evidence["model"], reasoning=evidence["reasoning"],
                               context_id=evidence["context_id"], budget=Budget(**role_budget),

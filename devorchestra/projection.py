@@ -9,6 +9,7 @@ from .lease import Blocked
 from .ledger import digest
 from .mxc_diagnostic import diagnostic_unresolved
 from .policy import live_preflight
+from .questions import pending_question
 from .runtime import PHASES, POLICY_HASH, PROJECTS, ROLE_TOKENS, freeze_project
 from .shutdown import resume_problem, shutdown_state
 from .token_reserve import DEFAULT_RESERVE, reserve_status
@@ -95,6 +96,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     elif shutdown["state"] == "READY" and not shutdown["resume_problem"]:
         recovery_state = "RESUMABLE"
     session = session_view(events, project_id)
+    question = pending_question(events)
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -105,6 +107,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "project_names": names,
         "registration": registration,
         "requirements": requirements,
+        "user_question": (question if question and question["project_id"] == project_id else None),
         "workflow": {
             "requirements_count": len(requirements),
             "cycle_requirements": start.get("requirements", []) if start else [],
@@ -126,7 +129,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "global_development": session_view(events),
         "project_state": view["state"],
         "project_states": {key: project_view(events, key)["state"] for key in names},
-        "global_state": global_view["state"],
+        "global_state": "WAITING_FOR_USER" if question else global_view["state"],
         "global_run": global_view["run"],
         "run": start,
         # P1 records intent, not a live liveness observation. Never assert an active role.

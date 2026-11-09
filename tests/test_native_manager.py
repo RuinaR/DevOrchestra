@@ -70,6 +70,9 @@ for line in sys.stdin:
                 'proposed_paths':['fixture.txt'],'acceptance_checks':['Check fixture'],'stop_conditions':[]}
         if mode == 'invalid':
             plan['scope'] = 'unapproved'
+        if mode == 'clarification':
+            plan.update(disposition='CLARIFICATION', task_spec='Which fixture behavior?',
+                        proposed_paths=[], acceptance_checks=[])
         notice('item/completed', turnId='turn-fixture',
                item={'type':'agentMessage','id':'item-fixture','text':json.dumps(plan)})
         notice('turn/completed', turn={'id':'turn-fixture','status':'completed'})
@@ -145,6 +148,18 @@ class NativeManagerTests(unittest.TestCase):
                 with self.assertRaisesRegex(Blocked, "UNKNOWN"):
                     self.run_fixture(mode)
                 self.assertEqual(["native_manager_intent"], [event["kind"] for event in self.ledger.read()])
+
+    def test_clarification_is_durable_after_manager_drain_and_requires_fresh_approval(self):
+        result, _ = self.run_fixture("clarification")
+        self.assertEqual("DRAINED", result["owned_tree"])
+        self.assertEqual("CLARIFICATION", result["question"]["type"])
+        runner = Runner(self.ledger)
+        with self.assertRaisesRegex(Blocked, "question is pending"):
+            runner.command("start")
+        event = runner.respond_question(result["question"]["id"], result["run_id"], result["generation"],
+                                        "ANSWER", "Use the fixture default")
+        self.assertEqual("FRESH_MANAGER_APPROVAL_REQUIRED", event["continuation"])
+        self.assertEqual(1, sum(e["kind"] == "native_manager_dispatch" for e in self.ledger.read()))
 
     def test_manager_documents_must_match_the_approved_request_hash_binding(self):
         from devorchestra.native_manager import prepare_manager
