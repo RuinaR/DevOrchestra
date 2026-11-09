@@ -33,7 +33,10 @@ def _package(root, output, argv):
         limits.job_memory = 1024 * 1024 * 1024
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
         environment = {key: os.environ[key] for key in ("SystemRoot", "WINDIR", "PATH") if key in os.environ}
-        environment.update(TEMP=str(output), TMP=str(output), PYINSTALLER_CONFIG_DIR=str(output / "cache"))
+        build_home = output / "home"
+        build_home.mkdir()
+        environment.update(TEMP=str(output), TMP=str(output), USERPROFILE=str(build_home),
+                           PYINSTALLER_CONFIG_DIR=str(output / "cache"))
         with (open(os.devnull, "rb") as stdin, (output / "build.stdout.log").open("xb") as stdout,
               (output / "build.log").open("xb") as stderr):
             stdio = tuple(msvcrt.get_osfhandle(file.fileno()) for file in (stdin, stdout, stderr))
