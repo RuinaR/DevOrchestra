@@ -28,6 +28,21 @@ CHANGES = (
     "강화 · 권한 확대 별도 승인, 미확정 작업 재전송 금지",
     "충돌 해결 기준 · 하위 지침의 권한 확대 금지, 의미 충돌은 사용자 검토",
 )
+REVIEWED_SUPPLEMENT = b"""
+## DevOrchestra execution rules
+
+- The Controller admits one project, one task, one agent and one execution slot. Run Manager, Developer, Reviewer, deterministic Verifier, then Manager decision. Confirm owned resources are drained before admitting the next role.
+- Manager plans and makes decisions from verified evidence. Reviewer independently inspects changes and evidence. Both are read-only. Developer changes only the approved replica within the task scope. The Verifier runs approved checks and records their actual outcomes. Only the Controller may apply separately authorized Git changes after verification.
+- Ordinary work proceeds within a current scoped grant. No role or lower-level instruction may expand it. If instructions conflict or authority is unclear, block the affected action and seek owner review. Existing user restrictions still apply.
+- If the next role and shutdown reserve cannot both be funded, schedule shutdown and close new admission. After interruption, verify the ledger, checkpoint, approval and owned process state. Never replay an uncertain external operation or resume without explicit owner authorization.
+"""
+REVIEWED_CHANGES = (
+    "명확화 · 단일 전역 슬롯과 소유 자원 회수 후 역할 전환",
+    "강화 · 결정적 Verifier와 Controller 전용 Git 권한 분리",
+    "충돌 처리 · 승인 범위 내 진행, 모호한 권한은 해당 작업 차단",
+    "정리 · 원본과 중복된 일반 안전 규칙은 보완문에서 재서술하지 않음",
+    "명확화 · 다음 역할과 종료 예비량 동시 확보, 복구 후 명시적 재개",
+)
 
 
 def instruction_bytes(path):
@@ -98,20 +113,50 @@ class InstructionStore:
     def versions(self):
         events = self._events()
         active = next((event for event in reversed(events) if event["kind"] == "instruction_approved"), None)
-        return [event["version"] for event in events if event["kind"] == "instruction_backup"], active
+        return [event["version"] for event in events
+                if event["kind"] in ("instruction_backup", "instruction_candidate")], active
+
+    def draft_reviewed_candidate(self, backup_version):
+        """Append only a new supplement reference; retain the original backup once."""
+        with execution_slot() as abandoned:
+            if abandoned:
+                raise Blocked("Instruction store slot requires inspection")
+            backup, original, _draft = self.preview(backup_version)
+            if backup["version"] != backup_version or len(original) + 1 + len(REVIEWED_SUPPLEMENT) > LIMIT:
+                raise Blocked("A verified original backup and bounded supplement are required")
+            encoded = b64encode(REVIEWED_SUPPLEMENT).decode("ascii")
+            existing = next((event for event in self._events()
+                             if event["kind"] == "instruction_candidate"
+                             and event["backup_version"] == backup_version
+                             and event["supplement"] == encoded), None)
+            if existing:
+                return existing["version"]
+            version = uuid4().hex
+            self.ledger.update(lambda _events, _tail: {
+                "kind": "instruction_candidate", "version": version, "backup_version": backup_version,
+                "supplement": encoded, "changes": list(REVIEWED_CHANGES),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            self.preview(version)
+            return version
 
     def preview(self, version):
-        backup = next((item for item in self._events()
-                       if item["kind"] == "instruction_backup" and item["version"] == version), None)
+        events = self._events()
+        candidate = next((item for item in events if item["kind"] == "instruction_candidate"
+                          and item["version"] == version), None)
+        backup_version = candidate["backup_version"] if candidate else version
+        backup = next((item for item in events
+                       if item["kind"] == "instruction_backup" and item["version"] == backup_version), None)
         if backup is None:
             raise Blocked("Instruction backup missing")
         original = b64decode(backup["backup"], validate=True)
         if sha256(original).hexdigest() != backup["source_sha256"]:
             raise Blocked("Instruction backup integrity failed")
-        improved = original + b"\n" + b64decode(backup["supplement"], validate=True)
+        draft = candidate or backup
+        improved = original + b"\n" + b64decode(draft["supplement"], validate=True)
         if len(improved) > LIMIT:
             raise Blocked("Combined instruction baseline exceeds verification limit")
-        return backup, original, improved
+        return {**backup, "changes": draft.get("changes", CHANGES)}, original, improved
 
     def compare(self, version):
         backup, original, improved = self.preview(version)
@@ -126,7 +171,7 @@ class InstructionStore:
                              "원본 백업", "개선본")
         return {"version": version, "source_sha256": backup["source_sha256"],
                 "sha256": sha256(improved).hexdigest(), "source_changed": changed,
-                "changes": CHANGES, "diff": "".join(delta)}
+                "changes": backup["changes"], "diff": "".join(delta)}
 
     def approve(self, version, reviewed_sha256, project_id, replica, reviewed_project, expires):
         with execution_slot() as abandoned:

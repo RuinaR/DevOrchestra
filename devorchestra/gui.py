@@ -605,6 +605,7 @@ class CommandCenter:
         preview.pack(fill="both", expand=True)
         reviewed = None
         project_ref = None
+        reviewed_replica = None
 
         def show(text):
             preview.configure(state="normal")
@@ -613,9 +614,10 @@ class CommandCenter:
             preview.configure(state="disabled")
 
         def refresh(_event=None):
-            nonlocal reviewed, project_ref
+            nonlocal reviewed, project_ref, reviewed_replica
             reviewed = None
             project_ref = None
+            reviewed_replica = None
             approve_button.configure(state="disabled")
             try:
                 store = InstructionStore(self.reader.ledger)
@@ -639,7 +641,8 @@ class CommandCenter:
                     version = active["version"] if active else versions[-1]
                     selected.set(version)
                 reviewed = store.compare(version)
-                status.set(state + f"\n원본 백업 SHA-256 {reviewed['source_sha256']}"
+                status.set(state + f"\n선택 후보 SHA-256 {reviewed['sha256']}"
+                           + f"\n원본 백업 SHA-256 {reviewed['source_sha256']}"
                            + (" · 원본 변경 또는 확인 불가" if reviewed["source_changed"] else " · 원본 일치"))
                 show("\n".join(reviewed["changes"]) + "\n\n" + reviewed["diff"])
                 if setup:
@@ -649,6 +652,7 @@ class CommandCenter:
                         status.set(status.get() + "\n프로젝트 지침 확인 실패")
                     else:
                         project_ref = source_ref(path, data)
+                        reviewed_replica = Path(setup["replica"])
                         show(preview.get("1.0", "end-1c") + "\n\n프로젝트 지침\n"
                              + data.decode("utf-8-sig"))
                         approve_button.configure(state="normal")
@@ -676,8 +680,10 @@ class CommandCenter:
                 return
             try:
                 setup = Catalog(self.reader.ledger).read()["setups"][project_id]
+                if Path(setup["replica"]) != reviewed_replica:
+                    raise Blocked("Reviewed replica changed")
                 InstructionStore(self.reader.ledger).approve(
-                    reviewed["version"], reviewed["sha256"], project_id, Path(setup["replica"]),
+                    reviewed["version"], reviewed["sha256"], project_id, reviewed_replica,
                     project_ref, time() + 24 * 60 * 60,
                 )
                 refresh()

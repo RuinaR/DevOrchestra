@@ -43,6 +43,17 @@ class InstructionTests(unittest.TestCase):
         self.assertTrue(reopened.verify(pin, self.replica).startswith(original))
         self.assertEqual(b"Edited after approval\n", self.source.read_bytes())
 
+    def test_reviewed_candidate_reuses_original_without_activating(self):
+        original = self.store.preview(self.version)[1]
+        candidate = self.store.draft_reviewed_candidate(self.version)
+        self.assertNotEqual(self.version, candidate)
+        self.assertEqual(candidate, self.store.draft_reviewed_candidate(self.version))
+        self.assertEqual(([self.version, candidate], None), self.store.versions())
+        self.assertEqual(original, self.store.preview(candidate)[1])
+        self.assertTrue(self.store.preview(candidate)[2].startswith(original))
+        self.assertNotEqual(self.sha256, self.store.compare(candidate)["sha256"])
+        self.assertEqual(1, sum(event["kind"] == "instruction_backup" for event in self.store.ledger.read()))
+
     def test_approval_expires_and_project_change_blocks_pin(self):
         with self.assertRaises(Blocked):
             self.approve(expires=time() - 1)
