@@ -15,6 +15,8 @@ ALLOWED = b"DEVORCHESTRA_P243_ALLOWED"
 PROTECTED = b"DEVORCHESTRA_P243_PROTECTED"
 COMMAND_TIMEOUT_MS = 5000
 PROFILE_ID = "devorchestra-probe-read"
+# P2.51 host-tested App Server file probe. A rebuild requires a new pin and review.
+BOUNDARY_PROBE_SHA256 = "6f3121bb3bd50b250479f994f0a890f3a53e1325f542b5a9397605987d97399e"
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,9 @@ def verify_native_boundary(work, approval, config, request):
     from .mxc_launcher import _pin
 
     with inspection_check("PROBE_IDENTITY", "NATIVE_PROBE_IDENTITY_INVALID"):
-        _pin(work / "mxc-probe.exe", approval.probe_sha256)
+        if approval.probe_sha256 != BOUNDARY_PROBE_SHA256:
+            raise Blocked("Approval does not name the pinned native probe")
+        _pin(work / "mxc-probe.exe", BOUNDARY_PROBE_SHA256)
 
 
 def _targets(work):

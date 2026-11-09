@@ -95,14 +95,22 @@ class NativeAccessProbeTests(unittest.TestCase):
             self.approval.inspection, sha256(fixture).hexdigest(), sha256(config).hexdigest(), digest(request),
         )
         with patch("devorchestra.app_server.open_app_server") as launch:
+            with self.assertRaisesRegex(Blocked, "NATIVE_PROBE_IDENTITY_INVALID"):
+                self.runner.inspect_native(approval)
+        with patch("devorchestra.native_access_probe.BOUNDARY_PROBE_SHA256", approval.probe_sha256), \
+                patch("devorchestra.app_server.open_app_server") as launch:
             for candidate, code in (
                 (replace(approval, config_sha256="0" * 64), "NATIVE_BOUNDARY_CONTRACT_MISMATCH"),
                 (replace(approval, request_sha256="0" * 64), "NATIVE_BOUNDARY_CONTRACT_MISMATCH"),
                 (replace(approval, probe_sha256="0" * 64), "NATIVE_PROBE_IDENTITY_INVALID"),
-                (approval, "NATIVE_LOADER_SCOPE_UNVERIFIED"),
+                (approval, "BINARY_IDENTITY_INVALID"),
             ):
                 with self.subTest(code=code), self.assertRaisesRegex(Blocked, code):
                     self.runner.inspect_native(candidate)
+            with patch("devorchestra.app_server.verify_app_server_binary") as verify_cli:
+                with self.assertRaisesRegex(Blocked, "NATIVE_LOADER_SCOPE_UNVERIFIED"):
+                    self.runner.inspect_native(approval)
+                verify_cli.assert_called_once_with(approval.inspection.binary)
             config_path.write_bytes(config + b"\n")
             with self.assertRaisesRegex(Blocked, "SYNTHETIC_LAB_INVALID"):
                 self.runner.inspect_native(approval)

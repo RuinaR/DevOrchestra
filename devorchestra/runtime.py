@@ -319,7 +319,10 @@ class Runner:
     def _inspect_native(self, approval, request_id):
         from contextlib import ExitStack
         from math import isfinite
-        from .app_server import InspectionBlocked, inspection_check, open_app_server, prepare_inspection, save_inspection_diagnostic
+        from .app_server import (
+            InspectionBlocked, inspection_check, open_app_server, prepare_inspection,
+            save_inspection_diagnostic, verify_app_server_binary,
+        )
         from .mxc_launcher import CLI_HASH, CLI_VERSION
         from .native_access_probe import (
             NativeAccessApproval, NativeBoundaryApproval, command_request, native_boundary_contract,
@@ -380,6 +383,7 @@ class Runner:
                 )
             if boundary:
                 verify_native_boundary(work, boundary, config, candidate)
+                verify_app_server_binary(approval.binary)
                 # An approved draft and matching executable do not establish loader compatibility.
                 raise InspectionBlocked("COMMAND_POLICY", "NATIVE_LOADER_SCOPE_UNVERIFIED")
             fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",

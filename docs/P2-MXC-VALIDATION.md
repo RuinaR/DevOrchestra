@@ -1,5 +1,15 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.52 Windows 로더 경계 판정
+
+고정 P2.51 EXE의 SHA-256, AMD64 PE32+ 콘솔 형식, KERNEL32.dll 단독 직접 import 및 지연 import 부재를 재확인했다. 호스트 System32에서 KERNEL32.dll, KernelBase.dll, ntdll.dll 세 파일의 정적 의존성만 확인했다. KERNEL32.dll은 KernelBase.dll, ntdll.dll, API-set 이름을 참조한다. KernelBase.dll에는 추가 API-set과 구체 DLL 참조가 있다. 프로브의 직접 API는 자체 실행 경로·인자·현재 디렉터리, 지정 파일의 I/O·신원, 표준 출력, 종료로 한정된다. 다른 프로세스·창·입력·화면을 조회하는 직접 API는 없다. 이 결과는 정적 참조이며 로더가 실제로 여는 파일 목록은 아니다. Windows는 Known DLL, 이미 로드된 모듈, API-set 매핑 및 DLL 검색 순서를 적용한다. API-set 이름은 디스크 파일 경로가 아니다. [Microsoft DLL 검색 순서](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order) · [Microsoft API sets](https://learn.microsoft.com/en-us/windows/win32/apiindex/windows-apisets)
+
+고정 MXC 어댑터는 명시적 work 읽기를 SDK에 전달하며 플랫폼 기본 읽기가 켜진 경우에만 Windows 등 광범위한 읽기 경로를 추가한다. 명시적 개별 파일 읽기는 표현할 수 있지만, 공개 계약에서 로더 전용 허용 규칙이나 work-only 구성에서 Windows 로더가 열어야 할 최소 파일 집합은 확인하지 못했다. DLL 이름을 프로필에 옮기거나 디렉터리 전체를 허용하지 않는다. P2.51의 work-only 후보와 쓰기·네트워크 차단을 유지한다. Job은 소유 트리 회수에 사용하며 파일·네트워크·다른 앱에 대한 접근 집행은 별도다. [고정 MXC 정책 변환](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/policy.rs#L209-L247) · [고정 Windows SDK 호출 경로](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/mxc-sandbox/src/windows.rs)
+
+Controller는 승인 해시뿐 아니라 검토된 P2.51 EXE의 저장소 고정 해시를 요구한다. 같은 App Server CLI 신원 검사를 재사용하여 실행 전 고정 해시와 오프라인 Authenticode를 확인한다. 설정·요청 해시는 새 합성 cwd에 종속되며, 실행 가능한 최종 프로필로 승인된 상태가 아니다. 바이너리 신원을 확인해도 로더와 유효 프로필을 입증할 수 없어 `NATIVE_LOADER_SCOPE_UNVERIFIED`로 차단한다. 단일 실제 MXC 시험은 아직 승인 대상으로 제시하지 않는다.
+
+고정 MXC는 설치 부담이 가장 낮지만 위 경계가 해결되어야 한다. 확인한 공식 안정판은 0.167.0이다. 공식 Windows 문서가 권장하는 명시적 MXC를 제공하나, 버전 변경이 work-only 로더 호환성을 보장한다는 근거는 확보하지 못했다. 기존 elevated 모드는 승인된 설정 작업이 필요하고 unelevated 모드는 읽기 거부 요구에 맞지 않는다. 다음 검증은 별도 승인된 Windows 게스트를 우선한다. 준비 비용과 RAM·디스크 부담은 높지만 사용자 호스트와 분리된 환경에서 소유 프로브의 로더와 파일 경계를 확인할 수 있다. 게스트 내부 읽기·쓰기 제한, 공유·네트워크·회수는 별도로 입증해야 한다. 현재 호스트에서 동일한 MXC 실패 시험을 반복하거나 자동 전환하지 않는다. [공식 Windows 샌드박스](https://learn.chatgpt.com/docs/windows/windows-sandbox) · [공식 안정 릴리스](https://github.com/openai/codex/releases/tag/rust-v0.167.0)
+
 ## P2.51 네이티브 제한 읽기 후보
 
 Controller의 `NativeBoundaryApproval`은 독립 원장의 temp 아래 `app-server-<요청 ID>`만 받는다. 합성 홈의 config 전체 바이트, 승인된 요청의 정규 JSON, 작업 폴더에 배치한 EXE를 각각 SHA-256에 귀속한다. `devorchestra-probe-read`는 상속 없는 프로필이며, 절대 `work` 경로 한 개만 읽기로 선언한다. 쓰기 규칙과 플랫폼 기본 읽기는 없고, 네트워크 비활성, 승인 정책 `never`, Windows MXC를 명시한다. 고정 후보 요청은 `work/mxc-probe.exe --app-server-file-test`, cwd `work`, 5초, `permissionProfile`만 사용한다. 실제 연결에는 기존 서명·해시 고정 CLI, 실험적 기능을 명시하는 초기화 및 명령 cwd의 유효 정책 확인이 필요하다.

@@ -583,21 +583,26 @@ def _owned_stdio(executable, argv, cwd, environment, timeout, cancelled):
                     connection.check_trailing_messages()
 
 
-@contextmanager
-def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled, *, explicit_mxc=False):
-    """Pinned App Server entry for a future approved Controller admission."""
+def verify_app_server_binary(binary: Path):
+    """Check the pinned CLI without launching it or fetching trust material."""
     from .mxc_launcher import CLI_HASH, _pin, _signed_offline
 
-    with inspection_check("SYNTHETIC_LAB", "SYNTHETIC_LAB_INVALID"):
-        check_path(cwd)
-        if not cwd.is_dir() or not 0 < timeout <= 60:
-            raise Blocked("App Server path or working directory rejected")
     with inspection_check("CLI_IDENTITY", "BINARY_IDENTITY_INVALID"):
         if binary.name.casefold() != "codex.exe":
             raise Blocked("App Server binary path rejected")
         _pin(binary, CLI_HASH)
         if not _signed_offline(binary):
             raise Blocked("App Server signature unverified")
+
+
+@contextmanager
+def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled, *, explicit_mxc=False):
+    """Pinned App Server entry for a future approved Controller admission."""
+    with inspection_check("SYNTHETIC_LAB", "SYNTHETIC_LAB_INVALID"):
+        check_path(cwd)
+        if not cwd.is_dir() or not 0 < timeout <= 60:
+            raise Blocked("App Server path or working directory rejected")
+    verify_app_server_binary(binary)
     argv = ["-c", "windows.sandbox=mxc", "app-server"] if explicit_mxc else ["app-server"]
     with _owned_stdio(binary, argv, cwd, environment, timeout, cancelled) as connection:
         yield connection
