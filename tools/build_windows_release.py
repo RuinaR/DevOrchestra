@@ -34,11 +34,12 @@ def _package(root, output, argv):
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
         environment = {key: os.environ[key] for key in ("SystemRoot", "WINDIR", "PATH") if key in os.environ}
         environment.update(TEMP=str(output), TMP=str(output), PYINSTALLER_CONFIG_DIR=str(output / "cache"))
-        with open(os.devnull, "rb") as stdin, (output / "build.log").open("xb") as log:
-            read, write = (msvcrt.get_osfhandle(file.fileno()) for file in (stdin, log))
-            for handle in (read, write):
+        with (open(os.devnull, "rb") as stdin, (output / "build.stdout.log").open("xb") as stdout,
+              (output / "build.log").open("xb") as stderr):
+            stdio = tuple(msvcrt.get_osfhandle(file.fileno()) for file in (stdin, stdout, stderr))
+            for handle in stdio:
                 os.set_handle_inheritable(handle, True)
-            _create_owned(api, job, Path(sys.executable), argv, root, environment, info, (read, write, write))
+            _create_owned(api, job, Path(sys.executable), argv, root, environment, info, stdio)
         if api.ResumeThread(info.thread) != 1 or _wait_empty(api, job, monotonic() + 600).active:
             raise SystemExit("PACKAGE_JOB_TIMEOUT_OR_START_FAILED")
         if api.WaitForSingleObject(info.process, 0) != 0:
