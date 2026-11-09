@@ -35,7 +35,7 @@ def _path(value):
     return PureWindowsPath(value)
 
 
-def validate_setup(data, state_path=None):
+def validate_setup(data, state_path=None, *, allow_file_proposals=False):
     if not isinstance(data, dict) or set(data) != {"project", "replica", "wait_seconds"}:
         raise ValueError("Unexpected setup fields; credentials cannot be supplied")
     project = data["project"]
@@ -57,7 +57,8 @@ def validate_setup(data, state_path=None):
             raise ValueError("Replica and private local state must be separate")
     if type(data["wait_seconds"]) is not int or not 1 <= data["wait_seconds"] <= 60:
         raise ValueError("Shutdown wait must be 1–60 seconds")
-    if any(project["requested_scope"][key] for key in ("network", "tools", "files")):
+    if (any(project["requested_scope"][key] for key in ("network", "tools"))
+            or (not allow_file_proposals and project["requested_scope"]["files"])):
         raise ValueError("Setup requires deny-by-default scope")
     if any(value != "disabled" for value in project["git_policy"].values()):
         raise ValueError("Setup requires Git commit and push disabled")

@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from devorchestra.adapter import Budget, RoleRequest, Scope
 from devorchestra.app_server import NativeInspectionApproval, _owned_stdio
+from devorchestra.catalog import Catalog, new_project
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
 from devorchestra.manager_api import ENDPOINT, build_manager_api_draft, parse_manager_api_result
@@ -147,7 +148,7 @@ class NativeManagerTests(unittest.TestCase):
         self.approval = ManagerApproval("a" * 32, now + 40, root / "codex.exe", self.replica, home,
                                         self.layers, bind_instructions(self.request, self.layers), 8192, 1024)
 
-    def run_fixture(self, mode="normal", *, cancel=False):
+    def run_fixture(self, mode="normal", *, cancel=False, registered=False):
         @contextmanager
         def open_fixture(_binary, cwd, _env, timeout, cancelled, *, explicit_mxc):
             self.assertTrue(explicit_mxc)
@@ -165,8 +166,10 @@ class NativeManagerTests(unittest.TestCase):
                 yield server
 
         catalog = {"setups": {"fixture-a": {"replica": str(self.replica)}}}
+        catalog_source = (nullcontext() if registered else
+                          patch("devorchestra.runtime.Catalog.read", return_value=catalog))
         with patch("devorchestra.native_manager.require_live_manager_admission"), \
-                patch("devorchestra.runtime.Catalog.read", return_value=catalog), \
+                catalog_source, \
                 patch("devorchestra.native_manager.open_app_server", side_effect=open_fixture):
             return self.runner.plan_native_manager(self.approval, self.request)
 
@@ -315,6 +318,31 @@ class NativeManagerTests(unittest.TestCase):
         messages, _ = prepare_manager(self.ledger, approval, request, project_context=context)
         self.assertIn("Owner-selected fixture", messages[-1]["text"])
         self.assertEqual([], self.ledger.read())
+
+    def test_registered_project_plans_without_a_mock_session_and_grants_no_write(self):
+        source = self.replica.parent / "requirements"
+        source.mkdir()
+        (source / "goal.md").write_text("Synthetic planning requirement", encoding="utf-8")
+        catalog = Catalog(self.ledger)
+        limits = {"seconds": 10, "tokens": 8192, "cost_microunits": 0}
+        catalog.save_limits(limits, 0)
+        project = new_project("sample", "Sample", self.request.goal)
+        project.update(local_path=str(source), acceptance=["Check fixture"], budget=limits)
+        project["roles"]["Manager"] = {"model": self.request.model, "reasoning": self.request.reasoning,
+                                        "budget": limits}
+        revision = catalog.save_setup({"project": project, "replica": str(self.replica), "wait_seconds": 10})
+        project["requested_scope"]["files"] = ["fixture.txt"]
+        catalog.save_project(project, revision)
+        catalog.register_requirement("sample", "goal.md", "GOAL")
+        context = self.runner.native_manager_context("sample")
+        self.request = replace(self.request, project_id="sample", verified_input_refs=(digest(context),))
+        self.approval = replace(self.approval, request_hash=bind_instructions(self.request, self.layers))
+        self.assertEqual([], self.ledger.read())
+        result, _ = self.run_fixture(registered=True)
+        self.assertEqual("OWNER_SCOPE_REQUIRED", result["task_candidate_status"])
+        self.assertEqual("BLOCKED", result["next_role_admission"])
+        self.assertEqual(context["development_id"], result["question_development_id"])
+        self.assertFalse((self.replica / "fixture.txt").exists())
 
     def test_valid_turn_drains_commits_and_does_not_admit_developer(self):
         result, proposal = self.run_fixture()

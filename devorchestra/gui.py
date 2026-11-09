@@ -1012,7 +1012,7 @@ class CommandCenter:
                 catalog = Catalog(self.reader.ledger)
                 if values["replica"]:
                     setup = {"project": data, "replica": str(Path(values["replica"])), "wait_seconds": 10}
-                    validate_setup(setup, self.reader.ledger.state_boundary)
+                    validate_setup(setup, self.reader.ledger.state_boundary, allow_file_proposals=bool(revision))
                     if copying:
                         if not self.confirm("개발용 작업 사본 만들기",
                                                    "표시된 원본 파일을 지정한 새 폴더에 복사하시겠습니까? "

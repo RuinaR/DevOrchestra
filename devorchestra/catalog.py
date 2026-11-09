@@ -240,7 +240,7 @@ class Catalog:
         from .setup import environment_status, validate_setup
         if not environment_status()["windows_x64"]:
             raise Blocked("Setup requires Windows x64")
-        validate_setup(data, self.ledger.state_boundary)
+        validate_setup(data, self.ledger.state_boundary, allow_file_proposals=revision != 0)
         return self._save("setup_saved", data, revision)
 
     def register_requirement(self, project_id, relative, role, *, related=None):
@@ -320,7 +320,7 @@ class Catalog:
                 if kind == "project_saved" and project["project_id"] in current["setups"]:
                     from .setup import validate_setup
                     validate_setup({"project": project, **current["setups"][project["project_id"]]},
-                                   self.ledger.state_boundary)
+                                   self.ledger.state_boundary, allow_file_proposals=True)
             else:
                 latest = current["version"]
             if type(revision) is not int or latest != revision:

@@ -19,7 +19,7 @@ from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
 from .questions import AUTHORIZATION_TYPES, new_question, pending_question, validate_response
 from .shutdown import HELD, UNKNOWN, checkpoint, shutdown_state, transition
-from .supervised import handoff, waiting_for_handoff
+from .supervised import _path_allowed, handoff, waiting_for_handoff
 from .token_reserve import DEFAULT_RESERVE, reserve_status
 
 
@@ -324,6 +324,37 @@ class Runner:
         """Keep the previous entry point explicitly closed in subscription-only mode."""
         raise Blocked("RESPONSES_DISABLED_SUBSCRIPTION_ONLY")
 
+    def native_manager_context(self, project_id):
+        """Read a registered planning baseline without opening a synthetic session."""
+        catalog = Catalog(self.ledger).read()
+        record = catalog["projects"].get(project_id)
+        if not record:
+            raise Blocked("Register a project before preparing a Manager request")
+        project = record["data"]
+        refs = latest_requirements(catalog, project_id)
+        if not refs:
+            raise Blocked("Register at least one requirement for the Manager")
+        files = project["requested_scope"]["files"]
+        if any(not _path_allowed(path) for path in files) or len(set(map(str.casefold, files))) != len(files):
+            raise Blocked("Manager proposal scope contains an ambiguous or protected path")
+        baseline = digest([project_id, record["revision"], refs])
+        role = project["roles"]["Manager"]
+        limits = {key: min(value, role["budget"][key], catalog["global_budget"][key])
+                  for key, value in project["budget"].items()}
+        return {
+            "project_id": project_id, "development_id": baseline,
+            "goal": project["goal"], "acceptance": project["acceptance"],
+            "model": role["model"], "reasoning": role["reasoning"], "budget_ceiling": limits,
+            "proposed_files_ceiling": files,
+            "requirements": read_frozen_requirements(catalog, project_id, refs, self.ledger.state_boundary),
+            "clarifications": [
+                {"question_id": event["question_id"], "answer": event["answer"]}
+                for event in self.ledger.read() if event["kind"] == "native_manager_question_responded"
+                and event.get("question_development_id") == baseline and event["project_id"] == project_id
+                and event["question_type"] == "CLARIFICATION" and event["decision"] == "ANSWER"
+            ],
+        }
+
     def plan_native_manager(self, approval, request):
         """Internal one-shot planning entry; never grants another role."""
         from pathlib import Path
@@ -354,15 +385,12 @@ class Runner:
                 raise Blocked("Manager replica does not match Controller registration")
             context = {}
             if request.project_id in catalog.get("projects", {}):
-                project_session = session_view(events, request.project_id)
-                if not project_session:
-                    raise Blocked("Manager requires frozen project requirements")
-                context["project_context"] = self.manager_context(
-                    request.project_id, project_session["start"]["development_id"],
-                )
-                frozen_refs = [item["ref"] for item in context["project_context"]["requirements"]]
-                if frozen_refs != latest_requirements(catalog, request.project_id):
-                    raise Blocked("Manager requires a current requirements baseline")
+                baseline = self.native_manager_context(request.project_id)
+                if (request.model != baseline["model"] or request.reasoning != baseline["reasoning"]
+                        or any(value > baseline["budget_ceiling"][key]
+                               for key, value in asdict(request.budget).items())):
+                    raise Blocked("Manager model or budget exceeds the registered contract")
+                context["project_context"] = baseline
             _, _, sizing = prepare_manager(self.ledger, approval, request, include_input_receipt=True, **context)
             fields = {key: getattr(request, key) for key in (
                 "project_id", "task_id", "run_id", "generation", "agent_run_id", "context_id", "role",
@@ -385,9 +413,7 @@ class Runner:
 
             def record_dispatch(kind, expected_count):
                 nonlocal count, head
-                if context and self.manager_context(
-                    request.project_id, context["project_context"]["development_id"],
-                ) != context["project_context"]:
+                if context and self.native_manager_context(request.project_id) != context["project_context"]:
                     raise Blocked("Manager requirements changed before dispatch")
                 _, _, current_sizing = prepare_manager(
                     self.ledger, approval, request, include_input_receipt=True, **context,
@@ -441,13 +467,11 @@ class Runner:
                         expires=min(time() + 300, approval.expires_epoch),
                     )
                 if context and proposal["disposition"] == "PROPOSED":
-                    frozen = project_session["start"]["frozen"]
-                    # Catalog scope is a ceiling for review; it does not authorize Developer access.
-                    configured = catalog["projects"][request.project_id]["data"]
+                    baseline = context["project_context"]
                     try:
                         candidate = confirm_task_plan(
-                            canonical(proposal).encode(), allowed_files=configured["requested_scope"]["files"],
-                            acceptance=frozen["acceptance"], budget=frozen["budget"],
+                            canonical(proposal).encode(), allowed_files=baseline["proposed_files_ceiling"],
+                            acceptance=baseline["acceptance"], budget=baseline["budget_ceiling"],
                             authority_ref=approval.request_hash,
                         )
                     except Blocked:
@@ -459,6 +483,8 @@ class Runner:
                 return result
 
             try:
+                if context and self.native_manager_context(request.project_id) != context["project_context"]:
+                    raise Blocked("Manager requirements changed before result settlement")
                 self.ledger.update(settle)
             except Exception:
                 raise Blocked("Manager result commit unverified; no automatic retry") from None

@@ -101,8 +101,9 @@ def _input_receipt(approval, request, messages, discovered):
 
 
 def require_live_manager_admission():
-    # The empty turn environment covers executor-backed calls. It does not
-    # attest to startup isolation or the model-specific non-executor registry.
+    # General development does not depend on VM or enhanced A/B/C evidence.
+    # The remaining blockers are provider-only host egress and pre-execution
+    # restrictions on side-effecting tools, including non-executor handlers.
     raise Blocked(f'{live_preflight()["reason"]}: MANAGER_PRE_EXECUTION_BOUNDARY_UNVERIFIED')
 
 
