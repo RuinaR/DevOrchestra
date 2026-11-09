@@ -8,11 +8,12 @@ import sqlite3
 from threading import Thread
 from time import monotonic, time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 
 from .catalog import Catalog, new_project
 from .lease import Blocked
+from .instructions import InstructionStore, selected_source, source_ref
 from .ledger import Ledger
 from .projection import ProjectionReader
 from .runtime import PROJECTS, Runner
@@ -127,6 +128,7 @@ class CommandCenter:
         ttk.Button(projects, text="Global limits", command=lambda: self.edit_settings("limits")).pack(fill="x")
         ttk.Button(projects, text="토큰 예비량", command=lambda: self.edit_settings("reserve")).pack(fill="x")
         ttk.Button(projects, text="초기 설정", command=self.setup_wizard).pack(fill="x")
+        ttk.Button(projects, text="작업 지침", command=self.instruction_settings).pack(fill="x")
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
 
@@ -590,6 +592,115 @@ class CommandCenter:
 
         ttk.Button(wizard, text="설정 저장 · 실제 실행 차단 유지", command=save,
                    state="normal" if facts["windows_x64"] else "disabled").pack(anchor="e")
+
+    def instruction_settings(self):
+        panel = tk.Toplevel(self.root)
+        panel.title("DevOrchestra · 작업 지침")
+        project_id = self.project_ids[self.project.current()]
+        status = tk.StringVar(value="원본과 개선본은 이 PC에만 보관됩니다.")
+        ttk.Label(panel, textvariable=status, wraplength=640).pack(fill="x")
+        selected = ttk.Combobox(panel, state="readonly", width=42)
+        selected.pack(fill="x")
+        preview = tk.Text(panel, width=82, height=22, wrap="word", state="disabled")
+        preview.pack(fill="both", expand=True)
+        reviewed = None
+        project_ref = None
+
+        def show(text):
+            preview.configure(state="normal")
+            preview.delete("1.0", "end")
+            preview.insert("1.0", text)
+            preview.configure(state="disabled")
+
+        def refresh(_event=None):
+            nonlocal reviewed, project_ref
+            reviewed = None
+            project_ref = None
+            approve_button.configure(state="disabled")
+            try:
+                store = InstructionStore(self.reader.ledger)
+                versions, _ = store.versions()
+                active = store.active(project_id)
+                setup = Catalog(self.reader.ledger).read()["setups"].get(project_id)
+                selected.configure(values=versions)
+                state = "등록된 복제본" if setup else "복제본 미등록"
+                if active:
+                    state += f"\n활성 {active['version']} · {active['sha256']}"
+                    try:
+                        if setup:
+                            store.verify(active, Path(setup["replica"]))
+                    except (Blocked, OSError):
+                        state += "\n활성 지침 검증 실패 또는 승인 만료"
+                if not versions:
+                    status.set(state + "\n원본 미선택 · 백업 없음")
+                    return
+                version = selected.get()
+                if version not in versions:
+                    version = active["version"] if active else versions[-1]
+                    selected.set(version)
+                reviewed = store.compare(version)
+                status.set(state + f"\n원본 백업 SHA-256 {reviewed['source_sha256']}"
+                           + (" · 원본 변경 또는 확인 불가" if reviewed["source_changed"] else " · 원본 일치"))
+                show("\n".join(reviewed["changes"]) + "\n\n" + reviewed["diff"])
+                if setup:
+                    try:
+                        path, data = selected_source(Path(setup["replica"]))
+                    except (Blocked, OSError):
+                        status.set(status.get() + "\n프로젝트 지침 확인 실패")
+                    else:
+                        project_ref = source_ref(path, data)
+                        show(preview.get("1.0", "end-1c") + "\n\n프로젝트 지침\n"
+                             + data.decode("utf-8-sig"))
+                        approve_button.configure(state="normal")
+            except (Blocked, OSError, ValueError, sqlite3.Error):
+                status.set("작업 지침 상태를 검증할 수 없습니다.")
+                show("")
+
+        def backup():
+            path = filedialog.askopenfilename(parent=panel, title="설정에서 확인한 전역 AGENTS 파일 선택")
+            if not path or not messagebox.askyesno(
+                "원본 로컬 백업", "선택한 전역 지침의 원본 바이트를 이 PC에 백업하시겠습니까?", parent=panel,
+            ):
+                return
+            try:
+                selected.set(InstructionStore(self.reader.ledger).backup(Path(path)))
+                refresh()
+            except (Blocked, OSError, ValueError, sqlite3.Error):
+                status.set("원본 백업 또는 무결성 확인에 실패했습니다.")
+
+        def approve():
+            if not reviewed or not messagebox.askyesno(
+                "기준 지침 승인", "표시된 개선본과 프로젝트 지침을 검토했으며 충돌이 없습니까?\n"
+                "선택 버전을 다음 작업에 24시간 동안 승인합니다.", parent=panel,
+            ):
+                return
+            try:
+                setup = Catalog(self.reader.ledger).read()["setups"][project_id]
+                InstructionStore(self.reader.ledger).approve(
+                    reviewed["version"], reviewed["sha256"], project_id, Path(setup["replica"]),
+                    project_ref, time() + 24 * 60 * 60,
+                )
+                refresh()
+            except (Blocked, KeyError, OSError, ValueError, sqlite3.Error):
+                status.set("기준 지침을 승인하지 못했습니다.")
+
+        def full_preview():
+            if reviewed:
+                try:
+                    _backup, _original, improved = InstructionStore(self.reader.ledger).preview(reviewed["version"])
+                    show(improved.decode("utf-8-sig"))
+                except (Blocked, OSError, ValueError, sqlite3.Error):
+                    status.set("개선본 미리보기를 검증할 수 없습니다.")
+
+        controls = ttk.Frame(panel)
+        controls.pack(fill="x")
+        ttk.Button(controls, text="원본 선택 및 백업", command=backup).pack(side="left")
+        ttk.Button(controls, text="상태 다시 확인", command=refresh).pack(side="left")
+        ttk.Button(controls, text="개선본 전체 보기", command=full_preview).pack(side="left")
+        approve_button = ttk.Button(controls, text="선택 버전 승인 / 복원", command=approve)
+        approve_button.pack(side="left")
+        selected.bind("<<ComboboxSelected>>", refresh)
+        refresh()
 
     def edit_settings(self, mode):
         if self.view is None:

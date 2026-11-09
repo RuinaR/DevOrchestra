@@ -3,7 +3,6 @@ from contextlib import ExitStack, contextmanager
 import ctypes as c
 from ctypes import wintypes as w
 from dataclasses import dataclass
-from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -18,6 +17,7 @@ from .job_probe import (
 )
 from .lease import Blocked
 from .ledger import check_path
+from .instructions import selected_source, source_ref
 
 
 MAX_FRAME = 256 * 1024
@@ -177,21 +177,13 @@ def instruction_sources(home, replica):
     """Fingerprint the expected root-level source in each scope, never its text."""
     result = {}
     for scope, root in (("global", home), ("project", replica)):
-        for name in ("AGENTS.override.md", "AGENTS.md"):
-            candidate = root / name
-            check_path(candidate)
-            try:
-                with candidate.open("rb") as stream:
-                    content = stream.read(32 * 1024 + 1)
-            except FileNotFoundError:
-                continue
-            if len(content) > 32 * 1024:
-                raise Blocked("Instruction source exceeds verification limit")
-            if content.strip():
-                result[scope] = {"file": name, "sha256": sha256(content).hexdigest()}
-                break
-        else:
-            raise Blocked(f"Missing {scope} Codex instructions")
+        try:
+            path, content = selected_source(root)
+        except Blocked as error:
+            if str(error) == "Missing Codex instructions":
+                raise Blocked(f"Missing {scope} Codex instructions") from None
+            raise
+        result[scope] = source_ref(path, content)
     return result
 
 

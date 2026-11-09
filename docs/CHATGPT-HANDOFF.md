@@ -1,5 +1,7 @@
 # ChatGPT 전달용 요약
 
+P2.35는 소유자 지정 전역 지침의 로컬 원본 백업과 해시, 고정 보완본 비교, 프로젝트 지침에 묶인 승인·복원과 실행 기준본 검증을 구현했다. Command Center에 작업 지침을 연결했다. 사용자의 선택 머신 설정과 실제 파일이 일치하는지 확인할 수 없어 원본 복사와 활성화는 대기 중이다. 전용 CODEX_HOME 준비는 합성 검증했으며 실제 로딩은 `INSTRUCTION_LOAD_UNVERIFIED`다. [계약](ARCHITECTURE-ROADMAP.md#p235-작업-지침-기준본)
+
 P2.34 일반 모드는 공식 샌드박스·승인 정책을 요구하며 강화 모드만 A/B/C를 별도 요구한다. Controller의 내구 의도와 Windows Job/stdin/stdout App Server 검사 경로를 구현했고, 소유 합성 피어로 검증했다. 실제 CLI·지침 로딩·모델 턴·토큰 정산은 미검증 또는 미연결이다. 다음 승인은 고정 CLI, 새 합성 홈·작업 폴더·원장에서 모델 없는 정책 조회 1회다. [계약](ARCHITECTURE-ROADMAP.md#p234-일반-개발과-강화-격리)
 
 P2.33은 내부 `Runner.native_step`에 단일 슬롯·토큰 예비량·종료 예약·내구 역할 및 전송 의도·소유 자식 영수증 검사를 연결했다. 미확정 전송은 자동 반복하지 않는다. 실제 Windows App Server 전송기·OS 증거 발급은 미연결이다. 연결 이후 별도 승인할 실측은 모델 없는 합성 접근 프로브의 `command/exec` 1회이며 이전 echo는 반복하지 않는다. P2 A/B/C 및 P3는 BLOCKED다. [실행 계약](ARCHITECTURE-ROADMAP.md#p233-네이티브-역할-실행-입장)

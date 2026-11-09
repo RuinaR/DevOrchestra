@@ -250,7 +250,72 @@ class Runner:
                     or work.ids["run_id"] != expected_run
                     or work.run[-1]["kind"] in OPEN_ROLE_EVENTS):
                 raise Blocked("Native role admission or previous ownership unverified")
-            return work.step(Catalog(self.ledger).read(), native=WindowsNativeCodexAdapter())
+            catalog = Catalog(self.ledger).read()
+            if any(event["kind"] == "instruction_baseline_pinned" for event in work.run):
+                self._pinned_instructions(work.run, catalog)
+            return work.step(catalog, native=WindowsNativeCodexAdapter())
+
+    def pin_instruction_baseline(self, expected_run):
+        """Freeze the owner-approved version before a role starts."""
+        from pathlib import Path
+        from .instructions import InstructionStore
+
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            require_admission(events)
+            run = last_run(events)
+            if (abandoned or not run or run[0]["run_id"] != expected_run
+                    or run[-1]["state"] not in (State.PRECHECK, State.NEED_APPROVAL, State.PLANNING)
+                    or any(event["kind"] in OPEN_ROLE_EVENTS or event["kind"] == "role_finished"
+                           for event in run)):
+                raise Blocked("Instruction baseline requires a pre-role boundary")
+            catalog = Catalog(self.ledger).read()
+            project_id = run[0]["project_id"]
+            setup = catalog["setups"].get(project_id)
+            store = InstructionStore(self.ledger)
+            pin = store.active(project_id)
+            if not setup or not pin or any(e["kind"] == "instruction_baseline_pinned" for e in run):
+                raise Blocked("A new approved instruction baseline and replica are required")
+            store.verify(pin, Path(setup["replica"]))
+            event = {**{key: run[0][key] for key in ("project_id", "run_id", "task_id", "generation")},
+                     "kind": "instruction_baseline_pinned", "state": run[-1]["state"],
+                     "source": "OWNER_INSTRUCTIONS", "instruction_pin": pin}
+            self.ledger.append(len(events), tail, event, admission=require_admission)
+            return event
+
+    def _pinned_instructions(self, run, catalog):
+        from pathlib import Path
+        from .instructions import InstructionStore
+
+        pin = next((event["instruction_pin"] for event in run
+                    if event["kind"] == "instruction_baseline_pinned"), None)
+        setup = catalog["setups"].get(run[0]["project_id"])
+        if not setup or not pin or pin["project_id"] != run[0]["project_id"]:
+            raise Blocked("Pinned instructions or replica missing")
+        return InstructionStore(self.ledger).verify(pin, Path(setup["replica"]))
+
+    def stage_instruction_home(self, expected_run):
+        """Prepare a new private CODEX_HOME for the pinned role, without launching it."""
+        from pathlib import Path
+        from .instructions import InstructionStore
+        from .ledger import check_path
+
+        with execution_slot() as abandoned:
+            events, _ = self.ledger.snapshot(recover_journal=True)
+            require_admission(events)
+            run = last_run(events)
+            if (abandoned or not run or run[0]["run_id"] != expected_run
+                    or run[-1]["state"] not in PHASES):
+                raise Blocked("No current role for instruction staging")
+            catalog = Catalog(self.ledger).read()
+            self._pinned_instructions(run, catalog)
+            pin = next(event["instruction_pin"] for event in run
+                       if event["kind"] == "instruction_baseline_pinned")
+            replica = Path(catalog["setups"][run[0]["project_id"]]["replica"])
+            parent = self.ledger.path.parent / "native-homes"
+            check_path(parent)
+            parent.mkdir(exist_ok=True)
+            return InstructionStore(self.ledger).stage_home(pin, replica, parent / uuid4().hex)
 
     def command(self, action, project="fixture-a", scenario=Scenario.NORMAL, expected_run=None):
         if action == "run":
@@ -285,6 +350,8 @@ class Runner:
             events, tail = self.ledger.snapshot(recover_journal=True)
             current = shutdown_state(events)
             run = last_run(events)
+            if action == "resume" and any(event["kind"] == "instruction_baseline_pinned" for event in run):
+                self._pinned_instructions(run, Catalog(self.ledger).read())
             unresolved = (abandoned or diagnostic_unresolved(events) or native_unresolved(events)
                           or any(event["kind"] in UNKNOWN for event in run[-1:])
                           or any(event["kind"] == "recovery" for event in run))
