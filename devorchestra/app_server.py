@@ -258,7 +258,7 @@ def _owned_stdio(executable, argv, cwd, environment, timeout, cancelled):
 
 
 @contextmanager
-def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled):
+def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled, *, explicit_mxc=False):
     """Pinned App Server entry for a future approved Controller admission."""
     from .mxc_launcher import CLI_HASH, _pin, _signed_offline
 
@@ -269,5 +269,6 @@ def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled):
     _pin(binary, CLI_HASH)
     if not _signed_offline(binary):
         raise Blocked("App Server signature unverified")
-    with _owned_stdio(binary, ["app-server"], cwd, environment, timeout, cancelled) as connection:
+    argv = ["-c", "windows.sandbox=mxc", "app-server"] if explicit_mxc else ["app-server"]
+    with _owned_stdio(binary, argv, cwd, environment, timeout, cancelled) as connection:
         yield connection

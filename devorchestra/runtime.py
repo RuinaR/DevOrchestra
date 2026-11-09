@@ -96,7 +96,7 @@ def last_run(events):
         if events[index]["kind"] == "run_started":
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
-                                                 "native_inspection_"))]
+                                                 "native_inspection_", "native_manager_"))]
     return []
 
 
@@ -111,6 +111,10 @@ def native_unresolved(events):
             pending.add(("inspection", event["request_id"]))
         elif event["kind"] == "native_inspection_result":
             pending.discard(("inspection", event["request_id"]))
+        elif event["kind"] == "native_manager_intent":
+            pending.add(("manager", event["request_id"]))
+        elif event["kind"] == "native_manager_result":
+            pending.discard(("manager", event["request_id"]))
     return bool(pending)
 
 
@@ -193,6 +197,100 @@ def freeze_project(project_id, catalog):
 class Runner:
     def __init__(self, ledger):
         self.ledger = ledger
+
+    def plan_native_manager(self, approval, request):
+        """Internal one-shot planning entry; never grants another role."""
+        from pathlib import Path
+        from .native_manager import (
+            ManagerApproval, ROLE, prepare_manager, require_live_manager_admission, run_owned_manager,
+        )
+        from .role_contract import TransitionEvidence, decide_transition
+
+        require_live_manager_admission()
+        if (type(approval) is not ManagerApproval or type(request) is not RoleRequest
+                or not re.fullmatch(r"[0-9a-f]{32}", approval.request_id)
+                or not time() < approval.expires_epoch):
+            raise Blocked("Current Manager owner approval required")
+        with execution_slot() as abandoned:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            require_admission(events)
+            run, development = last_run(events), session_view(events)
+            if (abandoned or (run and run[-1]["state"] not in TERMINAL)
+                    or (development and not development["end"])
+                    or any(event.get("request_id") == approval.request_id
+                           or (event["kind"] == "native_manager_intent"
+                               and event["run_id"] == request.run_id)
+                           for event in events)):
+                raise Blocked("Manager requires idle, unused admission")
+            setup = Catalog(self.ledger).read()["setups"].get(request.project_id)
+            if not setup or Path(setup["replica"]) != approval.replica:
+                raise Blocked("Manager replica does not match Controller registration")
+            prepare_manager(self.ledger, approval, request)
+            fields = {key: getattr(request, key) for key in (
+                "project_id", "task_id", "run_id", "generation", "agent_run_id", "context_id", "role",
+            )}
+            fields.update(state="DIAGNOSTIC", source="WINDOWS_NATIVE_CODEX",
+                          request_id=approval.request_id, request_hash=approval.request_hash,
+                          model=request.model, reasoning=request.reasoning, budget=asdict(request.budget),
+                          deadline=request.deadline_utc_epoch, instruction_layers=list(approval.layers))
+            count, head = self.ledger.append(len(events), tail, {
+                **fields, "kind": "native_manager_intent",
+            }, admission=require_admission)
+            dispatched = False
+
+            def cancelled():
+                current, _ = self.ledger.snapshot()
+                return time() >= request.deadline_utc_epoch or shutdown_state(current)["state"] in HELD
+
+            def before_send():
+                nonlocal count, head, dispatched
+                prepare_manager(self.ledger, approval, request)
+
+                def admit(current):
+                    if (dispatched or time() >= request.deadline_utc_epoch
+                            or shutdown_state(current)["state"] in HELD or pending_budget_stop(current)):
+                        raise Blocked("Manager dispatch admission closed")
+
+                count, head = self.ledger.append(count, head, {
+                    **fields, "kind": "native_manager_dispatch",
+                }, allow_shutdown=True, admission=admit)
+                dispatched = True
+
+            try:
+                proposal = run_owned_manager(self.ledger, approval, request, before_send, cancelled)
+                if not dispatched:
+                    raise Blocked("Manager dispatch receipt missing")
+            except Exception:
+                # Keep intent unresolved, including when dispatch may have reached the server.
+                raise Blocked("Manager outcome UNKNOWN; no automatic retry") from None
+            result = {**fields, "kind": "native_manager_result", "owned_tree": "DRAINED",
+                      "proposal_sha256": digest(proposal), "usage": "UNKNOWN", "authentication": "UNKNOWN",
+                      "next_role_admission": "BLOCKED"}
+            from .ledger import canonical
+            # Decide only from the verified result inside the commit transaction.
+            def settle(current, current_head):
+                if current_head != head and (
+                        not current[count:] or any(e["kind"] != "shutdown_scheduled" for e in current[count:])):
+                    raise Blocked("Manager result fence changed")
+                if current[:count] != events + [
+                    {**fields, "kind": "native_manager_intent"},
+                    {**fields, "kind": "native_manager_dispatch"},
+                ]:
+                    raise Blocked("Manager evidence prefix changed")
+                evidence = TransitionEvidence(
+                    owned_tree_drained=True, scope_released=True, receipt_committed=True,
+                    admission_open=(time() < request.deadline_utc_epoch
+                                    and shutdown_state(current)["state"] not in HELD),
+                    next_role_and_reserve_funded=False, rework_remaining=0, repeated_failure=False,
+                )
+                result["transition_preview"] = decide_transition(ROLE, canonical(proposal).encode(), evidence)
+                return result
+
+            try:
+                self.ledger.update(settle)
+            except Exception:
+                raise Blocked("Manager result commit unverified; no automatic retry") from None
+            return result, proposal
 
     def inspect_native(self, approval):
         """Internal owner entry for a single model-free App Server handshake."""
