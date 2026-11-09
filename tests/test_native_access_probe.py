@@ -1,5 +1,5 @@
 from base64 import b64decode
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import os
 from pathlib import Path
 import sys
@@ -91,7 +91,8 @@ class NativeAccessProbeTests(unittest.TestCase):
                 self.assertEqual("native_inspection_dispatch", self.ledger.read()[-1]["kind"])
 
         with patch("devorchestra.app_server.prepare_inspection", return_value=(self.work, {}, {})), \
-                patch("devorchestra.native_access_probe.prepare_probe", return_value=self.command), \
+                patch("devorchestra.native_access_probe.prepare_probe",
+                      return_value=nullcontext((self.command, lambda: None))), \
                 patch("devorchestra.app_server.open_app_server", side_effect=peer) as launched:
             result = self.runner.inspect_native(self.approval)
             self.assertEqual("DRAINED", result["owned_tree"])

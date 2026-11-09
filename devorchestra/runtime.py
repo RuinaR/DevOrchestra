@@ -294,6 +294,7 @@ class Runner:
 
     def inspect_native(self, approval):
         """Internal owner entry for a model-free handshake or fixed access probe."""
+        from contextlib import ExitStack
         from .app_server import NativeInspectionApproval, open_app_server, prepare_inspection
         from .mxc_launcher import CLI_HASH, CLI_VERSION
         from .native_access_probe import NativeAccessApproval, command_request, prepare_probe, probe_receipt
@@ -306,7 +307,7 @@ class Runner:
                 or not time() < approval.expires_epoch
                 or (access and not re.fullmatch(r"[0-9a-f]{64}", access.powershell_sha256))):
             raise Blocked("Current App Server inspection approval required")
-        with execution_slot() as abandoned:
+        with execution_slot() as abandoned, ExitStack() as resources:
             events, tail = self.ledger.snapshot(recover_journal=True)
             require_admission(events)
             run, development = last_run(events), session_view(events)
@@ -321,7 +322,8 @@ class Runner:
                       "source": "WINDOWS_NATIVE_CODEX", "request_id": approval.request_id,
                       "instruction_sources": instructions}
             if access:
-                command = command_request(work, prepare_probe(work, access.powershell_sha256))
+                argv, recheck_probe = resources.enter_context(prepare_probe(work, access.powershell_sha256))
+                command = command_request(work, argv)
                 fields.update(probe_kind="RESTRICTED_FILE_ACCESS", command_hash=digest(command),
                               cli_sha256=CLI_HASH, cli_version=CLI_VERSION,
                               powershell_sha256=access.powershell_sha256)
@@ -348,8 +350,7 @@ class Runner:
                         if policy != {"sandbox": "read-only", "approval": "never",
                                       "managed_requirements_present": False}:
                             raise Blocked("Access probe App Server policy mismatch")
-                        if command_request(work, prepare_probe(work, access.powershell_sha256)) != command:
-                            raise Blocked("Approved access probe changed")
+                        recheck_probe()
 
                         def admit_command(current):
                             if time() >= approval.expires_epoch or shutdown_state(current)["state"] in HELD:
@@ -358,7 +359,9 @@ class Runner:
                         count, head = self.ledger.append(count, head, {
                             **fields, "kind": "native_inspection_dispatch",
                         }, allow_shutdown=True, admission=admit_command)
+                        recheck_probe()
                         wire_result = server.request(3, "command/exec", command)
+                resources.close()
             except Exception:
                 # Preserve the durable unresolved intent without raw process errors.
                 raise Blocked("App Server inspection or owned drain unverified") from None

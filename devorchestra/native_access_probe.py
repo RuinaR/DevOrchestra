@@ -1,5 +1,6 @@
 """Fixed model-free App Server file boundary probe for an approved synthetic lab."""
 from base64 import b64encode
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,23 +30,28 @@ def _matches(path, expected):
         return stream.read(len(expected) + 1) == expected
 
 
+@contextmanager
 def prepare_probe(work, powershell_sha256):
-    from .mxc_launcher import _known_folder, _pin, _signed_offline
+    from .system_powershell import hold_system_powershell
 
     allowed, protected = _targets(work)
-    check_path(protected.parent)
-    if ({path.name for path in protected.parent.iterdir()} != {"protected.txt"}
-            or not _matches(allowed, ALLOWED) or not _matches(protected, PROTECTED)):
-        raise Blocked("Synthetic probe markers changed")
+    def verify_markers():
+        check_path(protected.parent)
+        if ({path.name for path in protected.parent.iterdir()} != {"protected.txt"}
+                or not _matches(allowed, ALLOWED) or not _matches(protected, PROTECTED)):
+            raise Blocked("Synthetic probe markers changed")
+
+    verify_markers()
     # Positive host control: known marker bytes and a write-capable open without mutation.
     with allowed.open("r+b"):
         pass
-    windows = _known_folder(0x24)
-    shell = windows / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    _pin(shell, powershell_sha256)
-    if not _signed_offline(shell):
-        raise Blocked("System PowerShell signature unverified")
-    return build_command(shell, allowed, protected)
+    with hold_system_powershell(powershell_sha256) as (shell, recheck_identity):
+        def before_dispatch():
+            verify_markers()
+            recheck_identity()
+
+        yield build_command(shell, allowed, protected), before_dispatch
+        recheck_identity()
 
 
 def build_command(shell: Path, allowed: Path, protected: Path):
