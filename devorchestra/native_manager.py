@@ -108,7 +108,7 @@ def _collect_plan(server, request, replica, messages, before_send):
     thread = server.request(10, "thread/start", {
         "model": request.model, "cwd": str(replica), "approvalPolicy": "never",
         "sandbox": "read-only", "ephemeral": True,
-    }, record_thread_notice)["thread"]
+    }, record_thread_notice, allowed_notifications=("thread/started",))["thread"]
     thread_id = thread["id"]
     if (not isinstance(thread_id, str) or not thread_id
             or len(thread_notice) > 1
@@ -130,7 +130,9 @@ def _collect_plan(server, request, replica, messages, before_send):
             "type": "restricted", "includePlatformDefaults": False, "readableRoots": [str(replica)],
         }},
         "input": messages, "outputSchema": OUTPUT_SCHEMAS[ROLE],
-    }, queue_event)["turn"]
+    }, queue_event, allowed_notifications=("turn/started", "turn/completed", "item/started",
+                                            "item/completed", "item/agentMessage/delta",
+                                            "thread/tokenUsage/updated"))["turn"]
     turn_id = turn["id"]
     if not isinstance(turn_id, str) or not turn_id or turn["status"] != "inProgress":
         raise Blocked("Manager turn acknowledgement invalid")

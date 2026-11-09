@@ -1,4 +1,5 @@
 """Bounded stdio App Server transport for a Controller-owned Windows Job."""
+from collections import deque
 from contextlib import ExitStack, contextmanager
 import ctypes as c
 from ctypes import wintypes as w
@@ -16,11 +17,22 @@ from .job_probe import (
     _create_owned, _require, _wait_empty,
 )
 from .lease import Blocked
-from .ledger import check_path
+from .ledger import canonical, check_path
 from .instructions import selected_source, source_ref
 
 
 MAX_FRAME = 256 * 1024
+MAX_MESSAGES = 4096
+MAX_NOTICES_PER_REQUEST = 16
+SAFE_METHODS = frozenset((
+    "initialize", "initialized", "config/read", "configRequirements/read", "command/exec",
+    "thread/start", "thread/started", "turn/start", "turn/started", "turn/completed",
+    "item/started", "item/completed", "item/agentMessage/delta", "thread/tokenUsage/updated",
+    "warning", "configWarning", "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval", "item/permissions/requestApproval", "tool/requestUserInput",
+))
+ERROR_CODES = {-32700: "PARSE_ERROR", -32600: "INVALID_REQUEST", -32601: "METHOD_NOT_FOUND",
+               -32602: "INVALID_PARAMS", -32603: "INTERNAL_ERROR", -32001: "OVERLOADED"}
 INSPECTION_CONFIG = 'sandbox_mode = "read-only"\napproval_policy = "never"\n'
 
 
@@ -72,6 +84,16 @@ class AppServer:
         self.cancelled = cancelled
         self.frames = Queue(maxsize=32)
         self.broken = Event()
+        self.read_failure = None
+        self.request_method = None
+        self.request_id = None
+        self.request_ids = set()
+        self.completed_ids = set()
+        self.received = 0
+        self.config_warning_seen = False
+        self.failure_code = None
+        self.diagnostics = deque(maxlen=32)
+        self.cleanup_receipt = {"job": "UNKNOWN", "pipes": "UNKNOWN"}
         self.reader = Thread(target=self._read, args=(source,), daemon=True)
         self.reader.start()
         self.writer = None
@@ -83,26 +105,55 @@ class AppServer:
                 if not line:
                     break
                 if len(line) > MAX_FRAME or not line.endswith(b"\n"):
+                    self.read_failure = ("FRAME_TOO_LARGE" if len(line) > MAX_FRAME
+                                         else "TRUNCATED_FRAME", len(line))
                     self.broken.set()
                     break
                 self.frames.put_nowait(line)
         except (OSError, Full, ValueError):
+            self.read_failure = ("READER_OR_QUEUE_FAILURE", None)
             self.broken.set()
         finally:
             try:
                 self.frames.put_nowait(None)
             except Full:
+                if self.read_failure is None:
+                    self.read_failure = ("QUEUE_LIMIT", None)
                 self.broken.set()
 
+    def _note(self, classification, *, method=None, matches=None, valid=None, size=None, error=None):
+        self.diagnostics.append({
+            "stage": "RPC" if self.request_method else "STREAM",
+            "request_method": self.request_method,
+            "classification": classification,
+            "server_method": method if isinstance(method, str) and method in SAFE_METHODS
+            else "UNRECOGNIZED" if method is not None else None,
+            "id_matches": matches, "json_valid": valid, "frame_bytes": size, "error": error,
+        })
+
+    def _fail(self, classification, **fields):
+        self.failure_code = classification
+        self._note(classification, **fields)
+        raise Blocked(f"App Server {classification}")
+
+    def diagnostic_receipt(self):
+        return {"protocol": list(self.diagnostics), "received_messages": self.received,
+                "failure_code": self.failure_code, "cleanup": dict(self.cleanup_receipt)}
+
     def _check(self):
-        if self.broken.is_set() or self.cancelled() or monotonic() >= self.deadline:
-            raise Blocked("App Server transport stopped")
+        if self.broken.is_set():
+            reason, size = self.read_failure or ("READER_OR_QUEUE_FAILURE", None)
+            self._fail(reason, size=size)
+        if self.cancelled():
+            self._fail("CANCELLED")
+        if monotonic() >= self.deadline:
+            self._fail("TIMEOUT")
 
     def send(self, message):
         self._check()
         frame = (json.dumps(message, ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
         if len(frame) > MAX_FRAME:
-            raise Blocked("App Server request exceeds frame limit")
+            self._fail("REQUEST_FRAME_LIMIT", size=len(frame))
         sent, failed = Event(), Event()
 
         def write():
@@ -119,7 +170,20 @@ class AppServer:
         while not sent.wait(0.05):
             self._check()
         if failed.is_set():
-            raise Blocked("App Server write failed")
+            self._fail("WRITE_FAILED")
+
+    @staticmethod
+    def _unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    @staticmethod
+    def _invalid_constant(_value):
+        raise ValueError("invalid JSON constant")
 
     def receive(self):
         while True:
@@ -129,26 +193,102 @@ class AppServer:
                 break
             except Empty:
                 continue
+        return self._decode(line)
+
+    def _decode(self, line):
+        if line is None:
+            self._fail("EOF")
+        self.received += 1
+        if self.received > MAX_MESSAGES:
+            self._fail("MESSAGE_LIMIT", size=len(line))
         try:
-            message = json.loads(line) if line is not None else None
+            message = json.loads(line.decode("utf-8"), object_pairs_hook=self._unique_pairs,
+                                 parse_constant=self._invalid_constant)
         except (UnicodeError, ValueError, RecursionError):
-            raise Blocked("Invalid App Server frame") from None
-        if not isinstance(message, dict):
-            raise Blocked("App Server frame or EOF was unexpected")
+            self.failure_code = "INVALID_JSON"
+            self._note("INVALID_JSON", valid=False, size=len(line))
+            raise Blocked("App Server INVALID_JSON") from None
+        size = len(line)
+        if not isinstance(message, dict) or message.get("jsonrpc", "2.0") != "2.0":
+            self._fail("INVALID_ENVELOPE", valid=True, size=size)
+        has_id = "id" in message
+        identifier = message.get("id")
+        matches = type(identifier) is int and identifier == self.request_id if has_id else None
+        if "method" in message:
+            method = message["method"]
+            if (not isinstance(method, str) or not method or "result" in message or "error" in message
+                    or ("params" in message and not isinstance(message["params"], (dict, list, type(None))))
+                    or set(message) - {"id", "method", "params", "jsonrpc"}):
+                self._fail("INVALID_ENVELOPE", valid=True, size=size)
+            if has_id:
+                self._fail("SERVER_REQUEST_BLOCKED" if type(identifier) in (int, str)
+                           else "INVALID_ENVELOPE", method=method, matches=matches, valid=True, size=size)
+            self._note("NOTIFICATION", method=method, valid=True, size=size)
+        else:
+            if (not has_id or type(identifier) not in (int, str)
+                    or ("result" in message) == ("error" in message)
+                    or set(message) - {"id", "result", "error", "jsonrpc"}):
+                self._fail("INVALID_ENVELOPE", matches=matches, valid=True, size=size)
+            if type(identifier) is int and identifier in self.completed_ids:
+                self._fail("DUPLICATE_RESPONSE", matches=matches, valid=True, size=size)
+            if not matches:
+                self._fail("UNEXPECTED_RESPONSE_ID", matches=False, valid=True, size=size)
+            if "error" in message:
+                error = message["error"]
+                if not isinstance(error, dict) or type(error.get("code")) is not int or not isinstance(error.get("message"), str):
+                    self._fail("INVALID_ERROR_RESPONSE", matches=True, valid=True, size=size)
+                self._fail("RPC_ERROR", matches=True, valid=True, size=size,
+                           error=ERROR_CODES.get(error["code"], "OTHER_RPC_ERROR"))
+            if not isinstance(message["result"], dict):
+                self._fail("INVALID_RESULT", matches=True, valid=True, size=size)
+            self._note("MATCHED_RESPONSE", matches=True, valid=True, size=size)
         return message
 
-    def request(self, request_id, method, params, on_notification=None):
-        self.send({"id": request_id, "method": method, "params": params})
-        while True:
-            reply = self.receive()
-            if "method" not in reply and type(reply.get("id")) is int and reply["id"] == request_id:
-                if "error" in reply or not isinstance(reply.get("result"), dict):
-                    raise Blocked("App Server rejected the request")
-                return reply["result"]
-            if "id" in reply or on_notification is None:
-                # Approval requests and every unexpected response fail closed.
-                raise Blocked("Unexpected App Server request or response")
-            on_notification(reply)
+    def _informational(self, message):
+        method, params = message["method"], message.get("params")
+        if method not in ("warning", "configWarning"):
+            return False
+        field = "message" if method == "warning" else "summary"
+        if not isinstance(params, dict) or not isinstance(params.get(field), str):
+            self._fail("INVALID_NOTIFICATION", method=method, valid=True)
+        if method == "configWarning":
+            self.config_warning_seen = True
+        return True
+
+    def request(self, request_id, method, params, on_notification=None, *, allowed_notifications=()):
+        if type(request_id) is not int or request_id in self.request_ids or self.request_method is not None:
+            self._fail("INVALID_REQUEST_ID")
+        self.request_ids.add(request_id)
+        self.request_id = request_id
+        self.request_method = method if method in SAFE_METHODS else "UNRECOGNIZED"
+        try:
+            self.send({"id": request_id, "method": method, "params": params})
+            for _ in range(MAX_NOTICES_PER_REQUEST + 1):
+                reply = self.receive()
+                if "method" not in reply:
+                    self.completed_ids.add(request_id)
+                    return reply["result"]
+                if self._informational(reply):
+                    continue
+                if on_notification is None or reply["method"] not in allowed_notifications:
+                    self._fail("UNSUPPORTED_NOTIFICATION", method=reply["method"], valid=True)
+                on_notification(reply)
+            self._fail("NOTIFICATION_LIMIT")
+        finally:
+            self.request_id = self.request_method = None
+
+    def check_trailing_messages(self):
+        for _ in range(MAX_NOTICES_PER_REQUEST + 1):
+            try:
+                line = self.frames.get_nowait()
+            except Empty:
+                return
+            if line is None:
+                return
+            message = self._decode(line)
+            if not self._informational(message):
+                self._fail("UNSUPPORTED_TRAILING_NOTIFICATION", method=message["method"], valid=True)
+        self._fail("NOTIFICATION_LIMIT")
 
     def initialize(self):
         result = self.request(0, "initialize", {"clientInfo": {
@@ -167,6 +307,8 @@ class AppServer:
         values = config.get("config")
         if not isinstance(values, dict) or "requirements" not in requirements:
             raise Blocked("App Server policy response incomplete")
+        if self.config_warning_seen:
+            self._fail("CONFIG_WARNING_REQUIRES_REVIEW", method="configWarning")
         sandbox = values.get("sandbox_mode")
         approval = values.get("approval_policy")
         return {
@@ -188,6 +330,25 @@ def instruction_sources(home, replica):
             raise
         result[scope] = source_ref(path, content)
     return result
+
+
+def save_inspection_diagnostic(ledger, request_id, server, status):
+    """Write only fixed classifications to a separate local file, even if SQLite failed."""
+    directory = ledger.local_directory("logs", create=True)
+    path = directory / f"app-server-{request_id}.json"
+    check_path(path)
+    data = server.diagnostic_receipt() if server is not None else {
+        "protocol": [], "received_messages": 0, "cleanup": {"job": "UNKNOWN", "pipes": "UNKNOWN"},
+        "failure_code": "LAUNCH_OR_SETUP_UNVERIFIED",
+    }
+    if status == "RESULT_COMMIT_UNVERIFIED":
+        data["failure_code"] = status
+    elif status != "RESULT_COMMITTED" and data["failure_code"] is None:
+        data["failure_code"] = status
+    with path.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(canonical({"request_id": request_id, "status": status, **data}) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 @contextmanager
@@ -249,15 +410,29 @@ def _owned_stdio(executable, argv, cwd, environment, timeout, cancelled):
                 raise Blocked("App Server Job drain unverified")
             drained = True
         finally:
-            _cleanup(api, job, info, drained)
+            try:
+                _cleanup(api, job, info, drained)
+            except Exception:
+                if connection is not None:
+                    connection._fail("JOB_DRAIN_UNVERIFIED")
+                raise
             if connection is not None:
+                connection.cleanup_receipt["job"] = "DRAINED_NORMALLY" if drained else "TERMINATED_AND_DRAINED"
                 connection.reader.join(1)
                 if connection.writer is not None:
                     connection.writer.join(1)
                 if connection.reader.is_alive() or (connection.writer and connection.writer.is_alive()):
-                    raise Blocked("App Server pipe drain unverified")
+                    connection._fail("PIPE_DRAIN_UNVERIFIED")
+                stdin.close()
+                stdout.close()
+                connection.cleanup_receipt["pipes"] = "CLOSED"
                 if drained and connection.broken.is_set():
-                    raise Blocked("App Server output was incomplete")
+                    reason, size = connection.read_failure or ("READER_OR_QUEUE_FAILURE", None)
+                    connection._fail(reason, size=size)
+                if drained:
+                    connection.check_trailing_messages()
+                    if connection.config_warning_seen:
+                        connection._fail("CONFIG_WARNING_REQUIRES_REVIEW", method="configWarning")
 
 
 @contextmanager

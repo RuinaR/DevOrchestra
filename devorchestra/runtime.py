@@ -297,7 +297,7 @@ class Runner:
     def inspect_native(self, approval):
         """Internal owner entry for a model-free handshake or fixed access probe."""
         from contextlib import ExitStack
-        from .app_server import NativeInspectionApproval, open_app_server, prepare_inspection
+        from .app_server import NativeInspectionApproval, open_app_server, prepare_inspection, save_inspection_diagnostic
         from .mxc_launcher import CLI_HASH, CLI_VERSION
         from .native_access_probe import NativeAccessApproval, command_request, prepare_probe, probe_receipt
 
@@ -342,6 +342,7 @@ class Runner:
             count, head = self.ledger.append(len(events), tail, {
                 **fields, "kind": "native_inspection_intent",
             }, admission=admit)
+            server = None
             try:
                 if cancelled():
                     raise Blocked("App Server inspection cancelled")
@@ -366,12 +367,26 @@ class Runner:
                 resources.close()
             except Exception:
                 # Preserve the durable unresolved intent without raw process errors.
+                try:
+                    save_inspection_diagnostic(self.ledger, approval.request_id, server,
+                                               "PROTOCOL_OR_CLEANUP_UNVERIFIED")
+                except (Blocked, OSError):
+                    raise Blocked("App Server unresolved; diagnostic write failed") from None
                 raise Blocked("App Server inspection or owned drain unverified") from None
             result = {**fields, "kind": "native_inspection_result", "policy": policy,
                       "instruction_loading": "NOT_VERIFIED", "owned_tree": "DRAINED"}
             if access:
                 result["access"] = probe_receipt(wire_result, work, command)
-            self.ledger.append(count, head, result, allow_shutdown=True)
+            try:
+                self.ledger.append(count, head, result, allow_shutdown=True)
+            except Exception:
+                try:
+                    save_inspection_diagnostic(self.ledger, approval.request_id, server,
+                                               "RESULT_COMMIT_UNVERIFIED")
+                except (Blocked, OSError):
+                    raise Blocked("App Server result unresolved; diagnostic write failed") from None
+                raise Blocked("App Server result commit unverified") from None
+            save_inspection_diagnostic(self.ledger, approval.request_id, server, "RESULT_COMMITTED")
             return result
 
     def native_step(self, expected_run):
