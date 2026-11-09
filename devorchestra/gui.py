@@ -564,13 +564,14 @@ class CommandCenter:
         wait = ttk.Entry(paths)
         wait.insert(0, "10")
         wait.pack(fill="x")
-        label(paths, f"원장 및 체크포인트 · {self.reader.ledger.path}", wraplength=520).pack(fill="x")
+        label(paths, "원장 및 체크포인트 · .ai-local/state/p1.sqlite3", wraplength=520).pack(fill="x")
         label(project, "local_path에 원본 경로를 입력하세요. 도구·네트워크·Git은 차단으로 저장합니다.").pack(fill="x")
         editor = tk.Text(project, width=76, height=21, wrap="none")
         self.scrollable(project, editor)
         editor.insert("1.0", json.dumps(new_project("new-project", "New project", "Project goal"),
                                         indent=2, ensure_ascii=False))
-        status = label(wizard, fg=AMBER)
+        storage = self.reader.ledger.storage_status()["status"]
+        status = label(wizard, f"로컬 저장소 · {storage}", fg=AMBER)
         status.pack(fill="x")
 
         def save():
@@ -580,17 +581,19 @@ class CommandCenter:
                     raise ValueError("Configuration input too large")
                 data = {"project": json.loads(raw), "replica": replica.get(), "wait_seconds": int(wait.get())}
                 validate_setup(data, self.reader.ledger.state_boundary)
-                if not self.reader.ledger.path.exists():
-                    self.controller.command("init")
+                self.controller.command("init")
                 Catalog(self.reader.ledger).save_setup(data)
             except (Blocked, OSError, sqlite3.Error, ValueError) as error:
-                status.configure(text=str(error))
+                current = self.reader.ledger.storage_status()["status"]
+                status.configure(text=f"로컬 저장소 · {current} · 설정 저장 실패"
+                                      + (f" · {error}" if isinstance(error, (Blocked, ValueError)) else ""))
                 return
             wizard.destroy()
             self.refresh()
 
         ttk.Button(wizard, text="설정 저장 · 실제 실행 차단 유지", command=save,
-                   state="normal" if facts["windows_x64"] else "disabled").pack(anchor="e")
+                   state="normal" if facts["windows_x64"] and storage != "BLOCKED"
+                   else "disabled").pack(anchor="e")
 
     def instruction_settings(self):
         panel = tk.Toplevel(self.root)
@@ -799,11 +802,15 @@ class CommandCenter:
 def main():
     try:
         ledger = Ledger.for_project()
-    except (Blocked, OSError) as error:
-        raise SystemExit("DevOrchestra local storage unavailable") from error
+    except (Blocked, OSError):
+        root = tk.Tk()
+        root.title("DevOrchestra")
+        ttk.Label(root, text="로컬 저장소 · BLOCKED · .ai-local 경로를 확인하세요.").pack(padx=20, pady=20)
+        root.mainloop()
+        return
     root = tk.Tk()
     center = CommandCenter(root, ProjectionReader(ledger))
-    if not ledger.path.exists():
+    if ledger.storage_status()["status"] != "READY":
         root.after_idle(center.setup_wizard)
     root.mainloop()
 

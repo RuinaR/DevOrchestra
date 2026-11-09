@@ -9,7 +9,7 @@ from .catalog import Catalog, new_project
 from .dashboard import project_view, render
 from .development import session_view
 from .lease import Blocked
-from .ledger import Ledger, canonical, check_path
+from .ledger import Ledger, canonical
 from .policy import DEFAULT_BACKEND, DevelopmentMode, ExecutionBackend, live_preflight
 from .runtime import Runner, Scenario
 
@@ -67,12 +67,9 @@ def main():
     try:
         ledger = Ledger.for_project()
         if args.action == "local-status":
-            instructions = ledger.local_directory("instructions") / "baselines.sqlite3"
-            check_path(instructions)
-            print(canonical({"storage": ".ai-local", "runtime_present": ledger.path.is_file(),
-                             "instructions_present": instructions.is_file(),
-                             "legacy_import": "NOT_ATTEMPTED"}))
-            return
+            status = ledger.storage_status()
+            print(canonical(status))
+            return 2 if status["status"] == "BLOCKED" else None
         if args.action == "shutdown":
             print(canonical(Runner(ledger).shutdown(args.transition, args.request_id,
                                                     expected_generation=args.generation)))
@@ -129,6 +126,10 @@ def main():
     except KeyboardInterrupt:
         parser.exit(130, "Interrupted. Check the ledger before continuing.\n")
     except (Blocked, OSError, sqlite3.Error, ValueError, KeyError) as error:
+        if args.action == "local-status":
+            print(canonical({"storage": ".ai-local", "status": "BLOCKED",
+                             "legacy_import": "NOT_ATTEMPTED"}))
+            return 2
         parser.exit(2, f"BLOCKED: {error}\n")
 
 

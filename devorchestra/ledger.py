@@ -9,6 +9,8 @@ from pathlib import Path
 
 from .lease import Blocked
 
+LOCAL_DIRECTORIES = ("instructions", "state", "logs", "recovery", "temp")
+
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -54,7 +56,7 @@ class Ledger:
         if root.exists() and not root.is_dir():
             raise Blocked("Local storage root conflicts with a file")
         ledger = cls(root / "state" / "p1.sqlite3", local_root=root)
-        for name in ("instructions", "state", "logs", "recovery", "temp"):
+        for name in LOCAL_DIRECTORIES:
             ledger.local_directory(name)
         check_path(ledger.path)
         return ledger
@@ -64,7 +66,7 @@ class Ledger:
         return self.local_root if self.local_root is not None else self.path.parent
 
     def local_directory(self, name, *, create=False):
-        if name not in ("instructions", "state", "logs", "recovery", "temp"):
+        if name not in LOCAL_DIRECTORIES:
             raise ValueError("Unknown local storage category")
         if self.local_root is None:
             # Explicitly constructed ledgers are used by isolated fixtures.
@@ -83,10 +85,42 @@ class Ledger:
         check_path(self.path)
         return sqlite3.connect(self.path.as_uri() + f"?mode={mode}", uri=True, timeout=1)
 
+    def storage_status(self):
+        result = {"storage": ".ai-local", "runtime_present": False, "instructions_present": False,
+                  "legacy_import": "NOT_ATTEMPTED", "status": "BLOCKED"}
+        try:
+            root = self.state_boundary
+            check_path(root)
+            directories = [self.local_directory(name) for name in LOCAL_DIRECTORIES]
+            instructions = self.local_directory("instructions") / "baselines.sqlite3"
+            catalog = self.path.with_name(self.path.stem + "-catalog.sqlite3")
+            for path in (self.path, instructions, catalog):
+                check_path(path)
+                if path.exists() and not path.is_file():
+                    return result
+            result.update(runtime_present=self.path.is_file(), instructions_present=instructions.is_file())
+            if not root.exists() or (self.local_root is None and not result["runtime_present"]):
+                result["status"] = "NOT_INITIALIZED"
+            elif result["runtime_present"] and (
+                    self.local_root is None or all(path.is_dir() for path in directories)):
+                for path in (self.path, instructions, catalog):
+                    if path.is_file():
+                        Ledger(path).snapshot()
+                result["status"] = "READY"
+        except (Blocked, OSError, sqlite3.Error, ValueError, TypeError, RecursionError):
+            pass
+        return result
+
     def initialize(self):
         check_path(self.path)
-        if self.local_root is not None:
-            for name in ("instructions", "state", "logs", "recovery", "temp"):
+        if self.local_root is not None and self.path == self.local_root / "state" / "p1.sqlite3":
+            status = self.storage_status()["status"]
+            if status == "READY":
+                return
+            if status != "NOT_INITIALIZED":
+                raise Blocked("Local storage is incomplete or damaged; initialization blocked")
+            self.local_root.mkdir()
+            for name in LOCAL_DIRECTORIES:
                 self.local_directory(name, create=True)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Existing databases, including empty or damaged ones, are never reset.

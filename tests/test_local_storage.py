@@ -3,6 +3,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 import os
 from pathlib import Path
+from shutil import copytree
 import stat
 import subprocess
 from tempfile import TemporaryDirectory
@@ -44,6 +45,7 @@ class LocalStorageTests(unittest.TestCase):
         self.assertEqual({"state", "instructions", "logs", "recovery", "temp"},
                          {p.name for p in ledger.state_boundary.iterdir()})
         self.assertEqual(ledger.path.parent, Catalog(ledger).ledger.path.parent)
+        self.assertGreater(Catalog(ledger).save_project(new_project("local-test", "Local test", "Fixture")), 0)
         source = self.root / "AGENTS.md"
         source.write_bytes(b"Global fixture\r\n")
         replica = self.root / "replica"
@@ -71,10 +73,39 @@ class LocalStorageTests(unittest.TestCase):
                 patch.object(Ledger, "for_project", return_value=ledger), redirect_stdout(output):
             main()
         self.assertEqual({"storage": ".ai-local", "runtime_present": False,
-                          "instructions_present": False, "legacy_import": "NOT_ATTEMPTED"},
+                          "instructions_present": False, "legacy_import": "NOT_ATTEMPTED",
+                          "status": "NOT_INITIALIZED"},
                          json.loads(output.getvalue()))
         self.assertFalse(ledger.state_boundary.exists())
         self.assertEqual(b"unverified legacy fixture", (legacy / "p1.sqlite3").read_bytes())
+
+    def test_initialization_is_idempotent_and_state_opens_at_relocated_checkout(self):
+        original = self.root / "checkout"
+        original.mkdir()
+        ledger = Ledger.for_project(original)
+        self.assertEqual("NOT_INITIALIZED", ledger.storage_status()["status"])
+        self.assertEqual([], list(original.iterdir()))
+        runner = Runner(ledger)
+        runner.command("init")
+        run = runner.command("start")["run_id"]
+        before = ledger.path.read_bytes()
+        runner.command("init")
+        self.assertEqual(before, ledger.path.read_bytes())
+        moved = Path(copytree(original, self.root / "moved"))
+        reopened = Ledger.for_project(moved)
+        self.assertEqual("READY", reopened.storage_status()["status"])
+        self.assertEqual(run, reopened.read()[0]["run_id"])
+
+    def test_partial_initialization_and_corruption_stay_blocked(self):
+        ledger = Ledger.for_project(self.root)
+        with patch.object(ledger, "connect", side_effect=OSError("fixture initialization error")):
+            with self.assertRaises(OSError):
+                Runner(ledger).command("init")
+        self.assertEqual("BLOCKED", ledger.storage_status()["status"])
+        before = ledger.path.read_bytes()
+        with self.assertRaises(Blocked):
+            Runner(ledger).command("init")
+        self.assertEqual(before, ledger.path.read_bytes())
 
     def test_reparse_metadata_and_file_collision_are_rejected(self):
         project = self.root / "project"

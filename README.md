@@ -53,7 +53,9 @@ python -B -m devorchestra.gui
 
 Windows와 Python 3.10 이상이 필요합니다. 추가 패키지는 필요 없습니다. `init`은 DevOrchestra 소스 체크아웃의 `.ai-local/state/p1.sqlite3`를 최초 한 번 생성합니다. 기존 원장은 초기화하지 않습니다. 지침 백업은 `.ai-local/instructions`, 임시 실행은 `.ai-local/temp`에 둡니다. `.ai-local/logs`와 `.ai-local/recovery`는 각각 비공개 로그와 별도 복구 자료용입니다. 현재 체크포인트와 복구 이벤트는 실행 SQLite에 보존합니다.
 
-`python -B -m devorchestra local-status`는 현재 저장소의 존재 여부를 읽기 전용으로 표시합니다. 이전 사용자별 저장소는 자동 검색·복사하지 않습니다. 공개 커밋 전 `python -B tools/check_public_index.py`를 실행하고 스테이징된 내용도 검토하세요. 이 검사는 경로와 Git 제외 규칙을 확인합니다.
+`python -B -m devorchestra local-status`는 파일을 만들지 않고 `NOT_INITIALIZED`, `READY`, `BLOCKED`를 표시합니다. 명시적 `init` 또는 Command Center의 최초 설정 저장으로 초기화합니다. 부분 생성이나 손상된 저장소는 보존하고 초기화를 차단합니다. 이전 사용자별 저장소는 자동 검색·복사하지 않습니다. 공개 커밋 전 `python -B tools/check_public_index.py`를 실행하고 스테이징된 내용도 검토하세요.
+
+Codex 셸에서 합성 확인 마커를 생성했다면, 사용자 PowerShell에서 프로젝트 루트를 연 뒤 `Test-Path -LiteralPath '.\.ai-local' -PathType Container`와 `Get-FileHash -LiteralPath '.\.ai-local\host-check.txt' -Algorithm SHA256`으로 직접 대조할 수 있습니다. 마커가 없거나 해시가 다르면 사용자 세션에서 동일 저장소가 확인되지 않은 상태입니다.
 
 ```powershell
 python -B -m devorchestra init
