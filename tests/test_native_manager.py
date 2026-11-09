@@ -14,7 +14,7 @@ from devorchestra.adapter import Budget, RoleRequest, Scope
 from devorchestra.app_server import NativeInspectionApproval, _owned_stdio
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
-from devorchestra.manager_api import ENDPOINT, parse_manager_api_result
+from devorchestra.manager_api import ENDPOINT, build_manager_api_draft, parse_manager_api_result
 from devorchestra.native_manager import DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval, ManagerPolicyApproval
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
@@ -36,8 +36,10 @@ for line in sys.stdin:
         assert method in ('initialize', 'initialized', 'config/read', 'configRequirements/read')
     if method == 'initialized':
         continue
+    if method == 'account/read':
+        assert msg['params'] == {'refreshToken':False}
     if method == 'thread/start':
-        assert mode != 'tools-enabled'
+        assert mode not in ('tools-enabled', 'api-account')
         assert msg['params']['sandbox'] == 'read-only'
         assert not msg['params'].get('dynamicTools')
         assert msg['params']['modelProvider'] == 'openai'
@@ -63,6 +65,7 @@ for line in sys.stdin:
         'initialize': {'platformOs':'windows'},
         'config/read': {'config': config},
         'configRequirements/read': {'requirements':None},
+        'account/read': {'account': {'type':'apiKey' if mode == 'api-account' else 'chatgpt'}},
         'thread/start': {'thread': {'id':'thr-fixture', 'ephemeral':True}, 'approvalPolicy':'never',
                          'approvalsReviewer':'user', 'modelProvider':'openai', 'reasoningEffort':'low',
                          'instructionSources': [] if mode == 'wrong-instructions' or not cwd else
@@ -92,6 +95,7 @@ class NativeManagerTests(unittest.TestCase):
     def effective_config():
         return {"sandbox_mode": "read-only", "approval_policy": "never", "web_search": "disabled",
                 "cli_auth_credentials_store": "file",
+                "forced_login_method": "chatgpt",
                 "analytics": {"enabled": False}, "mcp_servers": {},
                 "features": {name: False for name in DISABLED_FEATURES}}
 
@@ -154,12 +158,12 @@ class NativeManagerTests(unittest.TestCase):
 
     def test_responses_draft_is_tool_free_and_rejects_unexpected_response_items(self):
         request = replace(self.request, budget=replace(self.request.budget, cost_microunits=1))
-        approval = replace(self.approval, request_hash=bind_instructions(request, self.layers))
-        catalog = {"setups": {"fixture-a": {"replica": str(self.replica)}}}
-        with patch("devorchestra.runtime.Catalog.read", return_value=catalog):
-            draft = self.runner.prepare_tool_free_manager(approval, request)
-            with self.assertRaisesRegex(Blocked, "cost allowances"):
-                self.runner.prepare_tool_free_manager(self.approval, self.request)
+        with self.assertRaisesRegex(Blocked, "RESPONSES_DISABLED_SUBSCRIPTION_ONLY"):
+            self.runner.prepare_tool_free_manager(self.approval, request)
+        draft = build_manager_api_draft(
+            request, ["Global fixture", "Common fixture", "Project fixture", "Manager fixture"],
+            "Synthetic goal", context_limit=8192, output_limit=1024,
+        )
         body = json.loads(draft.body)
         self.assertEqual(ENDPOINT, draft.endpoint)
         self.assertEqual(sha256(draft.body).hexdigest(), draft.sha256)
@@ -229,7 +233,7 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual([], self.ledger.read())
 
     def test_effective_tool_or_thread_policy_mismatch_blocks_turn(self):
-        for mode in ("tools-enabled", "unsafe-thread", "network-thread", "wrong-instructions"):
+        for mode in ("tools-enabled", "api-account", "unsafe-thread", "network-thread", "wrong-instructions"):
             with self.subTest(mode=mode):
                 self.ledger = Ledger(self.ledger.path.with_name(f"{mode}.sqlite3"),
                                      local_root=self.ledger.local_root)
@@ -238,7 +242,7 @@ class NativeManagerTests(unittest.TestCase):
                 with self.assertRaisesRegex(Blocked, "UNKNOWN"):
                     self.run_fixture(mode)
                 expected = ["native_manager_intent"]
-                if mode != "tools-enabled":
+                if mode not in ("tools-enabled", "api-account"):
                     expected.append("native_manager_thread_dispatch")
                 self.assertEqual(expected, [event["kind"] for event in self.ledger.read()])
 

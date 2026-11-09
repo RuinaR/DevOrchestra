@@ -18,9 +18,13 @@ ROLE = "manager-planning"
 DISABLED_FEATURES = (
     "shell_tool", "computer_use", "apps", "plugins", "hooks", "multi_agent",
     "multi_agent_v2", "code_mode", "code_mode_host", "request_permissions_tool", "memories",
+    "view_image", "image_generation", "sleep_tool",
 )
-MANAGER_CONFIG = (INSPECTION_CONFIG + 'web_search = "disabled"\ncli_auth_credentials_store = "file"\n\n'
-                  + '[analytics]\nenabled = false\n\n[mcp_servers]\n\n[features]\n'
+MANAGER_CONFIG = (INSPECTION_CONFIG + 'web_search = "disabled"\ncli_auth_credentials_store = "file"\n'
+                  + 'forced_login_method = "chatgpt"\n\n'
+                  + '[analytics]\nenabled = false\n\n[mcp_servers]\n\n'
+                  + '[tools.update_plan]\nenabled = false\n\n'
+                  + '[tools.experimental_request_user_input]\nenabled = false\n\n[features]\n'
                   + "".join(f"{name} = false\n" for name in DISABLED_FEATURES))
 
 
@@ -30,6 +34,7 @@ def _verify_manager_config(config):
     if (not isinstance(features, dict) or any(features.get(name) is not False for name in DISABLED_FEATURES)
             or not isinstance(analytics, dict) or analytics.get("enabled") is not False
             or config.get("cli_auth_credentials_store") != "file"
+            or config.get("forced_login_method") != "chatgpt"
             or config.get("web_search") != "disabled" or config.get("mcp_servers") != {}):
         raise Blocked("Manager effective tool restrictions unverified")
 
@@ -84,8 +89,7 @@ def require_live_manager_admission():
     raise Blocked(live_preflight()["reason"])
 
 
-def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False,
-                    responses_draft=False):
+def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False):
     from .mxc_launcher import _known_folder
 
     replica, home = approval.replica, approval.home
@@ -150,13 +154,6 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
                               "acceptance_checks empty."),
         })},
     ]
-    if responses_draft:
-        from .manager_api import build_manager_api_draft
-
-        return build_manager_api_draft(
-            request, [blob.decode("utf-8-sig") for blob in contents], messages[-1]["text"],
-            context_limit=approval.context_limit_tokens, output_limit=approval.output_reserve_tokens,
-        )
     sizing = _input_receipt(approval, request, messages, (global_data, project_data))
     windows, local = (_known_folder(number) for number in (0x24, 0x1C))
     env = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,
@@ -168,6 +165,10 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
 
 def _collect_plan(server, request, replica, messages, expected_sources, before_thread, before_send):
     inspect_manager_policy(server, replica)
+    identity = server.request(9, "account/read", {"refreshToken": False})
+    account = identity.get("account")
+    if type(account) is not dict or account.get("type") != "chatgpt":
+        raise Blocked("Manager requires an existing ChatGPT subscription sign-in")
     thread_notice = []
 
     def record_thread_notice(event):

@@ -45,7 +45,7 @@ NOTIFICATION_CATEGORIES = {
     "serverRequest/resolved": "ACTIVITY", "fs/changed": "ACTIVITY",
 }
 SAFE_METHODS = frozenset((
-    "initialize", "initialized", "config/read", "configRequirements/read", "command/exec",
+    "initialize", "initialized", "config/read", "configRequirements/read", "command/exec", "account/read",
     "thread/start", "thread/started", "turn/start", "turn/started", "turn/completed",
     "item/started", "item/completed", "item/agentMessage/delta", "thread/tokenUsage/updated",
     "warning", "configWarning", "item/commandExecution/requestApproval",
