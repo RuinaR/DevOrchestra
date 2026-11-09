@@ -38,7 +38,7 @@ def pending_question(events):
         if event["kind"] in ("question_responded", "question_expired", "native_manager_question_responded",
                              "native_manager_question_expired", "cancelled", "run_started"):
             return None
-        if event["kind"] in ("question_opened", "native_manager_result") and event.get("question"):
+        if event["kind"] in ("question_opened", "native_manager_result", "supervised_imported") and event.get("question"):
             return event
     return None
 

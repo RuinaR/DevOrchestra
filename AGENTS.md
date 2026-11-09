@@ -58,6 +58,7 @@
 ## Test and release gate
 - Use [the product-first development principles](docs/PROJECT-DEFINITION.md#제품-완성-우선-원칙) to prioritize working user flows. Where a live safety gate remains blocked, advance an independent user function and keep synthetic and live evidence separate.
 - Tie each cycle to a user outcome and justified checks. Count accepted artifacts and verification evidence separately. Replan after repeated stagnation and honor the Controller's NO_PROGRESS stop and all safety gates.
+- Keep supervised Codex handoffs user-carried. Verify imports against the frozen request and scope, preserve automatic admission gates, and distinguish imported plans from observed execution and trusted verification.
 - The P1 runner is Mock-only. Its simulated owner grant can authorize only the built-in fixture inspection. Do not route a model, shell, external project or service through that grant.
 - Test with the repository's disposable fixture storage. Use the verified ledger for dashboard state and label synthetic outputs and unobserved process state explicitly.
 - Test hierarchy: static/pure unit -> synthetic/mock -> isolated integration -> approved real backend -> approved live product. Do not silently promote evidence across layers.

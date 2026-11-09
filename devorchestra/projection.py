@@ -12,6 +12,7 @@ from .policy import live_preflight
 from .questions import pending_question
 from .runtime import PHASES, POLICY_HASH, PROJECTS, ROLE_TOKENS, freeze_project
 from .shutdown import resume_problem, shutdown_state
+from .supervised import latest_handoff
 from .token_reserve import DEFAULT_RESERVE, reserve_status
 
 
@@ -120,7 +121,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     elif pending_requirements and (start or session):
         next_action = "REVIEW_NEXT_REQUIREMENTS"
     else:
-        next_action = "WAIT_FOR_LIVE_ADMISSION"
+        next_action = "OPEN_SUPERVISED_HANDOFF"
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -132,6 +133,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "registration": registration,
         "requirements": requirements,
         "user_question": selected_question,
+        "supervised_handoff": latest_handoff(project_events),
         "workflow": {
             "requirements_count": len(requirements),
             "cycle_requirements": start.get("requirements", []) if start else [],

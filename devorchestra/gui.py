@@ -13,11 +13,12 @@ from uuid import uuid4
 from .catalog import Catalog, REQUIREMENT_ROLES, new_project
 from .lease import Blocked
 from .instructions import InstructionStore, selected_source, source_ref
-from .ledger import Ledger
+from .ledger import Ledger, check_path
 from .projection import ProjectionReader
 from .questions import AUTHORIZATION_TYPES
 from .runtime import PROJECTS, Runner
 from .setup import environment_status, validate_setup
+from .supervised import MAX_HANDOFF_BYTES, latest_handoff
 
 BG, PANEL, TILE, EDGE = "#09121f", "#111f30", "#172a40", "#395575"
 INK, MUTED, CYAN = "#f1f6ff", "#b9cde4", "#82d8ff"
@@ -128,6 +129,7 @@ class CommandCenter:
         ttk.Button(projects, text="요구사항 문서", command=self.requirement_settings).pack(fill="x")
         self.development_button = ttk.Button(projects, text="자동 개발 시작 · 확인 중", state="disabled")
         self.development_button.pack(fill="x")
+        ttk.Button(projects, text="감독형 Codex 작업", command=self.supervised_work).pack(fill="x")
         ttk.Button(projects, text="Project settings", command=lambda: self.edit_settings("edit")).pack(fill="x")
         ttk.Button(projects, text="Global limits", command=lambda: self.edit_settings("limits")).pack(fill="x")
         ttk.Button(projects, text="토큰 예비량", command=lambda: self.edit_settings("reserve")).pack(fill="x")
@@ -347,7 +349,7 @@ class CommandCenter:
             "REGISTER_PROJECT": "프로젝트 폴더 등록",
             "REGISTER_REQUIREMENTS": "요구사항 문서 등록",
             "REVIEW_NEXT_REQUIREMENTS": "다음 주기에 반영할 요구사항 확인",
-            "WAIT_FOR_LIVE_ADMISSION": "실제 개발 실행 조건 확인 대기",
+            "OPEN_SUPERVISED_HANDOFF": "감독형 Codex 작업 열기",
         }[workflow["next_action"]]
         manager_status = {
             "NO_RECORDED_ATTEMPT": "실제 요청 기록 없음",
@@ -835,6 +837,124 @@ class CommandCenter:
         approve_button.pack(side="left")
         selected.bind("<<ComboboxSelected>>", refresh)
         refresh()
+
+    def supervised_work(self):
+        if not self.view or not self.view["registration"]:
+            self.observation.configure(text="프로젝트를 먼저 등록하세요.")
+            return
+        project_id = self.view["project_id"]
+        panel = tk.Toplevel(self.root)
+        panel.title(f"감독형 Codex · {project_id}")
+        ttk.Label(panel, text="지시를 직접 전달하고 결과 JSON을 가져오세요. 자동 모델 호출은 차단 상태입니다.",
+                  wraplength=660).pack(fill="x")
+        status = ttk.Label(panel, wraplength=660)
+        status.pack(fill="x")
+        prompt = tk.Text(panel, height=11, width=82, wrap="word", state="disabled")
+        prompt.pack(fill="both", expand=True)
+        ttk.Label(panel, text="결과 JSON · 개인 요구사항과 응답은 이 창에서만 검토하세요.").pack(fill="x")
+        response = tk.Text(panel, height=9, width=82, wrap="word")
+        response.pack(fill="both", expand=True)
+        buttons = ttk.Frame(panel)
+        buttons.pack(fill="x")
+        shown = self.view["supervised_handoff"]
+        ttk.Label(panel, text="Manager가 제안할 수 있는 상대 파일 경로 · 쉼표로 구분").pack(fill="x", before=buttons)
+        path_entry = ttk.Entry(panel, width=82)
+        path_entry.pack(fill="x", before=buttons)
+        path_entry.insert(0, ", ".join(self.view["registration"]["data"]["requested_scope"]["files"]))
+
+        def describe():
+            if not shown:
+                return "새 Manager 작업을 시작할 수 있습니다."
+            if shown["kind"] == "supervised_requested":
+                return ("만료됨 · 새 작업을 시작하세요." if time() >= shown["expires"]
+                        else "Manager 결과 대기 · DevOrchestra가 외부 실행을 관측하지 않습니다.")
+            if shown["kind"] == "supervised_imported":
+                return ("사용자 등록 계획 · 외부 실행 미검증 · Developer 지시 초안 준비 가능"
+                        if shown["disposition"] == "PROPOSED"
+                        else "사용자 질문 · Command Center에서 답변한 뒤 새 Manager 작업을 시작하세요.")
+            return "작업 취소됨"
+
+        def show(text):
+            prompt.configure(state="normal")
+            prompt.delete("1.0", "end")
+            if text:
+                prompt.insert("1.0", text)
+            prompt.configure(state="disabled")
+
+        def apply(action, raw=None, **options):
+            nonlocal shown
+            try:
+                result = self.controller.supervised_handoff(
+                    action, project_id, raw=raw, expected_request=shown["request_id"] if shown else None, **options,
+                )
+                shown = latest_handoff(self.reader.ledger.read(), project_id)
+                if action in ("start", "prompt", "developer"):
+                    show(result)
+                elif action == "cancel":
+                    show(None)
+                status.configure(text=describe() if action != "developer" else
+                                 "Developer 초안 · 파일·명령 실행 권한 없음")
+                self.refresh()
+            except (Blocked, OSError, sqlite3.Error, ValueError) as error:
+                status.configure(text=str(error) if isinstance(error, Blocked) else "입력 또는 로컬 상태를 확인하세요.")
+
+        def import_file():
+            choice = filedialog.askopenfilename(parent=panel, filetypes=[("JSON", "*.json")])
+            if not choice:
+                return
+            try:
+                path = Path(choice)
+                check_path(path)
+                if not path.is_file():
+                    raise ValueError
+                with path.open("rb") as stream:
+                    raw = stream.read(MAX_HANDOFF_BYTES + 1)
+                if len(raw) > MAX_HANDOFF_BYTES:
+                    raise ValueError
+                text = raw.decode("utf-8-sig")
+                response.delete("1.0", "end")
+                response.insert("1.0", text)
+                apply("submit", raw)
+            except (OSError, ValueError, Blocked):
+                status.configure(text="읽을 수 있는 로컬 UTF-8 JSON 파일을 선택하세요.")
+
+        def copy():
+            text = prompt.get("1.0", "end-1c")
+            if text:
+                panel.clipboard_clear()
+                panel.clipboard_append(text)
+                status.configure(text="복사했습니다. 사용자가 대상 Codex에 직접 붙여넣으세요.")
+
+        def pasted():
+            return response.get("1.0", "end-1c").encode("utf-8")
+
+        def developer():
+            try:
+                setup = Catalog(self.reader.ledger).read()["setups"].get(project_id)
+            except (Blocked, OSError, sqlite3.Error, ValueError):
+                status.configure(text="복제본 설정을 확인할 수 없습니다.")
+                return
+            replica = None if setup else filedialog.askdirectory(
+                parent=panel, title="원본과 별개인 작업 복제본 선택", mustexist=True,
+            )
+            if setup or replica:
+                apply("developer", pasted(), replica_path=replica)
+
+        for title, command in (
+            ("Manager 시작", lambda: apply("start", paths=[path.strip() for path in path_entry.get().split(",")
+                                                          if path.strip()])),
+            ("지시 다시 열기", lambda: apply("prompt")),
+            ("지시 복사", copy), ("대기 취소", lambda: apply("cancel")),
+        ):
+            ttk.Button(buttons, text=title, command=command).pack(side="left")
+        actions = ttk.Frame(panel)
+        actions.pack(fill="x")
+        for title, command in (
+            ("붙여넣은 결과 확인", lambda: apply("submit", pasted())), ("JSON 파일 가져오기", import_file),
+            ("Developer 초안 열기", developer),
+        ):
+            ttk.Button(actions, text=title, command=command).pack(side="left")
+        status.configure(text=describe())
 
     def requirement_settings(self):
         if self.view is None or not self.view["registration"]:

@@ -1,6 +1,8 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from devorchestra.catalog import Catalog, new_project
 from devorchestra.lease import Blocked
@@ -24,6 +26,68 @@ class RequirementWorkflowTests(unittest.TestCase):
         self.catalog = Catalog(self.ledger)
         self.project = {**new_project("sample", "Sample", "Fixture goal"), "local_path": str(self.source)}
         self.revision = self.catalog.save_project(self.project)
+
+    def supervised_result(self, **changes):
+        self.catalog.register_requirement("sample", "goal.md", "GOAL")
+        prompt = self.runner.supervised_handoff("start", "sample", paths=["src/main.py"])
+        envelope = json.loads(prompt.split("\n\n", 1)[1])["response_envelope"]
+        envelope["result"] = dict(
+            disposition="PROPOSED", priority_reason="Fixture priority", task_spec="Implement sample",
+            proposed_paths=["src/main.py"], acceptance_checks=self.project["acceptance"], stop_conditions=[],
+            work_kind="PRODUCT", product_outcome="Sample is available", validation_reason="Check sample",
+            approach="Implement the approved fixture",
+        )
+        envelope["result"].update(changes)
+        return envelope
+
+    def test_supervised_manager_import_and_developer_handoff_after_restart(self):
+        envelope = self.supervised_result()
+        request = envelope["request_id"]
+        def submit(value):
+            return self.runner.supervised_handoff("submit", "sample", expected_request=request,
+                                                  raw=json.dumps(value).encode())
+
+        with self.assertRaisesRegex(Blocked, "awaiting a result"):
+            self.runner.command("start", project="fixture-a")
+        for change in ({"generation": True}, {"baseline_sha256": "wrong"},
+                       {"result": {**envelope["result"], "proposed_paths": ["outside.py"]}}):
+            with self.assertRaises(Blocked):
+                submit({**envelope, **change})
+        self.assertEqual("PROPOSED", submit(envelope))
+        with self.assertRaises(Blocked):
+            submit(envelope)
+        self.runner = Runner(Ledger(self.ledger.path))
+        replica = self.source.with_name("replica")
+        replica.mkdir()
+        draft = self.runner.supervised_handoff("developer", "sample", expected_request=request,
+                                               raw=json.dumps(envelope).encode(), replica_path=str(replica))
+        self.assertIn("src/main.py", draft)
+        self.assertIn("separate owner approval", draft)
+        self.assertNotIn("Implement sample", str(self.ledger.read()))
+        view = ProjectionReader(self.ledger).read("sample")
+        self.assertEqual("NOT_VERIFIED", view["supervised_handoff"]["execution_evidence"])
+        self.assertEqual("NOT_AVAILABLE", view["workflow"]["user_test_status"])
+        self.assertIsNone(view["development"])
+
+    def test_supervised_question_expiry_and_changed_requirements(self):
+        envelope = self.supervised_result(disposition="CLARIFICATION", work_kind="NONE",
+                                          task_spec="Which behavior?", proposed_paths=[], acceptance_checks=[])
+        request = envelope["request_id"]
+        raw = json.dumps(envelope).encode()
+        with patch("devorchestra.supervised.time", return_value=10**12), self.assertRaisesRegex(Blocked, "expired"):
+            self.runner.supervised_handoff("submit", "sample", raw=raw, expected_request=request)
+        self.assertEqual("CLARIFICATION", self.runner.supervised_handoff(
+            "submit", "sample", raw=raw, expected_request=request))
+        pending = ProjectionReader(self.ledger).read("sample")["user_question"]
+        self.runner.respond_question(pending["question"]["id"], pending["run_id"], pending["generation"],
+                                     "ANSWER", "Use default behavior")
+        prompt = self.runner.supervised_handoff("start", "sample", paths=["src/main.py"])
+        self.assertIn("Use default behavior", prompt)
+        new_request = json.loads(prompt.split("\n\n", 1)[1])["response_envelope"]["request_id"]
+        self.assertEqual(prompt, self.runner.supervised_handoff("prompt", "sample", expected_request=new_request))
+        self.document.write_bytes(b"Changed baseline")
+        with self.assertRaisesRegex(Blocked, "Frozen requirement changed"):
+            self.runner.supervised_handoff("prompt", "sample", expected_request=new_request)
 
     def test_revisions_are_frozen_in_session_and_visible_in_projection(self):
         reader = ProjectionReader(self.ledger)
@@ -62,7 +126,7 @@ class RequirementWorkflowTests(unittest.TestCase):
                                             limits={"seconds": 60, "tokens": 10, "cost_microunits": 0})
         self.assertEqual([second], successor["frozen"]["requirements"])
         workflow = reader.read("sample")["workflow"]
-        self.assertEqual((0, "WAIT_FOR_LIVE_ADMISSION", "BLOCKED", "NOT_AVAILABLE"),
+        self.assertEqual((0, "OPEN_SUPERVISED_HANDOFF", "BLOCKED", "NOT_AVAILABLE"),
                          (workflow["pending_requirements_count"], workflow["next_action"],
                           workflow["development_admission"], workflow["user_test_status"]))
         context = self.runner.manager_context("sample", successor["development_id"])

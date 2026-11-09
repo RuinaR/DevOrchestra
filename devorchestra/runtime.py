@@ -19,6 +19,7 @@ from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
 from .questions import AUTHORIZATION_TYPES, new_question, pending_question, validate_response
 from .shutdown import HELD, UNKNOWN, checkpoint, shutdown_state, transition
+from .supervised import handoff, waiting_for_handoff
 from .token_reserve import DEFAULT_RESERVE, reserve_status
 
 
@@ -99,7 +100,7 @@ def last_run(events):
         if events[index]["kind"] == "run_started":
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
-                                                 "native_inspection_", "native_manager_"))]
+                                                 "native_inspection_", "native_manager_", "supervised_"))]
     return []
 
 
@@ -121,7 +122,7 @@ def native_unresolved(events):
     return bool(pending)
 
 
-def require_admission(events):
+def require_admission(events, *, allow_supervised=False):
     if shutdown_state(events)["state"] in HELD:
         raise Blocked("Shutdown has closed admission")
     if diagnostic_unresolved(events):
@@ -132,6 +133,8 @@ def require_admission(events):
         raise Blocked("Unsettled budget stop requires a shutdown checkpoint")
     if pending_question(events):
         raise Blocked("A user question is pending")
+    if not allow_supervised and waiting_for_handoff(events):
+        raise Blocked("A supervised Codex handoff is awaiting a result")
 
 
 def pending_budget_stop(events):
@@ -260,7 +263,7 @@ class Runner:
                 if not expired and time() >= question["expires"]:
                     raise Blocked("Question expired during response")
 
-            if pending["kind"] == "native_manager_result":
+            if pending["kind"] in ("native_manager_result", "supervised_imported"):
                 event = {**{key: pending[key] for key in ("project_id", "run_id", "task_id", "generation")},
                          **details, "question_development_id": pending.get("question_development_id"),
                          "kind": "native_manager_question_expired" if expired else "native_manager_question_responded",
@@ -289,6 +292,9 @@ class Runner:
         if resume:
             return self.command("run", project=pending["project_id"], expected_run=expected_run)
         return event
+
+    def supervised_handoff(self, action, project_id, **arguments):
+        return handoff(self, action, project_id, **arguments)
 
     def manager_context(self, project_id, development_id):
         """Assemble owner-selected documents in memory from a frozen session."""
