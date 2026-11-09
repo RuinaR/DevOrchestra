@@ -439,14 +439,19 @@ class AppServer:
         self.send({"method": "initialized"})
         return result
 
-    def inspect_policy(self):
+    def inspect_policy(self, *, cwd=None, verify_config=None):
         """Read effective config and requirements without starting a thread."""
         self.initialize()
-        config = self.request(1, "config/read", {"includeLayers": False})
+        params = {"includeLayers": False}
+        if cwd is not None:
+            params["cwd"] = str(cwd)
+        config = self.request(1, "config/read", params)
         requirements = self.request(2, "configRequirements/read", {})
         values = config.get("config")
         if not isinstance(values, dict) or "requirements" not in requirements:
             raise Blocked("App Server policy response incomplete")
+        if verify_config is not None:
+            verify_config(values)
         sandbox = values.get("sandbox_mode")
         approval = values.get("approval_policy")
         return {

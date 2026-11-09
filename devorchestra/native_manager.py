@@ -13,6 +13,20 @@ from .role_contract import OUTPUT_SCHEMAS, bind_instructions, parse_role_output
 
 
 ROLE = "manager-planning"
+DISABLED_FEATURES = (
+    "shell_tool", "computer_use", "apps", "plugins", "hooks", "multi_agent",
+    "multi_agent_v2", "code_mode", "code_mode_host", "request_permissions_tool", "memories",
+)
+MANAGER_CONFIG = (INSPECTION_CONFIG + 'web_search = "disabled"\n\n'
+                  + '[mcp_servers]\n\n[features]\n'
+                  + "".join(f"{name} = false\n" for name in DISABLED_FEATURES))
+
+
+def _verify_manager_config(config):
+    features = config.get("features")
+    if (not isinstance(features, dict) or any(features.get(name) is not False for name in DISABLED_FEATURES)
+            or config.get("web_search") != "disabled" or config.get("mcp_servers") != {}):
+        raise Blocked("Manager effective tool restrictions unverified")
 
 
 @dataclass(frozen=True)
@@ -62,7 +76,7 @@ def prepare_manager(ledger, approval, request, *, project_context=None):
         raise Blocked("Replica-specific Codex configuration requires review")
     config = home / "config.toml"
     with config.open("rb") as stream:
-        if stream.read(len(INSPECTION_CONFIG) + 1) != INSPECTION_CONFIG.encode("ascii"):
+        if stream.read(len(MANAGER_CONFIG) + 1) != MANAGER_CONFIG.encode("ascii"):
             raise Blocked("Manager home configuration changed")
     directory = ledger.local_directory("instructions")
     common = instruction_bytes(directory / "common" / "orchestration-rules.md")
@@ -102,7 +116,7 @@ def prepare_manager(ledger, approval, request, *, project_context=None):
 
 
 def _collect_plan(server, request, replica, messages, before_send):
-    policy = server.inspect_policy()
+    policy = server.inspect_policy(cwd=replica, verify_config=_verify_manager_config)
     if policy != {"sandbox": "read-only", "approval": "never", "managed_requirements_present": False}:
         raise Blocked("Manager App Server policy is not the approved profile")
     thread_notice = []
@@ -112,10 +126,15 @@ def _collect_plan(server, request, replica, messages, before_send):
             raise Blocked("Unexpected additional Manager thread notification")
         thread_notice.append(event)
 
-    thread = server.request(10, "thread/start", {
+    started = server.request(10, "thread/start", {
         "model": request.model, "cwd": str(replica), "approvalPolicy": "never",
         "sandbox": "read-only", "ephemeral": True,
-    }, record_thread_notice, allowed_notifications=("thread/started",))["thread"]
+    }, record_thread_notice, allowed_notifications=("thread/started",))
+    if (started.get("sandbox") != {"type": "readOnly", "networkAccess": False}
+            or started["sandbox"]["networkAccess"] is not False or started.get("approvalPolicy") != "never"
+            or started.get("cwd") != str(replica) or started.get("model") != request.model):
+        raise Blocked("Manager thread policy is not the approved read-only configuration")
+    thread = started["thread"]
     thread_id = thread["id"]
     if (not isinstance(thread_id, str) or not thread_id
             or len(thread_notice) > 1
@@ -133,9 +152,7 @@ def _collect_plan(server, request, replica, messages, before_send):
     turn = server.request(11, "turn/start", {
         "threadId": thread_id, "cwd": str(replica), "model": request.model,
         "effort": request.reasoning, "approvalPolicy": "never",
-        "sandboxPolicy": {"type": "readOnly", "access": {
-            "type": "restricted", "includePlatformDefaults": False, "readableRoots": [str(replica)],
-        }},
+        # Inherit the verified thread sandbox. This planning path is distinct from the file probe.
         "input": messages, "outputSchema": OUTPUT_SCHEMAS[ROLE],
     }, queue_event, allowed_notifications=("turn/started", "turn/completed", "item/started",
                                             "item/completed", "item/agentMessage/delta",

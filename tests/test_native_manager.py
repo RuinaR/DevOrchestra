@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import sys
@@ -10,10 +11,10 @@ import unittest
 from unittest.mock import patch
 
 from devorchestra.adapter import Budget, RoleRequest, Scope
-from devorchestra.app_server import INSPECTION_CONFIG, _owned_stdio
+from devorchestra.app_server import _owned_stdio
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
-from devorchestra.native_manager import ManagerApproval
+from devorchestra.native_manager import DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
 
@@ -21,6 +22,8 @@ from devorchestra.runtime import Runner
 PEER = r"""
 import json, sys, time
 mode = sys.argv[1]
+config = json.loads(sys.argv[2])
+cwd = None
 def send(value):
     print(json.dumps(value), flush=True)
 def notice(method, **params):
@@ -31,13 +34,16 @@ for line in sys.stdin:
     if method == 'initialized':
         continue
     if method == 'thread/start':
+        assert mode != 'tools-enabled'
         assert msg['params']['sandbox'] == 'read-only'
+        assert not msg['params'].get('dynamicTools')
+        cwd = msg['params']['cwd']
         notice('thread/started', thread={'id': 'thr-fixture'})
     if method == 'turn/start':
         p = msg['params']
         assert p['approvalPolicy'] == 'never' and p['effort'] == 'low'
-        assert p['sandboxPolicy']['access']['readableRoots'] == [p['cwd']]
-        assert p['sandboxPolicy']['type'] == 'readOnly'
+        assert 'sandboxPolicy' not in p
+        assert mode not in ('unsafe-thread', 'network-thread')
         assert p['input'][0]['text'] == 'Common fixture'
         assert p['input'][1]['text'] == 'Manager fixture'
         assert 'Global fixture' not in str(p['input']) and 'Project fixture' not in str(p['input'])
@@ -50,9 +56,12 @@ for line in sys.stdin:
         notice('turn/started', turn={'id':'turn-fixture','status':'inProgress'})
     result = {
         'initialize': {'platformOs':'windows'},
-        'config/read': {'config': {'sandbox_mode':'read-only','approval_policy':'never'}},
+        'config/read': {'config': config},
         'configRequirements/read': {'requirements':None},
-        'thread/start': {'thread': {'id':'thr-fixture'}},
+        'thread/start': {'thread': {'id':'thr-fixture'}, 'approvalPolicy':'never',
+                         'sandbox': {'type':'workspaceWrite' if mode == 'unsafe-thread' else 'readOnly',
+                                     'networkAccess':mode == 'network-thread'},
+                         'cwd':cwd, 'model':'fixture-model'},
         'turn/start': {'turn': {'id':'turn-fixture','status':'inProgress'}},
     }[method]
     send({'id':msg['id'], 'result':result})
@@ -79,7 +88,7 @@ class NativeManagerTests(unittest.TestCase):
         self.replica.mkdir()
         home = self.ledger.local_directory("temp") / "fixture-home"
         home.mkdir()
-        (home / "config.toml").write_bytes(INSPECTION_CONFIG.encode())
+        (home / "config.toml").write_bytes(MANAGER_CONFIG.encode())
         instructions = self.ledger.local_directory("instructions")
         files = [("global", home / "AGENTS.md", b"Global fixture"),
                  ("common", instructions / "common/orchestration-rules.md", b"Common fixture"),
@@ -106,7 +115,11 @@ class NativeManagerTests(unittest.TestCase):
             self.assertEqual("native_manager_intent", self.ledger.read()[-1]["kind"])
             if cancel:
                 self.runner.shutdown("request")
-            with _owned_stdio(Path(sys.executable), ["-I", "-S", "-B", "-c", PEER, mode], cwd,
+            config = {"sandbox_mode": "read-only", "approval_policy": "never", "web_search": "disabled",
+                      "mcp_servers": {}, "features": {name: False for name in DISABLED_FEATURES}}
+            if mode == "tools-enabled":
+                config["features"]["computer_use"] = True
+            with _owned_stdio(Path(sys.executable), ["-I", "-S", "-B", "-c", PEER, mode, json.dumps(config)], cwd,
                               {"SystemRoot": os.environ["SystemRoot"]},
                               min(timeout, 0.4) if mode == "hang" else timeout, cancelled) as server:
                 yield server
@@ -121,6 +134,17 @@ class NativeManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "GENERAL_ADMISSION_UNVERIFIED"):
             self.runner.plan_native_manager(self.approval, self.request)
         self.assertEqual([], self.ledger.read())
+
+    def test_effective_tool_or_thread_policy_mismatch_blocks_turn(self):
+        for mode in ("tools-enabled", "unsafe-thread", "network-thread"):
+            with self.subTest(mode=mode):
+                self.ledger = Ledger(self.ledger.path.with_name(f"{mode}.sqlite3"),
+                                     local_root=self.ledger.local_root)
+                self.runner = Runner(self.ledger)
+                self.ledger.initialize()
+                with self.assertRaisesRegex(Blocked, "UNKNOWN"):
+                    self.run_fixture(mode)
+                self.assertEqual(["native_manager_intent"], [event["kind"] for event in self.ledger.read()])
 
     def test_manager_documents_must_match_the_approved_request_hash_binding(self):
         from devorchestra.native_manager import prepare_manager
