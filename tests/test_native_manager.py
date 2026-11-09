@@ -84,12 +84,14 @@ for line in sys.stdin:
     send({'id':msg['id'], 'result':result})
     if method == 'turn/start':
         plan = {'disposition':'PROPOSED','priority_reason':'Fixture','task_spec':'Inspect fixture',
+                'work_kind':'PRODUCT','product_outcome':'Ready fixture',
+                'validation_reason':'Check expected fixture','approach':'Update fixture',
                 'proposed_paths':['fixture.txt'],'acceptance_checks':['Check fixture'],'stop_conditions':[]}
         if mode == 'invalid':
             plan['scope'] = 'unapproved'
         if mode == 'clarification':
             plan.update(disposition='CLARIFICATION', task_spec='Which fixture behavior?',
-                        proposed_paths=[], acceptance_checks=[])
+                        proposed_paths=[], acceptance_checks=[], work_kind='NONE')
         item = {'type':'agentMessage','id':'item-fixture','text':json.dumps(plan)}
         if mode == 'async-plan':
             item['delivery'] = 'async'
@@ -187,6 +189,8 @@ class NativeManagerTests(unittest.TestCase):
         self.assertNotIn("Global fixture", repr(draft))
         self.assertEqual([], self.ledger.read())
         plan = {"disposition": "CLARIFICATION", "priority_reason": "Fixture",
+                "work_kind": "NONE", "product_outcome": "Clarify expected fixture",
+                "validation_reason": "Await answer", "approach": "Ask the user",
                 "task_spec": "Which result?", "proposed_paths": [], "acceptance_checks": [],
                 "stop_conditions": []}
         response = {"object": "response", "status": "completed", "model": request.model,

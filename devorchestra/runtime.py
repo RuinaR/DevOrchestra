@@ -915,6 +915,9 @@ class Runner:
                     return finish(selection, f"MANAGER_{selection}")
                 if selection == "REWORK" and view["retries"] >= start["max_retries"]:
                     return finish("NO_PROGRESS", "RETRY_LIMIT")
+            progress = view["progress"]["decision"]
+            if progress == "NO_PROGRESS":
+                return finish("NO_PROGRESS", "THREE_CYCLES_WITHOUT_IMPLEMENTATION_PROGRESS")
             if view["cycles"] >= start["max_cycles"]:
                 return finish("NO_PROGRESS", "CYCLE_LIMIT")
             now = time()
@@ -924,11 +927,14 @@ class Runner:
                              cost_microunits=start["limits"]["cost_microunits"] - view["cost"])
             if remaining["tokens"] < ROLE_TOKENS or remaining["cost_microunits"] < 0:
                 return finish("BLOCKED", "SESSION_BUDGET_LIMIT")
+            if progress == "REPLAN" and selection != "REWORK":
+                selection = "REPLAN"
             return work.start_run(start["project_id"], scenario, start["frozen"], development={
                 "development_id": development_id, "selection": selection, "cycle": view["cycles"] + 1,
                 "session_deadline": start["deadline"], "session_remaining": remaining,
                 "task_limits": start["task_limits"], "goal_hash": start["goal_hash"],
                 "selection_ref": previous[-1]["handoff_ref"] if previous else start["goal_hash"],
+                "progress_review": progress,
             })
 
     def _probe_job(self, expected_run, fixture, cancel_requested=lambda: False):
@@ -1297,6 +1303,9 @@ class _Session:
             from .role_contract import confirm_task_plan
             # The synthetic plan uses only fixture authority, including for registered projects.
             plan = {"disposition": "PROPOSED", "priority_reason": "Synthetic workflow",
+                    "work_kind": "PRODUCT", "product_outcome": "Fixture reaches ready",
+                    "validation_reason": "Compare the changed fixture with the expected value",
+                    "approach": "Apply the fixed fixture transition",
                     "task_spec": result["decision"], "proposed_paths": ["fixture.txt"],
                     "acceptance_checks": ["fixture-transition"], "stop_conditions": ["Fixture failure"]}
             task = confirm_task_plan(canonical(plan).encode(), allowed_files=("fixture.txt",),

@@ -382,13 +382,22 @@ class CommandCenter:
         session = view["development"]
         if session:
             start, end = session["start"], session["end"]
+            progress = session["progress"]
+            latest_progress = progress["latest"]
             current_work = session["current"]
             reason = (end or (current_work[-1] if current_work else {})).get("reason", "")
             session_state = end["state"] if end else current_work[-1]["state"] if current_work else "READY"
             limits = start["limits"]
             deadline = datetime.fromtimestamp(start["deadline"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             selected = current_work[0]["selection"] if current_work else "Awaiting first task"
+            progress_text = (f"{latest_progress['before']} → {latest_progress['after']}"
+                             f" · 구현 {'신규' if latest_progress['implementation_advanced'] else '동일'}"
+                             f" · 검증 {'신규' if latest_progress['verification_advanced'] else '동일'}"
+                             if latest_progress else "결과 대기")
             goal += (f"\nSession {start['development_id'][:8]} · {session_state} {reason}"
+                     f"\n목표 · {start['goal']}"
+                     f"\n합성 진척 · {progress_text}"
+                     f"\n연속 무진척 {progress['consecutive_no_progress']}회 · {progress['decision']}"
                      f"\nCycle {session['cycles']}/{start['max_cycles']} · {session['completed']} verified · "
                      f"Rework {session['retries']}/{start['max_retries']}"
                      f"\n{meter(session['tokens'], limits['tokens'])} {session['usage_kind']} · "

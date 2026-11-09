@@ -1,5 +1,7 @@
 # 현재 상태
 
+**P2.64.** Manager 계획 계약과 합성 세션의 진척·재계획·중단을 연결했다. Command Center는 합성 구현 및 검증의 전후 상태와 연속 무진척 횟수를 표시한다. 실제 요구사항 상태는 합성 결과로 승격되지 않는다. 실제 Reviewer 실행, 사용자 테스트 인계 및 첫 Manager 모델 턴은 기존 차단 상태를 유지한다.
+
 **P2.63.** `IMPLEMENTED`는 프로젝트·요구사항 등록, 기준본 고정, 질문과 다음 단계 안내다. `SYNTHETIC_PASS` 범위는 등록 → 합성 역할 순차 실행 → 결과 확인 → 개선 문서 등록 → 다음 기준본 반영이다. Command Center에서 기준본에 아직 반영되지 않은 개정 수와 Manager 요청의 기록 상태를 확인할 수 있다.
 
 MVP 자동 개발의 `LIVE_PASS`는 아직 없다. Manager 실행은 `GENERAL_ADMISSION_UNVERIFIED` 및 `MANAGER_PRE_EXECUTION_BOUNDARY_UNVERIFIED`로 차단된다. Developer 파일·명령 실행과 실제 Reviewer·Verifier 영수증은 미연결이며, 사용자 테스트 인계에는 신뢰할 수 있는 실제 검증 영수증이 필요하다. [MVP 순서](ARCHITECTURE-ROADMAP.md#p263-실사용-mvp-순서)

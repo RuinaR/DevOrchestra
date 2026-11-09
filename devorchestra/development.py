@@ -15,6 +15,49 @@ DECISIONS = {
 }
 
 
+def cycle_progress(runs, acceptance):
+    """Compare scoped fixture artifacts and verification, independently of run IDs."""
+    implemented, verified = set(), set()
+    stalled = 0
+    latest = None
+    for run in runs:
+        if run[-1]["state"] not in ("COMPLETED", "FAILED", "BLOCKED", "CANCELLED"):
+            continue
+        # Operator cancellation is not a completed development attempt.
+        if run[-1]["state"] == "CANCELLED":
+            continue
+        before = "VERIFIED" if verified else "IMPLEMENTED" if implemented else "NOT_STARTED"
+        change = next((event["diff_ref"] for event in run if event["kind"] == "role_finished"
+                       and event.get("role") == "Developer" and event.get("result") == "OK"
+                       and event.get("diff_ref") and event.get("scope_released") is True
+                       and event.get("owned_children") == []
+                       and event.get("stream_settlement", {}).get("synthetic_usage_final") is True), None)
+        # Rejected or incomplete artifacts do not advance the accepted implementation baseline.
+        accepted = change and any(event["kind"] == "role_finished" and event.get("role") == "Reviewer"
+                                  and event.get("handoff") == "VERIFYING" for event in run)
+        checks = {(change, event["test"]) for event in run if accepted
+                  and event["kind"] == "role_finished" and event.get("role") == "Verifier"
+                  and event.get("result") == "PASS" and event.get("test")
+                  and event.get("scope_released") is True and event.get("owned_children") == []
+                  and event.get("stream_settlement", {}).get("synthetic_usage_final") is True}
+        implementation_advanced = bool(accepted and change not in implemented)
+        verification_advanced = bool(checks - verified)
+        if accepted:
+            implemented.add(change)
+        verified.update(checks)
+        stalled = 0 if implementation_advanced else stalled + 1
+        latest = {"run_id": run[0]["run_id"], "before": before,
+                  "after": "VERIFIED" if verified else "IMPLEMENTED" if implemented else "NOT_STARTED",
+                  "implementation_advanced": implementation_advanced,
+                  "verification_advanced": verification_advanced,
+                  "artifact_ref": change if accepted else None,
+                  "checks": sorted(name for _, name in checks)}
+    return {"evidence": "SYNTHETIC", "latest": latest, "consecutive_no_progress": stalled,
+            "decision": "NO_PROGRESS" if stalled >= 3 else "REPLAN" if stalled == 2 else "CONTINUE",
+            # The fixed fixture cannot establish acceptance for a registered user's requirements.
+            "requirements": [{"criterion": criterion, "state": "NOT_STARTED"} for criterion in acceptance]}
+
+
 def usage_totals(events):
     tokens, cost = {}, {}
     for event in events:
@@ -42,6 +85,13 @@ def session_view(events, project=None):
         if e["run_id"] is not None:
             runs.setdefault(e["run_id"], []).append(e)
     latest = next(reversed(runs.values()), [])
+    scope = (start["project_id"], start["goal_hash"], start.get("frozen", {}).get("requirements", []))
+    related = {e["development_id"] for e in events if e["kind"] == "session_started"
+               and (e["project_id"], e["goal_hash"], e.get("frozen", {}).get("requirements", [])) == scope}
+    scoped_runs = {}
+    for e in events:
+        if e.get("development_id") in related and e["run_id"] is not None:
+            scoped_runs.setdefault(e["run_id"], []).append(e)
     completed = sum(run[-1]["state"] == "COMPLETED" for run in runs.values())
     end = next((e for e in history if e["kind"] == "session_ended"), None)
     finishes = [e for e in history if e["kind"] == "role_finished"]
@@ -54,6 +104,7 @@ def session_view(events, project=None):
                    "tokens": usage_totals(run)[0],
                    "selection": run[0]["selection"]} for run in runs.values()],
         "current": latest, "tokens": tokens, "cost": cost,
+        "progress": cycle_progress(scoped_runs.values(), start["acceptance"]),
         "role_seconds": sum(e["elapsed_seconds"] for e in finishes),
         "recorded_wall_seconds": max(0, datetime.fromisoformat(history[-1]["timestamp"]).timestamp()
                                      - start["started_epoch"]),

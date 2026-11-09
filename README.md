@@ -4,6 +4,8 @@
 
 기존 ChatGPT/Codex 구독 인증만 사용합니다. Responses API, API 키, 별도 과금 계정 및 자동 폴백은 비활성입니다. [제품 완성 우선 원칙](docs/PROJECT-DEFINITION.md#제품-완성-우선-원칙)
 
+Command Center는 구현과 검증의 진척을 따로 표시합니다. 동일 기준에서 구현 진척이 두 주기 연속 없으면 재계획하고, 세 주기면 `NO_PROGRESS`로 중단합니다. 차단과 재작업 한도는 먼저 적용될 수 있습니다.
+
 ## 다른 Windows PC에서 시작하기
 
 GitHub에서 소스를 내려받고 Windows x64에 Python 3.10 이상과 Tk를 준비한다. 저장소에서 `python -m devorchestra.gui`를 실행하면 새 로컬 원장에서는 초기 설정 마법사가 열린다. 기존 로컬 설정과 원장은 저장소와 별도로 유지한다. 마법사는 경로와 프로젝트 정책을 등록하며 인증정보를 받지 않는다. 설정 완료 후에도 실제 실행은 BLOCKED다. Python이 포함된 포터블 배포본은 아직 제공하지 않는다.

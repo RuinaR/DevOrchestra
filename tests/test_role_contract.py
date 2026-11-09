@@ -5,7 +5,7 @@ import unittest
 from devorchestra.adapter import Budget, RoleRequest, Scope
 from devorchestra.lease import Blocked
 from devorchestra.role_contract import (
-    MAX_OUTPUT_BYTES, TransitionEvidence, bind_instructions, decide_transition, parse_role_output,
+    MAX_OUTPUT_BYTES, TransitionEvidence, bind_instructions, confirm_task_plan, decide_transition, parse_role_output,
 )
 
 
@@ -17,6 +17,22 @@ class DraftRoleContractTests(unittest.TestCase):
     def setUp(self):
         self.evidence = TransitionEvidence(True, True, True, True, True, 1, False,
                                            "a" * 64, "b" * 64, "PASS", True)
+
+    def test_plan_admits_security_enabler_and_requires_authority_for_support_only_work(self):
+        plan = dict(disposition="PROPOSED", priority_reason="Protect customer records",
+                    task_spec="Reject writes to the original project", proposed_paths=["guard.py"],
+                    acceptance_checks=["Original remains unchanged"], stop_conditions=[],
+                    work_kind="ENABLING", product_outcome="Users can safely approve replica edits",
+                    validation_reason="Confirm the guard prevents original writes",
+                    approach="Enforce the existing scope at the write boundary")
+        limits = dict(allowed_files=("guard.py",), acceptance=("Original remains unchanged",),
+                      budget={"tokens": 10}, authority_ref="fixture")
+        self.assertEqual("ENABLING", confirm_task_plan(payload(**plan), **limits)["work_kind"])
+        plan["work_kind"] = "SUPPORT"
+        with self.assertRaises(Blocked):
+            confirm_task_plan(payload(**plan), **limits)
+        self.assertEqual("SUPPORT", confirm_task_plan(
+            payload(**plan), **limits, supporting_work_authorized=True)["work_kind"])
 
     def test_rejects_output_expansion_duplicates_and_invalid_nested_data(self):
         valid = {"disposition": "READY_FOR_REVIEW", "summary": "Fixture",

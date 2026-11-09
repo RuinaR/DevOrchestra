@@ -34,6 +34,8 @@ OUTPUT_SCHEMAS = {
         disposition=_choice("PROPOSED", "CLARIFICATION", "NEED_APPROVAL", "BLOCKED", "NO_PROGRESS"),
         priority_reason=_text(), task_spec=_text(3000), proposed_paths=_list(_text(240)),
         acceptance_checks=_list(_text()), stop_conditions=_list(_text()),
+        work_kind=_choice("PRODUCT", "ENABLING", "SUPPORT", "NONE"),
+        product_outcome=_text(), validation_reason=_text(), approach=_text(),
     ),
     "developer": _object(
         disposition=_choice("READY_FOR_REVIEW", "BLOCKED", "NO_PROGRESS"),
@@ -95,15 +97,20 @@ def parse_role_output(role, payload):
     return value
 
 
-def confirm_task_plan(payload, *, allowed_files, acceptance, budget, authority_ref):
+def confirm_task_plan(payload, *, allowed_files, acceptance, budget, authority_ref,
+                      supporting_work_authorized=False):
     """Validate a plan against Controller-selected limits; the result grants no capabilities."""
     plan = parse_role_output("manager-planning", payload)
     paths = plan["proposed_paths"]
     if (plan["disposition"] != "PROPOSED" or not paths or len(set(paths)) != len(paths)
+            or plan["work_kind"] == "NONE"
+            or (plan["work_kind"] == "SUPPORT" and supporting_work_authorized is not True)
             or any(path not in allowed_files for path in paths)
             or not acceptance or plan["acceptance_checks"] != list(acceptance)):
         raise Blocked("Manager plan exceeds the Controller task contract")
     return {"paths": paths, "acceptance": list(acceptance), "budget": dict(budget),
+            "product_outcome": plan["product_outcome"], "validation_reason": plan["validation_reason"],
+            "approach": plan["approach"], "work_kind": plan["work_kind"],
             "authority_ref": authority_ref, "proposal_ref": digest(plan)}
 
 

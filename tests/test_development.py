@@ -126,6 +126,22 @@ class DevelopmentTests(unittest.TestCase):
             self.assertEqual("INVALID_MANAGER_PROPOSAL", self.run_task()["reason"])
         self.assertEqual("BLOCKED", self.next()["state"])
 
+    def test_repeated_fixture_checks_trigger_replan_then_stop_across_reopen(self):
+        self.start(tokens=30, cycles=6)
+        for stalled in range(4):
+            self.assertEqual("COMPLETED", self.run_task()["state"])
+            self.runner = Runner(Ledger(self.ledger.path))
+            progress = session_view(self.ledger.read())["progress"]
+            self.assertEqual(stalled, progress["consecutive_no_progress"])
+            self.assertEqual(stalled == 0, progress["latest"]["implementation_advanced"])
+            self.assertEqual(stalled == 0, progress["latest"]["verification_advanced"])
+        self.assertEqual("REPLAN", session_view(self.ledger.read())["current"][0]["selection"])
+        result = self.next()
+        self.assertEqual(("NO_PROGRESS", "THREE_CYCLES_WITHOUT_IMPLEMENTATION_PROGRESS"),
+                         (result["state"], result["reason"]))
+        self.start(tokens=30, cycles=6)
+        self.assertEqual("NO_PROGRESS", self.next()["state"])
+
     def test_rework_respects_retry_limit(self):
         self.start(tokens=20, retries=1)
         with patch("devorchestra.runtime.mock_next",
