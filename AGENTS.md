@@ -56,6 +56,7 @@
 - Work reports go to docs/CURRENT-STATUS.md / WORKLOG.md / AI-HANDOFF.md or equivalent project docs, with a concise ChatGPT handoff. Do not commit user-private transcripts.
 
 ## Test and release gate
+- Use [the product-first development principles](docs/PROJECT-DEFINITION.md#제품-완성-우선-원칙) to prioritize working user flows. Where a live safety gate remains blocked, advance an independent user function and keep synthetic and live evidence separate.
 - The P1 runner is Mock-only. Its simulated owner grant can authorize only the built-in fixture inspection. Do not route a model, shell, external project or service through that grant.
 - Test with the repository's disposable fixture storage. Use the verified ledger for dashboard state and label synthetic outputs and unobserved process state explicitly.
 - Test hierarchy: static/pure unit -> synthetic/mock -> isolated integration -> approved real backend -> approved live product. Do not silently promote evidence across layers.

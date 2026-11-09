@@ -26,6 +26,8 @@ class RequirementWorkflowTests(unittest.TestCase):
         self.revision = self.catalog.save_project(self.project)
 
     def test_revisions_are_frozen_in_session_and_visible_in_projection(self):
+        reader = ProjectionReader(self.ledger)
+        self.assertEqual("REGISTER_REQUIREMENTS", reader.read("sample")["workflow"]["next_action"])
         first = self.catalog.register_requirement("sample", "goal.md", "GOAL")
         self.assertEqual(first, self.catalog.register_requirement("sample", "goal.md", "GOAL"))
         session = self.runner.development("start", project="sample",
@@ -45,6 +47,9 @@ class RequirementWorkflowTests(unittest.TestCase):
         self.assertEqual([first], view["workflow"]["cycle_requirements"])
         self.assertEqual([second], view["requirements"])
         self.assertEqual("NOT_AVAILABLE", view["workflow"]["user_test_status"])
+        self.assertEqual((1, "REVIEW_NEXT_REQUIREMENTS", "NO_RECORDED_ATTEMPT"),
+                         (view["workflow"]["pending_requirements_count"],
+                          view["workflow"]["next_action"], view["workflow"]["manager_status"]))
         self.runner.command("step", expected_run=run["run_id"])
         self.runner.command("approve", expected_run=run["run_id"])
         self.runner.command("run", expected_run=run["run_id"])
@@ -56,6 +61,10 @@ class RequirementWorkflowTests(unittest.TestCase):
         successor = self.runner.development("start", project="sample",
                                             limits={"seconds": 60, "tokens": 10, "cost_microunits": 0})
         self.assertEqual([second], successor["frozen"]["requirements"])
+        workflow = reader.read("sample")["workflow"]
+        self.assertEqual((0, "WAIT_FOR_LIVE_ADMISSION", "BLOCKED", "NOT_AVAILABLE"),
+                         (workflow["pending_requirements_count"], workflow["next_action"],
+                          workflow["development_admission"], workflow["user_test_status"]))
         context = self.runner.manager_context("sample", successor["development_id"])
         self.assertEqual("SYNTHETIC", context["previous_cycle"]["evidence"])
         self.assertEqual(run["run_id"], context["previous_cycle"]["run_id"])

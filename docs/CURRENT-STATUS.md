@@ -1,5 +1,9 @@
 # 현재 상태
 
+**P2.63.** `IMPLEMENTED`는 프로젝트·요구사항 등록, 기준본 고정, 질문과 다음 단계 안내다. `SYNTHETIC_PASS` 범위는 등록 → 합성 역할 순차 실행 → 결과 확인 → 개선 문서 등록 → 다음 기준본 반영이다. Command Center에서 기준본에 아직 반영되지 않은 개정 수와 Manager 요청의 기록 상태를 확인할 수 있다.
+
+MVP 자동 개발의 `LIVE_PASS`는 아직 없다. Manager 실행은 `GENERAL_ADMISSION_UNVERIFIED` 및 `MANAGER_PRE_EXECUTION_BOUNDARY_UNVERIFIED`로 차단된다. Developer 파일·명령 실행과 실제 Reviewer·Verifier 영수증은 미연결이며, 사용자 테스트 인계에는 신뢰할 수 있는 실제 검증 영수증이 필요하다. [MVP 순서](ARCHITECTURE-ROADMAP.md#p263-실사용-mvp-순서)
+
 최종 사용자 흐름을 정의하고 Command Center에 프로젝트 폴더 선택 및 요구사항 문서 등록을 연결했다. 카탈로그의 문서 버전과 합성 실행에 고정된 버전을 구분한다. 실제 자동 개발과 사용자 테스트 인계는 아직 차단 또는 미구현이다. P2.44의 사전검사 증거는 이력으로 유지하며 파일 경계 재시험은 수행하지 않았다.
 
 P2.38 사용자 PowerShell에서 합성 마커 해시와 원장 READY를 확인했다. 사용자 세션 확인은 해당 체크아웃과 합성 마커에 한정한다. 이전 지침의 원장·내용 검증은 PASS, 새 지침 폴더는 비어 있다. 대상 ACL에 기본 Users 그룹의 상속 Modify 권한이 있어 실제 개인 DB 이전은 BLOCKED다. 개선본 활성화는 별도 승인이다.

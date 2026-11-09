@@ -340,7 +340,22 @@ class CommandCenter:
                 state = "SESSION READY"
         self.global_badge.configure(text=f"GLOBAL / {state} · {global_project}", fg=color(state))
         workflow = view["workflow"]
-        self.development_button.configure(text=f"자동 개발 시작 · {workflow['development_admission']}")
+        self.development_button.configure(text=f"실제 자동 개발 · {workflow['development_admission']}",
+                                          state="disabled")
+        next_action = {
+            "ANSWER_QUESTION": "사용자 질문에 답변",
+            "REGISTER_PROJECT": "프로젝트 폴더 등록",
+            "REGISTER_REQUIREMENTS": "요구사항 문서 등록",
+            "REVIEW_NEXT_REQUIREMENTS": "다음 주기에 반영할 요구사항 확인",
+            "WAIT_FOR_LIVE_ADMISSION": "실제 개발 실행 조건 확인 대기",
+        }[workflow["next_action"]]
+        manager_status = {
+            "NO_RECORDED_ATTEMPT": "실제 요청 기록 없음",
+            "INTENT_UNRESOLVED": "실행 의도 기록 · 결과 미확정",
+            "THREAD_UNRESOLVED": "스레드 요청 결과 미확정",
+            "TURN_UNRESOLVED": "모델 턴 요청 결과 미확정",
+            "RESULT_RECORDED": "Manager 결과 기록됨",
+        }[workflow["manager_status"]]
         cycle_status = workflow["latest_cycle_state"]
         cycle_label = (f"\n최근 작업 · {cycle_status} ({workflow['latest_cycle_evidence']})"
                        if cycle_status else "")
@@ -348,8 +363,10 @@ class CommandCenter:
             f"{view['project_names'][key]} · {status}" for key, status in
             view["project_states"].items() if key == view["project_id"])
             + f"\n요구사항 {workflow['requirements_count']}개"
-              f" · 최근 작업 기준 {len(workflow['cycle_requirements'])}개"
-              f"{cycle_label}\n사용자 테스트 · {workflow['user_test_status']}"
+              f" · 현재 기준본 {workflow['requirements_baseline_count']}개"
+              f" · 기준 이후 등록 {workflow['pending_requirements_count']}개"
+              f"{cycle_label}\nManager · {manager_status}"
+              f"\n다음 단계 · {next_action}\n사용자 테스트 · {workflow['user_test_status']}"
               + (" · 실제 검증 영수증 필요" if workflow["user_test_status"] == "NOT_AVAILABLE" else ""))
         self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}",
                                fg=color(view["project_state"]))

@@ -97,6 +97,30 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         recovery_state = "RESUMABLE"
     session = session_view(events, project_id)
     question = pending_question(events)
+    selected_question = question if question and question["project_id"] == project_id else None
+    baseline = (session["start"]["frozen"]["requirements"] if session
+                else start.get("requirements", []) if start else [])
+    baseline_ids = {item["id"] for item in baseline}
+    pending_requirements = [item for item in requirements if item["id"] not in baseline_ids]
+    manager_event = next((event for event in reversed(project_events)
+                          if event["kind"] in ("native_manager_intent", "native_manager_thread_dispatch",
+                                               "native_manager_dispatch", "native_manager_result")), None)
+    manager_status = {
+        "native_manager_intent": "INTENT_UNRESOLVED",
+        "native_manager_thread_dispatch": "THREAD_UNRESOLVED",
+        "native_manager_dispatch": "TURN_UNRESOLVED",
+        "native_manager_result": "RESULT_RECORDED",
+    }.get(manager_event["kind"] if manager_event else None, "NO_RECORDED_ATTEMPT")
+    if selected_question:
+        next_action = "ANSWER_QUESTION"
+    elif not registration:
+        next_action = "REGISTER_PROJECT"
+    elif not requirements:
+        next_action = "REGISTER_REQUIREMENTS"
+    elif pending_requirements and (start or session):
+        next_action = "REVIEW_NEXT_REQUIREMENTS"
+    else:
+        next_action = "WAIT_FOR_LIVE_ADMISSION"
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -107,7 +131,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "project_names": names,
         "registration": registration,
         "requirements": requirements,
-        "user_question": (question if question and question["project_id"] == project_id else None),
+        "user_question": selected_question,
         "workflow": {
             "requirements_count": len(requirements),
             "cycle_requirements": start.get("requirements", []) if start else [],
@@ -117,6 +141,10 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
             "user_test_status": "NOT_AVAILABLE",
             "user_test_block_reason": "TRUSTED_LIVE_VERIFIER_RECEIPT_REQUIRED",
             "previous_cycle": session["start"].get("previous_cycle") if session else None,
+            "requirements_baseline_count": len(baseline),
+            "pending_requirements_count": len(pending_requirements) if start or session else 0,
+            "manager_status": manager_status,
+            "next_action": next_action,
         },
         "shutdown": shutdown,
         "recovery_state": recovery_state,
