@@ -90,7 +90,7 @@ class Ledger:
 
     def storage_status(self):
         result = {"storage": ".ai-local", "runtime_present": False, "instructions_present": False,
-                  "legacy_import": "NOT_ATTEMPTED", "status": "BLOCKED"}
+                  "legacy_import": "NOT_ATTEMPTED", "status": "BLOCKED", "reason": "PATH_CONFLICT"}
         try:
             root = self.state_boundary
             check_path(root)
@@ -106,12 +106,22 @@ class Ledger:
                 result["status"] = "NOT_INITIALIZED"
             elif result["runtime_present"] and (
                     self.local_root is None or all(path.is_dir() for path in directories)):
+                result["reason"] = "CORRUPT"
                 for path in (self.path, instructions, catalog):
                     if path.is_file():
                         Ledger(path).snapshot()
                 result["status"] = "READY"
+            else:
+                result["reason"] = "INCOMPLETE"
+        except PermissionError:
+            result["reason"] = "ACCESS_DENIED"
+        except sqlite3.OperationalError as error:
+            if getattr(error, "sqlite_errorcode", 0) in (3, 8, 14) or "unable to open" in str(error).lower():
+                result["reason"] = "ACCESS_DENIED"
         except (Blocked, OSError, sqlite3.Error, ValueError, TypeError, RecursionError):
             pass
+        if result["status"] != "BLOCKED":
+            result.pop("reason", None)
         return result
 
     def initialize(self):

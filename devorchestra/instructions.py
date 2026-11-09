@@ -8,7 +8,7 @@ from time import time
 from uuid import uuid4
 
 from .lease import Blocked, execution_slot
-from .ledger import Ledger, check_path
+from .ledger import Ledger, check_path, digest
 
 
 NAMES = ("AGENTS.override.md", "AGENTS.md")
@@ -194,6 +194,39 @@ class InstructionStore:
     def active(self, project_id):
         return next((item for item in reversed(self._events())
                      if item["kind"] == "instruction_approved" and item["project_id"] == project_id), None)
+
+    def role_drafts(self):
+        from .default_instructions import ROLES
+        directory = self.ledger.path.parent / "roles"
+        names = {"verifier": "verifier-contract"}
+        result = {}
+        for role in ROLES:
+            path = directory / (names.get(role, role) + ".md")
+            check_path(path)
+            if path.is_file():
+                result[role] = instruction_bytes(path).decode("utf-8-sig")
+        return result
+
+    def approve_role_drafts(self, project_id, reviewed):
+        with execution_slot() as abandoned:
+            if abandoned or not reviewed or self.role_drafts() != reviewed:
+                raise Blocked("Reviewed role drafts changed")
+            if not self.ledger.path.exists():
+                self.ledger.initialize()
+            self.ledger.update(lambda _events, _tail: {
+                "kind": "supervised_role_drafts_approved", "project_id": project_id,
+                "sha256": digest(reviewed), "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+    def active_role_drafts(self, project_id):
+        pin = next((item for item in reversed(self._events())
+                    if item["kind"] == "supervised_role_drafts_approved" and item["project_id"] == project_id), None)
+        if pin is None:
+            return {}
+        drafts = self.role_drafts()
+        if digest(drafts) != pin["sha256"]:
+            raise Blocked("Approved role drafts changed; review and approve again")
+        return drafts
 
     def verify(self, pin, replica):
         if (pin not in self._events() or pin["kind"] != "instruction_approved"

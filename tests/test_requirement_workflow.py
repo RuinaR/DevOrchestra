@@ -7,20 +7,21 @@ from unittest.mock import patch
 from devorchestra.catalog import Catalog, new_project
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger
+from devorchestra.instructions import InstructionStore
 from devorchestra.projection import ProjectionReader
 from devorchestra.runtime import Runner, Scenario
 
 
 class RequirementWorkflowTests(unittest.TestCase):
     def setUp(self):
-        directory = TemporaryDirectory(dir=Path.cwd())
+        directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
         self.source = root / "source"
         self.source.mkdir()
         self.document = self.source / "goal.md"
         self.document.write_bytes(b"Synthetic requirement text")
-        self.ledger = Ledger(root / "state" / "runtime.sqlite3")
+        self.ledger = Ledger.for_project(root)
         self.runner = Runner(self.ledger)
         self.runner.command("init")
         self.catalog = Catalog(self.ledger)
@@ -56,7 +57,7 @@ class RequirementWorkflowTests(unittest.TestCase):
         self.assertEqual("PROPOSED", submit(envelope))
         with self.assertRaises(Blocked):
             submit(envelope)
-        self.runner = Runner(Ledger(self.ledger.path))
+        self.runner = Runner(Ledger.for_project(self.ledger.state_boundary.parent))
         replica = self.source.with_name("replica")
         replica.mkdir()
         draft = self.runner.supervised_handoff("developer", "sample", expected_request=request,
@@ -129,6 +130,18 @@ class RequirementWorkflowTests(unittest.TestCase):
         self.document.write_bytes(b"Changed baseline")
         with self.assertRaisesRegex(Blocked, "Frozen requirement changed"):
             self.runner.supervised_handoff("prompt", "sample", expected_request=new_request)
+
+    def test_approved_role_draft_is_included_without_recording_its_text(self):
+        role_dir = self.ledger.local_directory("instructions") / "roles"
+        role_dir.mkdir()
+        (role_dir / "manager-planning.md").write_text("Private fixture draft", encoding="utf-8")
+        store = InstructionStore(self.ledger)
+        self.assertEqual({}, store.active_role_drafts("sample"))
+        store.approve_role_drafts("sample", store.role_drafts())
+        self.catalog.register_requirement("sample", "goal.md", "GOAL")
+        prompt = self.runner.supervised_handoff("start", "sample", paths=["src/main.py"])
+        self.assertIn("Private fixture draft", prompt)
+        self.assertNotIn("Private fixture draft", str(self.ledger.read()))
 
     def test_revisions_are_frozen_in_session_and_visible_in_projection(self):
         reader = ProjectionReader(self.ledger)

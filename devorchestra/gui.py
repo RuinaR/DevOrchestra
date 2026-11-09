@@ -12,13 +12,14 @@ from uuid import uuid4
 
 from .catalog import Catalog, REQUIREMENT_ROLES, new_project
 from .build_info import build_label
+from .default_instructions import defaults_text
 from .lease import Blocked
 from .instructions import InstructionStore, selected_source, source_ref
 from .ledger import Ledger, check_path
 from .projection import ProjectionReader
 from .questions import AUTHORIZATION_TYPES
 from .runtime import PROJECTS, Runner
-from .setup import environment_status, validate_setup
+from .setup import create_work_copy, validate_setup
 from .supervised import MAX_HANDOFF_BYTES, latest_handoff
 
 BG, PANEL, TILE, EDGE = "#09121f", "#111f30", "#172a40", "#395575"
@@ -27,6 +28,17 @@ TEAL, AMBER, RED = "#78efca", "#ffd082", "#ff9da9"
 ROLE_MARKS = {"Manager": "01 / CMD", "Developer": "02 / DEV",
               "Reviewer": "03 / REV", "Verifier": "04 / VFY"}
 POLL_MS = 1500
+
+
+def storage_message(storage):
+    if storage["status"] == "NOT_INITIALIZED":
+        return "처음 실행입니다. ‘초기 설정’에서 로컬 저장소를 준비하세요."
+    return {
+        "ACCESS_DENIED": "저장 폴더에 접근할 수 없습니다. 이 폴더의 읽기·쓰기 권한을 확인하세요.",
+        "CORRUPT": "기존 원장 검증에 실패했습니다. 백업과 원장 상태를 확인하세요.",
+        "INCOMPLETE": "기존 저장소의 일부가 누락되었습니다. 남은 데이터와 백업을 확인하세요.",
+        "PATH_CONFLICT": "저장 경로가 파일 또는 링크와 충돌합니다. EXE 옆 .ai-local 위치를 확인하세요.",
+    }.get(storage.get("reason"), "로컬 저장소를 열 수 없습니다.")
 
 # Display only these structured receipt fields in the local evidence inspector.
 EVIDENCE_FIELDS = (
@@ -75,9 +87,9 @@ def meter(used, limit):
     return "■" * filled + "□" * (8 - filled)
 
 
-def label(parent, text="", size=10, fg=INK, bg=PANEL, bold=False):
+def label(parent, text="", size=10, fg=INK, bg=PANEL, bold=False, **options):
     return tk.Label(parent, text=text, bg=bg, fg=fg, anchor="w", justify="left",
-                    font=("Segoe UI", size, "bold" if bold else "normal"))
+                    font=("Segoe UI", size, "bold" if bold else "normal"), **options)
 
 
 def section(parent, name):
@@ -126,20 +138,20 @@ class CommandCenter:
         self.project.pack(fill="x", pady=(7, 3))
         self.project.current(0)
         self.project.bind("<<ComboboxSelected>>", self.select_project)
-        ttk.Button(projects, text="프로젝트 등록", command=lambda: self.edit_settings("new")).pack(fill="x")
+        ttk.Button(projects, text="프로젝트 등록", command=self.register_project).pack(fill="x")
         ttk.Button(projects, text="요구사항 문서", command=self.requirement_settings).pack(fill="x")
         self.development_button = ttk.Button(projects, text="자동 개발 시작 · 확인 중", state="disabled")
         self.development_button.pack(fill="x")
         ttk.Button(projects, text="감독형 Codex 작업", command=self.supervised_work).pack(fill="x")
-        ttk.Button(projects, text="Project settings", command=lambda: self.edit_settings("edit")).pack(fill="x")
-        ttk.Button(projects, text="Global limits", command=lambda: self.edit_settings("limits")).pack(fill="x")
-        ttk.Button(projects, text="토큰 예비량", command=lambda: self.edit_settings("reserve")).pack(fill="x")
         ttk.Button(projects, text="초기 설정", command=self.setup_wizard).pack(fill="x")
         ttk.Button(projects, text="작업 지침", command=self.instruction_settings).pack(fill="x")
+        advanced = tk.Frame(projects, bg=PANEL)
+        for mode, title in (("edit", "프로젝트 설정"), ("limits", "공용 예산"), ("reserve", "토큰 예비량")):
+            ttk.Button(advanced, text=title, command=lambda mode=mode: self.edit_settings(mode)).pack(fill="x")
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
 
-        mission = section(command, "02  /  MISSION & GATES")
+        mission = section(command, "02  /  진행 상황과 질문")
         mission.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
         self.mission = label(mission, size=13, bold=True)
         self.mission.pack(fill="x", pady=(4, 0))
@@ -199,7 +211,25 @@ class CommandCenter:
             detail.pack(fill="x")
             self.cards[role] = (status, detail)
 
-        self.build_audit(root)
+        audit = self.build_audit(root)
+        details_visible = False
+
+        def toggle_details():
+            nonlocal details_visible
+            details_visible = not details_visible
+            for frame in (safety, operations, audit):
+                (frame.grid if details_visible else frame.grid_remove)()
+            if details_visible:
+                self.gates.pack(fill="x", before=self.question_button)
+                advanced.pack(fill="x", before=self.project_states)
+            else:
+                self.gates.pack_forget()
+                advanced.pack_forget()
+            root.grid_rowconfigure(3, weight=int(details_visible))
+
+        details_visible = True
+        toggle_details()
+        ttk.Button(header, text="고급 정보", command=toggle_details).pack(side="right", padx=8)
         root.bind("<F5>", lambda _: self.refresh())
         root.protocol("WM_DELETE_WINDOW", self.close_requested)
         self.refresh()
@@ -210,7 +240,7 @@ class CommandCenter:
         style.theme_use("clam")
         style.configure(".", background=TILE, foreground=INK, fieldbackground=TILE,
                         bordercolor=EDGE, font=("Segoe UI", 10))
-        style.configure("TButton", padding=(5, 3))
+        style.configure("TButton", padding=(8, 5))
         style.map("TButton", background=[("pressed", EDGE), ("active", "#254665")],
                   bordercolor=[("focus", CYAN)])
         style.map("TCombobox", fieldbackground=[("readonly", TILE)],
@@ -254,6 +284,7 @@ class CommandCenter:
                                 highlightthickness=1, highlightbackground=EDGE,
                                 highlightcolor=CYAN, state="disabled")
         self.scrollable(right, self.evidence)
+        return audit
 
     @staticmethod
     def scrollable(parent, widget):
@@ -274,11 +305,16 @@ class CommandCenter:
 
     def refresh(self):
         previous = self.view
+        if previous is None:
+            storage = self.reader.ledger.storage_status()
+            if storage["status"] != "READY":
+                self.clear(storage_message(storage), first_run=storage["status"] == "NOT_INITIALIZED")
+                return
         try:
             project_id = self.project_ids[self.project.current()]
             view = self.reader.read(project_id)
-        except (Blocked, OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
-            self.clear(f"{type(error).__name__}: {error}")
+        except (Blocked, OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+            self.clear(storage_message(self.reader.ledger.storage_status()))
             return
         if (self.view is None or view["snapshot_version"] != self.view["snapshot_version"]
                 or view["project_id"] != self.view["project_id"]
@@ -302,13 +338,15 @@ class CommandCenter:
         self.observation.configure(text=f"MOCK LEDGER  /  Seq {seq} · "
                                    f"{tail[:12] or 'empty'}  /  Verified {view['as_of_utc']}")
 
-    def clear(self, reason):
+    def clear(self, reason, *, first_run=False):
         self.view = None
         if hasattr(self, "shutdown_buttons"):
             self.render_shutdown()
-        self.global_badge.configure(text="GLOBAL / BLOCKED", fg=RED)
-        self.observation.configure(text="READ ONLY / Ledger unavailable · no current evidence")
-        self.mission.configure(text="Ledger unavailable", fg=RED)
+        self.global_badge.configure(text="처음 시작" if first_run else "저장소 확인 필요",
+                                    fg=CYAN if first_run else RED)
+        self.observation.configure(text=reason)
+        self.mission.configure(text="첫 실행 안내" if first_run else "저장소 확인 필요",
+                               fg=CYAN if first_run else RED)
         self.goal.configure(text=reason, wraplength=350)
         self.project_states.configure(text="UNKNOWN")
         self.development_button.configure(text="자동 개발 시작 · 확인 불가", state="disabled")
@@ -611,9 +649,17 @@ class CommandCenter:
             button.configure(state="normal" if enabled else "disabled")
 
     def close_requested(self):
-        if self.shutdown_future is not None or self.view is None:
+        if self.shutdown_future is not None:
+            return
+        if self.view is None:
+            self.root.destroy()
             return
         state = self.view["shutdown"]["state"]
+        if (state != "SCHEDULED" and self.view.get("recovery_state") != "UNKNOWN"
+                and (not self.view.get("global_run") or self.view.get("global_state") in
+                     ("IDLE", "COMPLETED", "FAILED", "CANCELLED", "BLOCKED", "WAITING_FOR_USER", "SESSION READY"))):
+            self.root.destroy()
+            return
         self.shutdown_command("finalize" if state in ("SCHEDULED", "READY") else "request")
 
     def shutdown_command(self, action, *, expected=None, until=None):
@@ -674,55 +720,111 @@ class CommandCenter:
         wizard = tk.Toplevel(self.root)
         wizard.title("DevOrchestra · 초기 설정")
         wizard.configure(bg=PANEL, padx=12, pady=12)
-        steps = ttk.Notebook(wizard)
-        steps.pack(fill="both", expand=True)
-        environment, paths, project = (tk.Frame(steps, bg=PANEL, padx=12, pady=12) for _ in range(3))
-        for tab, title in zip((environment, paths, project), ("1. 환경", "2. 복제본", "3. 프로젝트")):
-            steps.add(tab, text=title)
-        facts = environment_status()
-        label(environment, f"Windows x64 · {facts['windows_x64']}\n"
-              f"기본 실행 방식 · {facts['backend_label']}\n"
-              "일반 개발 · 공식 샌드박스와 승인 정책 · 완전 격리 보증 없음\n"
-              "강화 격리 · 별도 A/B/C 실측 필요 · 실행 차단\n"
-              f"Codex on PATH · {facts['codex_found']}\nCLI 서명·버전 / 격리 · NOT VERIFIED\n"
-              f"실제 실행 {facts['live_execution']} · 인증정보를 입력하지 마세요.").pack(fill="x")
-        label(paths, "승인할 복제본 경로 (등록만, 복사·실행 없음)").pack(fill="x")
-        replica = ttk.Entry(paths, width=60)
-        replica.pack(fill="x")
-        label(paths, "종료 대기 상한(초, 1–60)").pack(fill="x")
-        wait = ttk.Entry(paths)
-        wait.insert(0, "10")
-        wait.pack(fill="x")
-        label(paths, "원장 및 체크포인트 · .ai-local/state/p1.sqlite3", wraplength=520).pack(fill="x")
-        label(project, "local_path에 원본 경로를 입력하세요. 도구·네트워크·Git은 차단으로 저장합니다.").pack(fill="x")
-        editor = tk.Text(project, width=76, height=21, wrap="none")
-        self.scrollable(project, editor)
-        editor.insert("1.0", json.dumps(new_project("new-project", "New project", "Project goal"),
-                                        indent=2, ensure_ascii=False))
-        storage = self.reader.ledger.storage_status()["status"]
-        status = label(wizard, f"로컬 저장소 · {storage}", fg=AMBER)
+        label(wizard, "저장소 준비 → 프로젝트 등록 → 요구사항 추가 → 감독형 Codex 작업",
+              size=12, bold=True, wraplength=520).pack(fill="x", pady=6)
+        label(wizard, "기본 작업 지침은 포함되어 있습니다. 개인 지침은 프로젝트 등록 후 연결할 수 있습니다.",
+              wraplength=520).pack(fill="x", pady=6)
+        storage = self.reader.ledger.storage_status()
+        status = label(wizard, "저장소가 준비됐습니다." if storage["status"] == "READY"
+                       else storage_message(storage), fg=AMBER, wraplength=520)
         status.pack(fill="x")
 
         def save():
             try:
-                raw = editor.get("1.0", "end")
-                if len(raw) > 131_072:
-                    raise ValueError("Configuration input too large")
-                data = {"project": json.loads(raw), "replica": replica.get(), "wait_seconds": int(wait.get())}
-                validate_setup(data, self.reader.ledger.state_boundary)
                 self.controller.command("init")
-                Catalog(self.reader.ledger).save_setup(data)
             except (Blocked, OSError, sqlite3.Error, ValueError) as error:
-                current = self.reader.ledger.storage_status()["status"]
-                status.configure(text=f"로컬 저장소 · {current} · 설정 저장 실패"
-                                      + (f" · {error}" if isinstance(error, (Blocked, ValueError)) else ""))
+                current = self.reader.ledger.storage_status()
+                if isinstance(error, PermissionError):
+                    current = {"status": "BLOCKED", "reason": "ACCESS_DENIED"}
+                status.configure(text="저장소 준비 실패 · " + storage_message(current))
                 return
             wizard.destroy()
             self.refresh()
+            if self.view and not any(key not in PROJECTS for key in self.view["project_names"]):
+                self.register_project()
 
-        ttk.Button(wizard, text="설정 저장 · 실제 실행 차단 유지", command=save,
-                   state="normal" if facts["windows_x64"] and storage != "BLOCKED"
+        ttk.Button(wizard, text="저장소 준비", command=save,
+                   state="normal" if storage["status"] != "BLOCKED"
                    else "disabled").pack(anchor="e")
+
+    def register_project(self):
+        if self.view is None:
+            self.setup_wizard()
+            return
+        panel = tk.Toplevel(self.root)
+        panel.title("프로젝트 등록")
+        panel.configure(padx=16, pady=12)
+        fields = {}
+        for title, key in (("프로젝트 이름", "name"), ("원본 프로젝트 폴더", "original"),
+                           ("목표와 설명", "goal"), ("완료 기준", "acceptance"),
+                           ("개발용 작업 폴더 (선택)", "replica")):
+            ttk.Label(panel, text=title).pack(anchor="w")
+            row = ttk.Frame(panel)
+            row.pack(fill="x", pady=(2, 8))
+            value = fields[key] = ttk.Entry(row, width=55)
+            value.pack(side="left", fill="x", expand=True)
+            if key in ("original", "replica"):
+                def choose(field=value):
+                    folder = filedialog.askdirectory(parent=panel, mustexist=True)
+                    if folder:
+                        field.delete(0, "end")
+                        field.insert(0, str(Path(folder)))
+                ttk.Button(row, text="폴더 선택", command=choose).pack(side="right", padx=(6, 0))
+        ttk.Label(panel, text="개발용 작업 폴더는 원본을 보호하기 위한 별도 작업 사본입니다.\n"
+                  "이미 준비한 폴더를 선택하거나 Developer 지시를 만들 때 지정하세요.").pack(anchor="w")
+        copy_source = tk.BooleanVar(panel, value=False)
+        ttk.Checkbutton(panel, text="지정한 새 작업 폴더에 원본 복사 (등록 시 별도 확인)",
+                        variable=copy_source).pack(anchor="w")
+        ttk.Label(panel, text="새 폴더는 전체 경로를 입력하세요. Git·로컬 앱 데이터와 알려진 비밀 파일은 제외합니다.",
+                  wraplength=525).pack(anchor="w")
+        ttk.Label(panel, text="개발 모드 · 감독형 Codex  |  자동 실행은 차단됨").pack(anchor="w", pady=6)
+        add_docs = tk.BooleanVar(panel, value=True)
+        ttk.Checkbutton(panel, text="등록 후 요구사항 문서 추가", variable=add_docs).pack(anchor="w")
+        status = ttk.Label(panel, wraplength=530)
+        status.pack(fill="x")
+
+        def save():
+            values = {key: widget.get().strip() for key, widget in fields.items()}
+            try:
+                if not all(values[key] for key in ("name", "goal", "original", "acceptance")):
+                    raise ValueError("이름, 원본 폴더, 목표, 완료 기준을 입력하세요.")
+                for key in ("original", "replica"):
+                    if values[key]:
+                        path = Path(values[key])
+                        check_path(path)
+                        if not path.is_dir() and not (key == "replica" and copy_source.get()):
+                            raise ValueError("존재하는 폴더를 선택하세요.")
+                identity = "project-" + uuid4().hex[:12]
+                data = new_project(identity, values["name"], values["goal"])
+                data.update(local_path=str(Path(values["original"])), acceptance=[values["acceptance"]])
+                catalog = Catalog(self.reader.ledger)
+                if values["replica"]:
+                    setup = {"project": data, "replica": str(Path(values["replica"])), "wait_seconds": 10}
+                    validate_setup(setup, self.reader.ledger.state_boundary)
+                    if copy_source.get():
+                        if not messagebox.askyesno("개발용 작업 사본 만들기",
+                                                   "표시된 원본 파일을 지정한 새 폴더에 복사하시겠습니까? "
+                                                   "복사 전에 프로젝트에 비공개 파일이 포함됐는지 확인하세요.",
+                                                   parent=panel):
+                            return
+                        create_work_copy(Path(values["original"]), Path(values["replica"]))
+                    catalog.save_setup(setup)
+                else:
+                    catalog.save_project(data)
+            except (Blocked, OSError, ValueError, sqlite3.Error) as error:
+                status.configure(text=str(error) if isinstance(error, (Blocked, ValueError)) else
+                                 "폴더 권한과 로컬 저장소 상태를 확인하세요.")
+                return
+            open_docs = add_docs.get()
+            panel.destroy()
+            self.refresh()
+            if identity in self.project_ids:
+                self.project.current(self.project_ids.index(identity))
+                self.select_project(None)
+                if open_docs:
+                    self.requirement_settings()
+
+        ttk.Button(panel, text="프로젝트 등록", command=save).pack(anchor="e")
 
     def instruction_settings(self):
         panel = tk.Toplevel(self.root)
@@ -758,14 +860,15 @@ class CommandCenter:
                 selected.configure(values=versions)
                 state = "등록된 복제본" if setup else "복제본 미등록"
                 if active:
-                    state += f"\n활성 {active['version']} · {active['sha256']}"
+                    state += f"\n개인 기준 지침 연결 · {active['version']}"
                     try:
                         if setup:
                             store.verify(active, Path(setup["replica"]))
                     except (Blocked, OSError):
                         state += "\n활성 지침 검증 실패 또는 승인 만료"
                 if not versions:
-                    status.set(state + "\n현재 .ai-local에 백업 없음 · 이전 데이터 자동 이전 없음")
+                    status.set("기본 지침 사용 중 · 개인 지침 미연결\n" + state)
+                    show(defaults_text())
                     return
                 version = selected.get()
                 if version not in versions:
@@ -829,9 +932,30 @@ class CommandCenter:
                 except (Blocked, OSError, ValueError, sqlite3.Error):
                     status.set("개선본 미리보기를 검증할 수 없습니다.")
 
+        def local_roles():
+            if not self.view or not self.view["registration"]:
+                status.set("역할 초안을 연결하려면 프로젝트를 등록하세요.")
+                return
+            try:
+                store = InstructionStore(self.reader.ledger)
+                drafts = store.role_drafts()
+                if not drafts:
+                    status.set("이 저장소에 연결할 로컬 역할 초안이 없습니다.")
+                    return
+                show("\n\n".join(f"{role}\n{text}" for role, text in drafts.items()))
+                panel.update_idletasks()
+                if messagebox.askyesno("역할 초안 연결", "검토한 로컬 역할 초안을 이 프로젝트의 감독형 지시에 포함할까요?",
+                                       parent=panel):
+                    store.approve_role_drafts(project_id, drafts)
+                    status.set("역할 초안 연결됨 · 감독형 지시에만 적용")
+            except (Blocked, OSError, ValueError, sqlite3.Error):
+                status.set("역할 초안을 연결할 수 없습니다.")
+
         controls = ttk.Frame(panel)
         controls.pack(fill="x")
-        ttk.Button(controls, text="원본 선택 및 백업", command=backup).pack(side="left")
+        ttk.Button(controls, text="기본 지침 보기", command=lambda: show(defaults_text())).pack(side="left")
+        ttk.Button(controls, text="로컬 역할 초안 연결", command=local_roles).pack(side="left")
+        ttk.Button(controls, text="개인 지침 선택 및 백업", command=backup).pack(side="left")
         ttk.Button(controls, text="상태 다시 확인", command=refresh).pack(side="left")
         ttk.Button(controls, text="개선본 전체 보기", command=full_preview).pack(side="left")
         approve_button = ttk.Button(controls, text="선택 버전 승인 / 복원", command=approve)
@@ -1155,7 +1279,7 @@ def main():
         return
     root = tk.Tk()
     center = CommandCenter(root, ProjectionReader(ledger))
-    if ledger.storage_status()["status"] != "READY":
+    if ledger.storage_status()["status"] == "NOT_INITIALIZED":
         root.after_idle(center.setup_wizard)
     root.mainloop()
 

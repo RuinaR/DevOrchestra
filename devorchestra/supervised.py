@@ -6,7 +6,9 @@ from time import time
 from uuid import uuid4
 
 from .catalog import Catalog, latest_requirements, read_frozen_requirements
+from .default_instructions import COMMON, ROLES
 from .lease import Blocked, execution_slot
+from .instructions import InstructionStore
 from .ledger import canonical, check_path, digest
 from .questions import new_question
 from .replica_evidence import changes, revision, snapshot, verify_pe
@@ -53,9 +55,19 @@ def _context(ledger, catalog, project_id):
     files = project["requested_scope"]["files"]
     if not all(_path_allowed(path) for path in files) or len({p.casefold() for p in files}) != len(files):
         raise Blocked("Project file scope contains an ambiguous or protected path")
-    return project, refs, {
+    store = InstructionStore(ledger)
+    drafts = store.active_role_drafts(project_id)
+    active = store.active(project_id)
+    personal = ""
+    if active:
+        setup = catalog["setups"].get(project_id)
+        if not setup:
+            raise Blocked("Approved personal instructions require their registered work folder")
+        personal = store.verify(active, Path(setup["replica"])).decode("utf-8-sig")
+    policies = {"personal": personal, "drafts": drafts}
+    return project, refs, policies, {
         "revision": record["revision"], "baseline_sha256": digest(refs),
-        "contract_sha256": digest([VERSION, INSTRUCTIONS, OUTPUT_SCHEMAS["manager-planning"]]),
+        "contract_sha256": digest([VERSION, COMMON, ROLES, INSTRUCTIONS, OUTPUT_SCHEMAS["manager-planning"], policies]),
     }
 
 
@@ -84,10 +96,11 @@ def _read_result(raw, item, role="manager-planning"):
     return payload, (envelope["result"] if role == "verifier" else parse_role_output(role, payload))
 
 
-def _role_prompt(item, role, instructions, **context):
+def _role_prompt(item, role, instructions, policies, **context):
     binding = {**_binding(item), "stage": item["kind"], "replica_revision": item["replica_revision"]}
-    return instructions + "\n\n" + json.dumps({
-        **context, "response_envelope": {**binding, "result": {}},
+    return COMMON + " " + ROLES[role] + " " + instructions + "\n\n" + json.dumps({
+        **context, "approved_local_instructions": [policies["personal"], policies["drafts"].get(role, "")],
+        "response_envelope": {**binding, "result": {}},
         "result_schema": OUTPUT_SCHEMAS.get(role),
     }, ensure_ascii=False, indent=2)
 
@@ -117,7 +130,7 @@ def _build_plan(raw):
     return plan
 
 
-def _external_stages(action, entry, project, raw, record, event):
+def _external_stages(action, entry, project, raw, record, event, policies):
     replica = Path(entry["replica"])
     image = snapshot(replica)
     bound = {**event("", entry), "expires": entry["expires"], "revision": entry["revision"],
@@ -142,7 +155,7 @@ def _external_stages(action, entry, project, raw, record, event):
         return _role_prompt(
             item, "reviewer", "Review read-only. Inspect the changed files in the selected replica. "
             "Check acceptance, safety, scope and unnecessary complexity or duplicated validation. "
-            "Return the JSON envelope; do not edit, build or use external tools.",
+            "Return the JSON envelope; do not edit, build or use external tools.", policies,
             replica=str(replica), acceptance=project["acceptance"], observed_changes=observed,
             developer_report=result,
         )
@@ -192,7 +205,7 @@ def _external_stages(action, entry, project, raw, record, event):
         return _role_prompt(
             item, "verifier", "Owner approval is required before running only the listed commands in the replica. "
             "Return the exact receipt JSON with observed exit codes and independently calculated artifact hashes. "
-            "Never run generated executables. Text reports are not independently verified execution.",
+            "Never run generated executables. Text reports are not independently verified execution.", policies,
             replica=str(replica), build_plan=plan,
             receipt_fields={"environment": plan["environment"], "commands": plan["commands"], "exit_codes": [],
                             "artifacts": {path: "<SHA-256>" for path in plan["artifacts"]},
@@ -229,7 +242,7 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
             return None
 
         catalog = Catalog(ledger).read()
-        project, refs, frozen = _context(ledger, catalog, project_id)
+        project, refs, policies, frozen = _context(ledger, catalog, project_id)
         if action == "start":
             require_admission(events)
             if sum(item["kind"] == "supervised_review_blocked" and item.get("decision") == "REWORK"
@@ -275,10 +288,11 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
                                  and item["project_id"] == project_id
                                  and item["question_id"] == entry.get("clarification_id")
                                  and item["decision"] == "ANSWER"), None)
-            prompt = INSTRUCTIONS + "\n\n" + json.dumps({
+            prompt = COMMON + " " + ROLES["manager-planning"] + " " + INSTRUCTIONS + "\n\n" + json.dumps({
                 "instruction_version": VERSION, "goal": project["goal"], "requirements": documents,
                 "acceptance": project["acceptance"], "proposed_files_ceiling": entry["paths"],
                 "clarification_answer": prior_answer,
+                "approved_local_instructions": [policies["personal"], policies["drafts"].get("manager-planning", "")],
                 "response_envelope": {**_binding(entry), "result": {}},
                 "result_schema": OUTPUT_SCHEMAS["manager-planning"],
             }, ensure_ascii=False, indent=2)
@@ -319,7 +333,7 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
                     or any(entry[key] != value for key, value in frozen.items())):
                 raise Blocked("Role handoff is stale or replaced")
             read_frozen_requirements(catalog, project_id, refs, ledger.state_boundary)
-            return _external_stages(action, entry, project, raw, record, event)
+            return _external_stages(action, entry, project, raw, record, event, policies)
 
         if action != "developer" or entry["kind"] != "supervised_imported" or entry["disposition"] != "PROPOSED":
             raise Blocked("A verified Manager import is required")
@@ -351,6 +365,6 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
             item, "developer", "DEVELOPER HANDOFF. Obtain separate owner approval before any file action. "
             "Follow existing user and project development instructions. Use only the selected replica "
             "and listed relative paths. Commands, Git mutations, network, external apps and privilege "
-            "changes are outside this handoff. Verification is handled after Reviewer review.",
+            "changes are outside this handoff. Verification is handled after Reviewer review.", policies,
             replica=str(replica), plan=plan, requirements=documents, acceptance=project["acceptance"],
         )

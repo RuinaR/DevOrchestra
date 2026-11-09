@@ -148,7 +148,17 @@ class ProjectionTests(unittest.TestCase):
             db.execute("DELETE FROM events WHERE seq=1")
         center.refresh()
         self.assertIsNone(center.view)
-        center.global_badge.configure.assert_called_with(text="GLOBAL / BLOCKED", fg="#ff9da9")
+        center.global_badge.configure.assert_called_with(text="저장소 확인 필요", fg="#ff9da9")
+
+    def test_first_run_refresh_never_reads_a_missing_database(self):
+        center = CommandCenter.__new__(CommandCenter)
+        center.view = None
+        center.clear = Mock()
+        center.reader = Mock()
+        center.reader.ledger.storage_status.return_value = {"status": "NOT_INITIALIZED"}
+        center.refresh()
+        center.reader.read.assert_not_called()
+        self.assertTrue(center.clear.call_args.kwargs["first_run"])
 
     def test_reader_rejects_replaced_verified_history(self):
         self.start()

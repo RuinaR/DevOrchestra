@@ -102,10 +102,16 @@ class LocalStorageTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 Runner(ledger).command("init")
         self.assertEqual("BLOCKED", ledger.storage_status()["status"])
+        self.assertEqual("CORRUPT", ledger.storage_status()["reason"])
         before = ledger.path.read_bytes()
         with self.assertRaises(Blocked):
             Runner(ledger).command("init")
         self.assertEqual(before, ledger.path.read_bytes())
+
+    def test_storage_access_denial_is_distinct(self):
+        ledger = Ledger.for_project(self.root)
+        with patch("devorchestra.ledger.check_path", side_effect=PermissionError):
+            self.assertEqual("ACCESS_DENIED", ledger.storage_status()["reason"])
 
     def test_reparse_metadata_and_file_collision_are_rejected(self):
         project = self.root / "project"

@@ -247,6 +247,17 @@ class SetupTests(unittest.TestCase):
 
 
 class ShutdownWindowTests(unittest.TestCase):
+    def test_close_with_no_loaded_view_or_idle_work(self):
+        for view in (None, {"shutdown": {"state": "RUNNING"}, "global_run": None}):
+            center = CommandCenter.__new__(CommandCenter)
+            center.root = Mock()
+            center.view = view
+            center.shutdown_future = None
+            center.shutdown_command = Mock()
+            center.close_requested()
+            center.root.destroy.assert_called_once()
+            center.shutdown_command.assert_not_called()
+
     def test_window_close_waits_for_checkpoint_and_never_closes_on_error(self):
         center = CommandCenter.__new__(CommandCenter)
         center.root = Mock()
