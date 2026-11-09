@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 from contextlib import closing
 from pathlib import Path
 
@@ -47,7 +48,9 @@ class Ledger:
         """Resolve default state from this source checkout, independent of cwd."""
         if os.name != "nt":
             raise Blocked("Windows local storage required")
-        project_root = Path(__file__).absolute().parent.parent if project_root is None else project_root
+        if project_root is None:
+            project_root = (Path(sys.executable).absolute().parent if getattr(sys, "frozen", False)
+                            else Path(__file__).absolute().parent.parent)
         check_path(project_root)
         if not project_root.is_dir():
             raise Blocked("DevOrchestra project root unavailable")

@@ -68,6 +68,47 @@ class RequirementWorkflowTests(unittest.TestCase):
         self.assertEqual("NOT_VERIFIED", view["supervised_handoff"]["execution_evidence"])
         self.assertEqual("NOT_AVAILABLE", view["workflow"]["user_test_status"])
         self.assertIsNone(view["development"])
+        def role(action, prompt, result):
+            bound = json.loads(prompt.split("\n\n", 1)[1])["response_envelope"]
+            bound["result"] = result
+            return self.runner.supervised_handoff(action, "sample", expected_request=request,
+                                                  raw=json.dumps(bound).encode())
+
+        change_report = {"disposition": "READY_FOR_REVIEW", "summary": "Fixture implementation",
+                         "changes": [{"path": "src/main.py", "reason": "Implement acceptance criterion"}],
+                         "validation_attempts": [], "unfinished": []}
+        with self.assertRaisesRegex(Blocked, "No observed change"):
+            role("developer_submit", draft, change_report)
+        (replica / "src").mkdir()
+        (replica / "src" / "main.py").write_bytes(b"print('fixture')")
+        outside = replica / "outside.txt"
+        outside.write_bytes(b"Unexpected")
+        with self.assertRaisesRegex(Blocked, "outside the approved scope"):
+            role("developer_submit", draft, change_report)
+        outside.unlink()
+        reviewer = role("developer_submit", draft, change_report)
+        self.assertIn("observed_changes", reviewer)
+        self.assertEqual("ACCEPT_FOR_VERIFICATION", role(
+            "reviewer_submit", reviewer,
+            {"decision": "ACCEPT_FOR_VERIFICATION", "findings": [], "coverage_gaps": []},
+        ))
+        plan = {"commands": ["fixture package"], "environment": "Synthetic Windows fixture",
+                "output_folder": "dist", "artifacts": ["dist/app.zip"], "type": "PACKAGE"}
+        verifier = self.runner.supervised_handoff("verifier", "sample", expected_request=request,
+                                                 raw=json.dumps(plan).encode())
+        (replica / "dist").mkdir()
+        artifact = replica / "dist" / "app.zip"
+        artifact.write_bytes(b"Synthetic output")
+        from hashlib import sha256
+        receipt = {"environment": plan["environment"], "commands": plan["commands"], "exit_codes": [0],
+                   "artifacts": {"dist/app.zip": sha256(artifact.read_bytes()).hexdigest()},
+                   "criteria": self.project["acceptance"]}
+        with self.assertRaisesRegex(Blocked, "does not match"):
+            role("verifier_submit", verifier, {**receipt, "artifacts": {"dist/app.zip": "bad"}})
+        self.assertEqual("OWNER_REPORTED", role("verifier_submit", verifier, receipt))
+        view = ProjectionReader(self.ledger).read("sample")
+        self.assertEqual("NOT_AVAILABLE", view["supervised_handoff"]["user_test_status"])
+        self.assertNotIn("print('fixture')", str(self.ledger.read()))
 
     def test_supervised_question_expiry_and_changed_requirements(self):
         envelope = self.supervised_result(disposition="CLARIFICATION", work_kind="NONE",

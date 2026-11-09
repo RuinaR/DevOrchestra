@@ -9,6 +9,7 @@ from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .lease import Blocked, execution_slot
 from .ledger import canonical, check_path, digest
 from .questions import new_question
+from .replica_evidence import changes, revision, snapshot, verify_pe
 from .role_contract import MAX_OUTPUT_BYTES, OUTPUT_SCHEMAS, _unique_object, confirm_task_plan, parse_role_output
 
 
@@ -30,7 +31,9 @@ def latest_handoff(events, project_id=None):
 
 def waiting_for_handoff(events):
     item = latest_handoff(events)
-    return bool(item and item["kind"] == "supervised_requested" and time() < item["expires"])
+    return bool(item and item["kind"] in ("supervised_requested", "supervised_developer",
+                                          "supervised_reviewer", "supervised_reviewed",
+                                          "supervised_verifier") and time() < item["expires"])
 
 
 def _path_allowed(path):
@@ -63,12 +66,14 @@ def _binding(item):
     )}
 
 
-def _read_result(raw, item):
+def _read_result(raw, item, role="manager-planning"):
     if type(raw) is not bytes or len(raw) > MAX_HANDOFF_BYTES:
         raise Blocked("Result exceeds the handoff limit")
     try:
         envelope = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=_unique_object)
         binding = _binding(item)
+        if role != "manager-planning":
+            binding.update(stage=item["kind"], replica_revision=item["replica_revision"])
         if (type(envelope) is not dict or set(envelope) != {*binding, "result"}
                 or type(envelope["generation"]) is not int
                 or any(envelope[key] != value for key, value in binding.items())):
@@ -76,7 +81,124 @@ def _read_result(raw, item):
         payload = canonical(envelope["result"]).encode()
     except (ValueError, RecursionError, UnicodeError):
         raise Blocked("Use a valid UTF-8 JSON envelope") from None
-    return payload, parse_role_output("manager-planning", payload)
+    return payload, (envelope["result"] if role == "verifier" else parse_role_output(role, payload))
+
+
+def _role_prompt(item, role, instructions, **context):
+    binding = {**_binding(item), "stage": item["kind"], "replica_revision": item["replica_revision"]}
+    return instructions + "\n\n" + json.dumps({
+        **context, "response_envelope": {**binding, "result": {}},
+        "result_schema": OUTPUT_SCHEMAS.get(role),
+    }, ensure_ascii=False, indent=2)
+
+
+def _build_plan(raw):
+    if type(raw) is not bytes or len(raw) > MAX_HANDOFF_BYTES:
+        raise Blocked("Use a bounded JSON build plan")
+    try:
+        plan = json.loads(raw, object_pairs_hook=_unique_object)
+    except (ValueError, RecursionError):
+        raise Blocked("Use a valid JSON build plan") from None
+    if (type(plan) is not dict or set(plan) != {"commands", "output_folder", "artifacts", "type", "environment"}
+            or plan["type"] not in ("EXE", "PACKAGE", "OTHER")
+            or type(plan["environment"]) is not str or not 0 < len(plan["environment"]) <= 200
+            or not plan["environment"].isprintable()
+            or type(plan["commands"]) is not list or not 0 < len(plan["commands"]) <= 8
+            or any(type(cmd) is not str or not 0 < len(cmd) <= 400 or not cmd.isprintable()
+                   for cmd in plan["commands"])
+            or type(plan["output_folder"]) is not str or not _path_allowed(plan["output_folder"])
+            or type(plan["artifacts"]) is not list or not 0 < len(plan["artifacts"]) <= 16
+            or any(type(path) is not str or not _path_allowed(path)
+                   or not path.startswith(plan["output_folder"] + "/") for path in plan["artifacts"])
+            or len({path.casefold() for path in plan["artifacts"]}) != len(plan["artifacts"])):
+        raise Blocked("Invalid commands, environment, or artifact paths in build plan")
+    if plan["type"] == "EXE" and not any(path.lower().endswith(".exe") for path in plan["artifacts"]):
+        raise Blocked("An EXE build plan requires an executable output")
+    return plan
+
+
+def _external_stages(action, entry, project, raw, record, event):
+    replica = Path(entry["replica"])
+    image = snapshot(replica)
+    bound = {**event("", entry), "expires": entry["expires"], "revision": entry["revision"],
+             "replica": str(replica), "replica_revision": revision(image)}
+
+    def advance(kind, **fields):
+        item = {**bound, "kind": kind, **fields}
+        def admit(_events):
+            if time() >= item["expires"]:
+                raise Blocked("Handoff expired during evidence inspection")
+        record(item, admit)
+        return item
+
+    if action == "developer_submit" and entry["kind"] == "supervised_developer":
+        _, result = _read_result(raw, entry, "developer")
+        observed = changes(entry["image"], image, entry["paths"])
+        declared = [change["path"] for change in result["changes"]]
+        if (result["disposition"] != "READY_FOR_REVIEW" or len(declared) != len(observed)
+                or set(declared) != set(observed)):
+            raise Blocked("Developer report does not match observed replica changes")
+        item = advance("supervised_reviewer", observed=observed, report_sha256=digest(result))
+        return _role_prompt(
+            item, "reviewer", "Review read-only. Inspect the changed files in the selected replica. "
+            "Check acceptance, safety, scope and unnecessary complexity or duplicated validation. "
+            "Return the JSON envelope; do not edit, build or use external tools.",
+            replica=str(replica), acceptance=project["acceptance"], observed_changes=observed,
+            developer_report=result,
+        )
+    if action == "verifier_submit" and entry["kind"] == "supervised_verifier":
+        _, receipt = _read_result(raw, entry, "verifier")
+        plan = entry["build_plan"]
+        artifacts = {path: image["files"][path] for path in plan["artifacts"] if path in image["files"]}
+        source = {**image, "files": {path: info for path, info in image["files"].items()
+                                    if path not in artifacts}}
+        if (revision(source) != entry["replica_revision"]
+                or type(receipt) is not dict
+                or set(receipt) != {"environment", "commands", "exit_codes", "artifacts", "criteria"}
+                or receipt["environment"] != plan["environment"] or receipt["commands"] != plan["commands"]
+                or receipt["artifacts"] != {path: info["sha256"] for path, info in artifacts.items()}
+                or receipt["criteria"] != project["acceptance"]
+                or type(receipt["exit_codes"]) is not list
+                or len(receipt["exit_codes"]) != len(plan["commands"])
+                or any(type(code) is not int for code in receipt["exit_codes"])):
+            raise Blocked("Verifier receipt does not match the approved commands, source, or artifacts")
+        successful = all(code == 0 for code in receipt["exit_codes"])
+        if successful and len(artifacts) != len(plan["artifacts"]):
+            raise Blocked("A successful receipt requires every declared artifact")
+        if successful and plan["type"] == "EXE":
+            for path, info in artifacts.items():
+                if path.lower().endswith(".exe"):
+                    verify_pe(replica / path, info)
+        advance("supervised_evidence", source_revision=entry["replica_revision"], artifacts=artifacts,
+                build_plan=plan, exit_codes=receipt["exit_codes"], receipt_sha256=digest(receipt),
+                review_sha256=entry["review_sha256"],
+                execution_evidence="OWNER_REPORTED", user_test_status="NOT_AVAILABLE")
+        return "OWNER_REPORTED" if successful else "BUILD_FAILED_REPORTED"
+    if revision(image) != entry["replica_revision"]:
+        raise Blocked("Replica changed after evidence was recorded")
+    if action == "reviewer_submit" and entry["kind"] == "supervised_reviewer":
+        _, result = _read_result(raw, entry, "reviewer")
+        decision = result["decision"]
+        if decision == "REWORK" and not result["findings"]:
+            raise Blocked("Rework requires a concrete finding")
+        advance("supervised_reviewed" if decision == "ACCEPT_FOR_VERIFICATION" else "supervised_review_blocked",
+                decision=decision, review_sha256=digest(result))
+        return decision
+    if action == "verifier" and entry["kind"] == "supervised_reviewed":
+        plan = _build_plan(raw)
+        if any(path in image["files"] for path in plan["artifacts"]):
+            raise Blocked("Use fresh output files so old artifacts cannot be imported")
+        item = advance("supervised_verifier", build_plan=plan, review_sha256=entry["review_sha256"])
+        return _role_prompt(
+            item, "verifier", "Owner approval is required before running only the listed commands in the replica. "
+            "Return the exact receipt JSON with observed exit codes and independently calculated artifact hashes. "
+            "Never run generated executables. Text reports are not independently verified execution.",
+            replica=str(replica), build_plan=plan,
+            receipt_fields={"environment": plan["environment"], "commands": plan["commands"], "exit_codes": [],
+                            "artifacts": {path: "<SHA-256>" for path in plan["artifacts"]},
+                            "criteria": project["acceptance"]},
+        )
+    raise Blocked("This role is not current")
 
 
 def handoff(runner, action, project_id, *, raw=None, expected_request=None, replica_path=None, paths=None):
@@ -100,7 +222,7 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
                     "state": "HANDOFF", "timestamp": datetime.now(timezone.utc).isoformat()}
 
         if action == "cancel":
-            if (not current or current != selected or current["kind"] != "supervised_requested"
+            if (not current or current != selected or not waiting_for_handoff(events)
                     or current["request_id"] != expected_request):
                 raise Blocked("No matching pending handoff")
             record(event("supervised_cancelled", current))
@@ -110,6 +232,10 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
         project, refs, frozen = _context(ledger, catalog, project_id)
         if action == "start":
             require_admission(events)
+            if sum(item["kind"] == "supervised_review_blocked" and item.get("decision") == "REWORK"
+                   and item["project_id"] == project_id and item["baseline_sha256"] == frozen["baseline_sha256"]
+                   for item in events) >= 2:
+                raise Blocked("NO_PROGRESS: repeated rework requires a revised requirements baseline")
             run, session = last_run(events), session_view(events)
             if (run and run[-1]["state"] not in TERMINAL) or (session and not session["end"]):
                 raise Blocked("An existing development session owns admission")
@@ -187,12 +313,20 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
             record(result, admit_import)
             return result["disposition"]
 
+        if action in ("developer_submit", "reviewer_submit", "verifier", "verifier_submit"):
+            require_admission(events, allow_supervised=True)
+            if (entry != current or time() >= entry.get("expires", 0)
+                    or any(entry[key] != value for key, value in frozen.items())):
+                raise Blocked("Role handoff is stale or replaced")
+            read_frozen_requirements(catalog, project_id, refs, ledger.state_boundary)
+            return _external_stages(action, entry, project, raw, record, event)
+
         if action != "developer" or entry["kind"] != "supervised_imported" or entry["disposition"] != "PROPOSED":
             raise Blocked("A verified Manager import is required")
         require_admission(events)
         if time() >= entry["expires"] or any(entry[key] != value for key, value in frozen.items()):
             raise Blocked("The imported plan is stale")
-        read_frozen_requirements(catalog, project_id, refs, ledger.state_boundary)
+        documents = read_frozen_requirements(catalog, project_id, refs, ledger.state_boundary)
         _, plan = _read_result(raw, entry)
         if digest(plan) != entry["result_sha256"]:
             raise Blocked("Reopen the exact imported result to prepare its Developer draft")
@@ -208,9 +342,15 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
                 raise Blocked("Replica is not separate from protected state or original")
         if not replica.is_dir():
             raise Blocked("Replica directory is unavailable")
-        return ("DEVELOPER DRAFT. Obtain separate owner approval before any file or command action. "
-                "Use only the approved replica and listed relative paths. Commands, Git, network, "
-                "external apps and privilege changes are outside this handoff. Return the Developer JSON "
-                "and independent change evidence for review. A text claim is not a build or test receipt.\n\n"
-                + json.dumps({"binding": _binding(entry), "replica": str(replica), "plan": plan,
-                              "result_schema": OUTPUT_SCHEMAS["developer"]}, ensure_ascii=False, indent=2))
+        image = snapshot(replica)
+        item = {**event("supervised_developer", entry), **frozen, "expires": entry["expires"],
+                "replica": str(replica), "replica_revision": revision(image), "image": image,
+                "paths": plan["proposed_paths"], "execution_evidence": "NOT_VERIFIED"}
+        record(item, require_admission)
+        return _role_prompt(
+            item, "developer", "DEVELOPER HANDOFF. Obtain separate owner approval before any file action. "
+            "Follow existing user and project development instructions. Use only the selected replica "
+            "and listed relative paths. Commands, Git mutations, network, external apps and privilege "
+            "changes are outside this handoff. Verification is handled after Reviewer review.",
+            replica=str(replica), plan=plan, requirements=documents, acceptance=project["acceptance"],
+        )

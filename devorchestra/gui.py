@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 
 from .catalog import Catalog, REQUIREMENT_ROLES, new_project
+from .build_info import build_label
 from .lease import Blocked
 from .instructions import InstructionStore, selected_source, source_ref
 from .ledger import Ledger, check_path
@@ -98,7 +99,7 @@ class CommandCenter:
         self.shutdown_future = None
         self.shutdown_notice = None
         self.question_window = None
-        root.title("DevOrchestra | Command Center")
+        root.title(f"DevOrchestra | Command Center · {build_label()}")
         root.configure(bg=BG)
         root.geometry("1220x830")
         root.minsize(900, 660)
@@ -872,6 +873,19 @@ class CommandCenter:
                 return ("사용자 등록 계획 · 외부 실행 미검증 · Developer 지시 초안 준비 가능"
                         if shown["disposition"] == "PROPOSED"
                         else "사용자 질문 · Command Center에서 답변한 뒤 새 Manager 작업을 시작하세요.")
+            if shown["kind"] == "supervised_evidence":
+                artifacts = ", ".join(shown["artifacts"])
+                return (f"사용자 제출 종료 코드 {shown['exit_codes']} · 산출물 해시 확인 · 실행 미검증\n"
+                        f"{shown['replica']} · {artifacts}\n사용자 테스트 준비 BLOCKED")
+            stages = {
+                "supervised_developer": "Developer 결과 대기 · 복제본 기준을 기록했습니다.",
+                "supervised_reviewer": "변경 파일 해시 확인 · Reviewer 결과 대기",
+                "supervised_reviewed": "Reviewer 승인 등록 · Verifier 빌드 계획 입력",
+                "supervised_review_blocked": "Reviewer 재작업 또는 차단 · 새 Manager 계획 필요",
+                "supervised_verifier": "Verifier 결과 대기 · 명령은 사용자가 승인한 외부 환경에서만 실행",
+            }
+            if shown["kind"] in stages:
+                return stages[shown["kind"]]
             return "작업 취소됨"
 
         def show(text):
@@ -888,12 +902,11 @@ class CommandCenter:
                     action, project_id, raw=raw, expected_request=shown["request_id"] if shown else None, **options,
                 )
                 shown = latest_handoff(self.reader.ledger.read(), project_id)
-                if action in ("start", "prompt", "developer"):
+                if action in ("start", "prompt", "developer", "developer_submit", "verifier"):
                     show(result)
                 elif action == "cancel":
                     show(None)
-                status.configure(text=describe() if action != "developer" else
-                                 "Developer 초안 · 파일·명령 실행 권한 없음")
+                status.configure(text=describe())
                 self.refresh()
             except (Blocked, OSError, sqlite3.Error, ValueError) as error:
                 status.configure(text=str(error) if isinstance(error, Blocked) else "입력 또는 로컬 상태를 확인하세요.")
@@ -914,7 +927,7 @@ class CommandCenter:
                 text = raw.decode("utf-8-sig")
                 response.delete("1.0", "end")
                 response.insert("1.0", text)
-                apply("submit", raw)
+                import_result(raw)
             except (OSError, ValueError, Blocked):
                 status.configure(text="읽을 수 있는 로컬 UTF-8 JSON 파일을 선택하세요.")
 
@@ -927,6 +940,25 @@ class CommandCenter:
 
         def pasted():
             return response.get("1.0", "end-1c").encode("utf-8")
+
+        def import_result(raw):
+            action = {"supervised_developer": "developer_submit", "supervised_reviewer": "reviewer_submit",
+                      "supervised_verifier": "verifier_submit"}.get(shown["kind"] if shown else None, "submit")
+            apply(action, raw)
+
+        def verifier():
+            template = {"commands": ["<승인할 빌드 또는 테스트 명령>"], "output_folder": "dist",
+                        "artifacts": ["dist/app.exe"], "type": "EXE", "environment": "<도구 버전과 환경>"}
+            if not pasted().strip() or (shown and shown["kind"] == "supervised_reviewed"
+                                        and '"request_id"' in response.get("1.0", "end-1c")):
+                response.delete("1.0", "end")
+                response.insert("1.0", json.dumps(template, ensure_ascii=False, indent=2))
+                status.configure(text="빌드 계획 JSON을 편집하고 같은 버튼을 다시 누르세요. 비밀은 입력하지 마세요.")
+                return
+            if b"<" not in pasted():
+                apply("verifier", pasted())
+            else:
+                status.configure(text="빌드 명령과 실행 환경 예시를 실제 값으로 바꾸세요.")
 
         def developer():
             try:
@@ -950,8 +982,8 @@ class CommandCenter:
         actions = ttk.Frame(panel)
         actions.pack(fill="x")
         for title, command in (
-            ("붙여넣은 결과 확인", lambda: apply("submit", pasted())), ("JSON 파일 가져오기", import_file),
-            ("Developer 초안 열기", developer),
+            ("붙여넣은 결과 확인", lambda: import_result(pasted())), ("JSON 파일 가져오기", import_file),
+            ("Developer 지시 준비", developer), ("Verifier 빌드 계획", verifier),
         ):
             ttk.Button(actions, text=title, command=command).pack(side="left")
         status.configure(text=describe())
