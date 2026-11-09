@@ -19,6 +19,8 @@ DISABLED_FEATURES = (
     "shell_tool", "computer_use", "apps", "plugins", "hooks", "multi_agent",
     "multi_agent_v2", "code_mode", "code_mode_host", "request_permissions_tool", "memories",
     "view_image", "image_generation", "sleep_tool",
+    "send_message_to_user_async", "current_time_reminder", "token_budget",
+    "deferred_executor", "code_mode_prewarm",
 )
 MANAGER_CONFIG = (INSPECTION_CONFIG + 'web_search = "disabled"\ncli_auth_credentials_store = "file"\n'
                   + 'forced_login_method = "chatgpt"\n\n'
@@ -249,6 +251,12 @@ def _collect_plan(server, request, replica, messages, expected_sources, before_t
             item = params["item"]
             if item["type"] not in ("agentMessage", "userMessage", "reasoning"):
                 raise Blocked("Manager attempted an unsupported tool or item")
+            if item["type"] == "agentMessage" and (
+                item.get("delivery") is not None or item.get("questions") is not None
+            ):
+                # Catalog-driven messaging can bypass a disabled feature flag.
+                # Reject its output as a plan; this is not a server-side tool veto.
+                raise Blocked("Manager returned an out-of-band message or question")
             if method == "item/completed" and item["type"] == "agentMessage":
                 if reply is not None:
                     raise Blocked("Manager returned more than one plan")

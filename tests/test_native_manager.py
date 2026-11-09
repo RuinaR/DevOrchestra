@@ -44,7 +44,7 @@ for line in sys.stdin:
     if method == 'account/read':
         assert msg['params'] == {'refreshToken':False}
     if method == 'thread/start':
-        assert mode not in ('tools-enabled', 'api-account')
+        assert mode not in ('tools-enabled', 'api-account', 'async-feature-enabled')
         assert msg['params']['sandbox'] == 'read-only'
         assert not msg['params'].get('dynamicTools')
         assert msg['params']['modelProvider'] == 'openai'
@@ -90,8 +90,11 @@ for line in sys.stdin:
         if mode == 'clarification':
             plan.update(disposition='CLARIFICATION', task_spec='Which fixture behavior?',
                         proposed_paths=[], acceptance_checks=[])
+        item = {'type':'agentMessage','id':'item-fixture','text':json.dumps(plan)}
+        if mode == 'async-plan':
+            item['delivery'] = 'async'
         notice('item/completed', turnId='turn-fixture',
-               item={'type':'agentMessage','id':'item-fixture','text':json.dumps(plan)})
+               item=item)
         notice('turn/completed', turn={'id':'turn-fixture','status':'completed'})
 """
 
@@ -146,6 +149,8 @@ class NativeManagerTests(unittest.TestCase):
             config = self.effective_config()
             if mode == "tools-enabled":
                 config["features"]["computer_use"] = True
+            if mode == "async-feature-enabled":
+                config["features"]["send_message_to_user_async"] = True
             with _owned_stdio(Path(sys.executable), ["-I", "-S", "-B", "-c", PEER, mode, json.dumps(config)], cwd,
                               {"SystemRoot": os.environ["SystemRoot"], "CODEX_HOME": str(self.approval.home)},
                               min(timeout, 0.4) if mode == "hang" else timeout, cancelled) as server:
@@ -241,7 +246,8 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual([], self.ledger.read())
 
     def test_effective_tool_or_thread_policy_mismatch_blocks_turn(self):
-        for mode in ("tools-enabled", "api-account", "unsafe-thread", "network-thread", "wrong-instructions"):
+        pre_thread_failures = ("tools-enabled", "api-account", "async-feature-enabled")
+        for mode in (*pre_thread_failures, "unsafe-thread", "network-thread", "wrong-instructions"):
             with self.subTest(mode=mode):
                 self.ledger = Ledger(self.ledger.path.with_name(f"{mode}.sqlite3"),
                                      local_root=self.ledger.local_root)
@@ -250,9 +256,16 @@ class NativeManagerTests(unittest.TestCase):
                 with self.assertRaisesRegex(Blocked, "UNKNOWN"):
                     self.run_fixture(mode)
                 expected = ["native_manager_intent"]
-                if mode not in ("tools-enabled", "api-account"):
+                if mode not in pre_thread_failures:
                     expected.append("native_manager_thread_dispatch")
                 self.assertEqual(expected, [event["kind"] for event in self.ledger.read()])
+
+    def test_async_message_with_valid_plan_json_is_not_a_manager_result(self):
+        with self.assertRaisesRegex(Blocked, "UNKNOWN"):
+            self.run_fixture("async-plan")
+        self.assertEqual("native_manager_dispatch", self.ledger.read()[-1]["kind"])
+        with self.assertRaisesRegex(Blocked, "ownership requires recovery"):
+            self.run_fixture()
 
     def test_clarification_is_durable_after_manager_drain_and_requires_fresh_approval(self):
         result, _ = self.run_fixture("clarification")
