@@ -7,7 +7,7 @@ import sqlite3
 from threading import Thread
 from time import monotonic, time
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, font, ttk
 from uuid import uuid4
 
 from .catalog import Catalog, REQUIREMENT_ROLES, new_project, read_frozen_requirements
@@ -22,13 +22,39 @@ from .runtime import PROJECTS, Runner
 from .setup import create_work_copy, validate_setup
 from .supervised import MAX_HANDOFF_BYTES, latest_handoff
 
-BG, PANEL, TILE, EDGE = "#09121f", "#111f30", "#172a40", "#395575"
-INK, MUTED, CYAN = "#f1f6ff", "#b9cde4", "#82d8ff"
+BG, PANEL, TILE, EDGE = "#0c111d", "#141e2e", "#202c42", "#455778"
+INK, MUTED, CYAN = "#f1f6ff", "#b9cde4", "#96baff"
 TEAL, AMBER, RED = "#78efca", "#ffd082", "#ff9da9"
 ROLE_MARKS = {"Manager": "01 / CMD", "Developer": "02 / DEV",
               "Reviewer": "03 / REV", "Verifier": "04 / VFY"}
 POLL_MS = 1500
-REQUIREMENT_NAMES = dict(zip(REQUIREMENT_ROLES, ("개발 목표", "기능 추가", "설계", "버그 수정", "개선 요청")))
+REQUIREMENT_NAMES = dict(zip(REQUIREMENT_ROLES, ("개발 목표", "기능 추가", "설계 변경", "버그 수정", "개선 요청")))
+REQUIREMENT_HELP = {
+    "GOAL": "차수의 방향을 기록합니다. 예: 이번 차수에는 신규 사용자 등록을 완성합니다.",
+    "FEATURE": "새 기능 구현 요청. 예: 프로젝트 목록에 이름 검색을 추가해 주세요.",
+    "BUG": "잘못된 동작 수정 요청. 예: 빈 이름으로 저장하면 오류가 납니다. 입력 안내를 표시해 주세요.",
+    "DESIGN": "구조나 설계 변경 요청. 예: 문서 등록과 개발 시작을 분리해 주세요.",
+    "IMPROVEMENT": "테스트 후 개선점 요청. 예: 긴 문서 이름을 쉽게 읽을 수 있게 해 주세요.",
+}
+SAFETY_NOTE = ("다른 앱과 비간섭을 목표로 합니다. 프로젝트 및 승인 작업 폴더만 개발 대상으로 삼으며, "
+               "메이플스토리 등 다른 앱의 입력·창·프로세스·메모리·화면 접근을 금지합니다. "
+               "OS 수준 비간섭은 아직 실측되지 않았습니다.")
+
+
+def handoff_stage(item):
+    if item and item["kind"] == "supervised_imported" and item.get("disposition") == "CLARIFICATION":
+        return 0, "질문 확인 필요", "대시보드에서 답변한 뒤 새 계획 지시를 만드세요."
+    return {
+        "supervised_requested": (0, "계획 결과 대기", "지시를 기존 Codex에 직접 붙여넣고 계획 JSON을 가져오세요."),
+        "supervised_imported": (0, "계획 가져오기 완료", "계획을 확인한 뒤 구현 지시를 준비하세요."),
+        "supervised_developer": (1, "구현 결과 대기", "승인한 작업 폴더에서 얻은 구현 결과를 가져오세요."),
+        "supervised_reviewer": (2, "검토 결과 대기", "변경 증거를 검토한 결과를 가져오세요."),
+        "supervised_reviewed": (3, "검증 준비", "승인할 빌드·테스트 계획을 준비하세요."),
+        "supervised_verifier": (3, "검증 결과 대기", "승인된 환경에서 얻은 결과를 가져오세요."),
+        "supervised_evidence": (3, "산출물 확인", "산출물을 검토하세요. 사용자 테스트 준비는 아직 확인되지 않았습니다."),
+        "supervised_review_blocked": (2, "재작업 또는 차단", "검토 의견을 확인하고 다음 계획을 결정하세요."),
+        "supervised_cancelled": (0, "취소됨", "필요하면 새 계획 지시를 만드세요."),
+    }.get(item["kind"] if item else None, (0, "대기 중", "요구사항을 등록한 뒤 감독형 개발을 시작하세요."))
 
 
 def storage_message(storage):
@@ -90,7 +116,8 @@ def meter(used, limit):
 
 def label(parent, text="", size=10, fg=INK, bg=PANEL, bold=False, **options):
     return tk.Label(parent, text=text, bg=bg, fg=fg, anchor="w", justify="left",
-                    font=("Segoe UI", size, "bold" if bold else "normal"), **options)
+                    font=(getattr(parent.winfo_toplevel(), "ui_font", "Segoe UI"),
+                          size, "bold" if bold else "normal"), **options)
 
 
 def section(parent, name):
@@ -122,7 +149,7 @@ class CommandCenter:
 
         header = tk.Frame(root, bg=BG, padx=16, pady=10)
         header.grid(row=0, column=0, sticky="ew")
-        label(header, "DevOrchestra · 개발 작업실", 18, bg=BG, bold=True).pack(side="left")
+        label(header, "DevOrchestra  /  개발 운영실", 18, bg=BG, bold=True).pack(side="left")
         self.global_badge = label(header, fg=CYAN, bg=BG, bold=True)
         self.global_badge.pack(side="right")
         self.observation = label(root, bg=BG, fg=MUTED)
@@ -149,21 +176,31 @@ class CommandCenter:
             ttk.Button(advanced, text=title, command=lambda mode=mode: self.edit_settings(mode)).pack(fill="x")
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
+        label(projects, "목표·완료 기준은 프로젝트 전체의 기준입니다.\n요구사항 문서는 이번 개발 차수의 작업 지시입니다.",
+              fg=MUTED, wraplength=245).pack(fill="x", pady=(8, 0))
 
-        mission = section(command, "02  /  진행 상황과 질문")
+        mission = section(command, "작업 현황")
         mission.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
         self.mission = label(mission, size=13, bold=True)
         self.mission.pack(fill="x", pady=(4, 0))
         self.goal = label(mission, fg=MUTED)
         self.goal.pack(fill="x")
-        self.development_button = ttk.Button(mission, text="개발 시작", command=self.supervised_work, state="disabled")
+        self.development_button = ttk.Button(mission, text="감독형 개발 시작", command=self.supervised_work,
+                                             style="Primary.TButton", state="disabled")
         self.development_button.pack(fill="x", pady=(8, 2))
-        label(mission, "감독형 Codex · 지시를 복사하고 결과를 가져옵니다.", fg=MUTED).pack(fill="x")
+        label(mission, "자동 실행은 권한 경계 확인 전까지 차단됩니다. 감독형은 지시와 결과를 직접 전달합니다.",
+              fg=MUTED, wraplength=455).pack(fill="x")
         self.gates = label(mission)
         self.gates.pack(fill="x", pady=(3, 0))
         self.question_button = ttk.Button(mission, text="사용자 응답 대기 없음", state="disabled",
                                           command=self.answer_question)
         self.question_button.pack(fill="x", pady=(4, 0))
+
+        briefing = section(root, "다음 행동과 안전 경계")
+        briefing.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 10))
+        self.next_brief = label(briefing, size=12, bold=True, fg=CYAN, wraplength=690)
+        self.next_brief.pack(fill="x")
+        label(briefing, SAFETY_NOTE, fg=MUTED, wraplength=690).pack(fill="x", pady=(5, 0))
 
         safety = section(command, "03  /  SAFETY & BUDGET")
         safety.grid(row=0, column=2, sticky="nsew")
@@ -241,26 +278,33 @@ class CommandCenter:
         root.after(POLL_MS, self.poll)
 
     def theme(self):
+        available = {family.casefold(): family for family in font.families(self.root)}
+        family = next((available[name] for name in ("pretendard", "suit", "맑은 고딕", "malgun gothic")
+                       if name in available), "Segoe UI")
+        self.root.ui_font = family
         for control, options in {
             "Toplevel": {"background": BG},
             "Text": {"background": TILE, "foreground": INK, "insertBackground": INK,
                      "selectBackground": EDGE, "selectForeground": INK,
                      "highlightBackground": EDGE, "highlightColor": CYAN, "highlightThickness": 1,
-                     "font": "{Segoe UI} 11", "padX": 8, "padY": 6, "relief": "flat"},
+                     "font": f"{{{family}}} 11", "padX": 8, "padY": 6, "relief": "flat"},
             "Listbox": {"background": TILE, "foreground": INK, "selectBackground": EDGE,
                         "selectForeground": INK, "highlightBackground": EDGE, "highlightColor": CYAN,
-                        "highlightThickness": 1, "font": "{Segoe UI} 11"},
+                        "highlightThickness": 1, "font": f"{{{family}}} 11"},
         }.items():
             for key, value in options.items():
                 self.root.option_add(f"*{control}.{key}", value)
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure(".", background=TILE, foreground=INK, fieldbackground=TILE,
-                        bordercolor=EDGE, font=("Segoe UI", 10))
+                        bordercolor=EDGE, font=(family, 10))
         style.configure("TButton", padding=(8, 5))
         style.map("TButton", background=[("disabled", PANEL), ("pressed", EDGE), ("active", "#254665")],
                   foreground=[("disabled", MUTED)],
                   bordercolor=[("focus", CYAN)])
+        style.configure("Primary.TButton", background="#385ba0", foreground=INK, padding=(12, 8))
+        style.map("Primary.TButton", background=[("disabled", PANEL), ("pressed", "#2d4778"),
+                                                  ("active", "#4c70b2")], bordercolor=[("focus", CYAN)])
         for control in ("TEntry", "TCombobox", "TCheckbutton", "TNotebook.Tab"):
             style.map(control, background=[("disabled", PANEL), ("selected", EDGE), ("active", "#254665")],
                       bordercolor=[("invalid", RED), ("focus", CYAN)])
@@ -409,7 +453,9 @@ class CommandCenter:
                                fg=CYAN if first_run else RED)
         self.goal.configure(text=reason, wraplength=350)
         self.project_states.configure(text="UNKNOWN")
-        self.development_button.configure(text="개발 시작", state="disabled")
+        self.development_button.configure(text="감독형 개발 시작", state="disabled")
+        if hasattr(self, "next_brief"):
+            self.next_brief.configure(text=reason)
         if hasattr(self, "question_button"):
             self.question_button.configure(state="disabled")
         for widget in (self.gates, self.safety, self.resources):
@@ -446,7 +492,7 @@ class CommandCenter:
                                     fg=color(state))
         workflow = view["workflow"]
         handoff = view.get("supervised_handoff")
-        self.development_button.configure(text="개발 작업 열기" if handoff else "개발 시작",
+        self.development_button.configure(text="감독형 작업 이어보기" if handoff else "감독형 개발 시작",
                                           state="normal" if view["registration"] and workflow["requirements_count"]
                                           else "disabled")
         next_action = {
@@ -466,15 +512,16 @@ class CommandCenter:
         cycle_status = workflow["latest_cycle_state"]
         cycle_label = (f"\n최근 작업 · {cycle_status} ({workflow['latest_cycle_evidence']})"
                        if cycle_status else "")
-        self.project_states.configure(text="\n".join(
-            f"{view['project_names'][key]} · {status}" for key, status in
-            view["project_states"].items() if key == view["project_id"])
-            + f"\n요구사항 {workflow['requirements_count']}개"
-              f" · 현재 기준본 {workflow['requirements_baseline_count']}개"
-              f" · 기준 이후 등록 {workflow['pending_requirements_count']}개"
-              f"{cycle_label}\nManager · {manager_status}"
-              f"\n다음 단계 · {next_action}\n사용자 테스트 · {workflow['user_test_status']}"
-              + (" · 실제 검증 영수증 필요" if workflow["user_test_status"] == "NOT_AVAILABLE" else ""))
+        latest = max(view["requirements"], key=lambda item: item["registered_at"], default=None)
+        document_summary = ("최근 등록 · " + latest["path"][:65] + f" · 개정 {latest['version']}"
+                            if latest else "첫 요구사항을 작성하거나 문서로 등록하세요.")
+        self.project_states.configure(text=f"등록 요구사항 {workflow['requirements_count']}개\n{document_summary}",
+                                      wraplength=245)
+        _, stage_title, stage_next = handoff_stage(handoff)
+        if hasattr(self, "next_brief"):
+            waiting = view.get("user_question")
+            self.next_brief.configure(text=("사용자 질문에 답변하세요." if waiting else stage_next if handoff
+                                           else next_action))
         self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}",
                                fg=color(view["project_state"]))
         registration = view["registration"]
@@ -483,16 +530,17 @@ class CommandCenter:
         if configured:
             text = configured["goal"]
             goal = "개발 목표\n" + text[:380] + ("…" if len(text) > 380 else "")
-            goal += f"\n완료 기준 {len(configured['acceptance'])}개 · 자동 실행 차단"
+            criteria = configured["acceptance"]
+            goal += "\n완료 기준\n" + "\n".join("• " + line[:125] + ("…" if len(line) > 125 else "")
+                                                   for line in criteria[:3])
+            if len(criteria) > 3:
+                goal += f"\n외 {len(criteria) - 3}개 · 목표와 완료 기준 편집에서 확인"
         if handoff:
-            stages = {"supervised_requested": "계획 결과 대기", "supervised_imported": "계획 등록",
-                      "supervised_developer": "구현 결과 대기", "supervised_reviewer": "검토 결과 대기",
-                      "supervised_reviewed": "검증 준비", "supervised_verifier": "검증 결과 대기",
-                      "supervised_evidence": "산출물 확인 · 사용자 테스트 준비 미확인",
-                      "supervised_review_blocked": "재작업 또는 차단", "supervised_cancelled": "취소됨"}
-            goal += "\n감독형 작업 · " + stages.get(handoff["kind"], "확인 필요")
+            goal += "\n감독형 작업 · " + stage_title
             if handoff.get("artifacts"):
                 goal += "\n결과물 · " + ", ".join(handoff["artifacts"])[:250]
+        if getattr(self, "details_visible", False):
+            goal += f"\n자동 Manager · {manager_status}{cycle_label}"
         session = view["development"]
         if session and getattr(self, "details_visible", False):
             start, end = session["start"], session["end"]
@@ -1168,19 +1216,30 @@ class CommandCenter:
         project_id = self.view["project_id"]
         panel = self.panel()
         panel.title(f"감독형 Codex · {project_id}")
-        ttk.Label(panel, text="지시를 직접 전달하고 결과 JSON을 가져오세요. 자동 모델 호출은 차단 상태입니다.",
+        panel.geometry("780x680")
+        ttk.Label(panel, text="직접 전달 방식 · 이 앱은 Codex를 실행하거나 다른 창에 입력하지 않습니다.",
                   wraplength=660).pack(fill="x")
+        tracker = ttk.Frame(panel)
+        tracker.pack(fill="x", pady=8)
+        steps = []
+        for index, title in enumerate(("계획", "구현", "검토", "검증")):
+            tracker.columnconfigure(index, weight=1, uniform="handoff")
+            badge = label(tracker, bg=TILE, bold=True)
+            badge.grid(row=0, column=index, sticky="ew", padx=3, ipady=7)
+            steps.append((title, badge))
+        guide = label(panel, bg=BG, fg=CYAN, bold=True, wraplength=680)
+        guide.pack(fill="x")
         status = ttk.Label(panel, wraplength=660)
         status.pack(fill="x")
-        prompt = tk.Text(panel, height=11, width=82, wrap="word", state="disabled")
-        prompt.pack(fill="both", expand=True)
-        ttk.Label(panel, text="결과 JSON · 개인 요구사항과 응답은 이 창에서만 검토하세요.").pack(fill="x")
-        response = tk.Text(panel, height=9, width=82, wrap="word")
-        response.pack(fill="both", expand=True)
+        ttk.Label(panel, text="지시 만들기 → 복사 → 기존 Codex에 직접 붙여넣기").pack(fill="x")
+        prompt = self.editor_box(panel, height=9, state="disabled")
+        ttk.Label(panel, text="Codex가 반환한 JSON을 붙여넣거나 파일로 가져오세요.").pack(fill="x")
+        response = self.editor_box(panel, height=7)
         buttons = ttk.Frame(panel)
         buttons.pack(fill="x")
         shown = self.view["supervised_handoff"]
-        ttk.Label(panel, text="Manager가 제안할 수 있는 상대 파일 경로 · 쉼표로 구분").pack(fill="x", before=buttons)
+        ttk.Label(panel, text="계획에서 제안할 파일 · 프로젝트 기준 상대경로를 쉼표로 구분 (예: src/app.py)").pack(
+            fill="x", before=buttons)
         path_entry = ttk.Entry(panel, width=82)
         path_entry.pack(fill="x", before=buttons)
         path_entry.insert(0, ", ".join(self.view["registration"]["data"]["requested_scope"]["files"]))
@@ -1226,9 +1285,10 @@ class CommandCenter:
                 shown = latest_handoff(self.reader.ledger.read(), project_id)
                 if action in ("start", "prompt", "developer", "developer_submit", "verifier"):
                     show(result)
-                elif action == "cancel":
+                else:
                     show(None)
                 status.configure(text=describe())
+                update_steps()
                 self.refresh()
             except (Blocked, OSError, sqlite3.Error, ValueError) as error:
                 status.configure(text=str(error) if isinstance(error, Blocked) else "입력 또는 로컬 상태를 확인하세요.")
@@ -1294,21 +1354,50 @@ class CommandCenter:
             if setup or replica:
                 apply("developer", pasted(), replica_path=replica)
 
-        for title, command in (
-            ("Manager 시작", lambda: apply("start", paths=[path.strip() for path in path_entry.get().split(",")
-                                                          if path.strip()])),
-            ("지시 다시 열기", lambda: apply("prompt")),
-            ("지시 복사", copy), ("대기 취소", lambda: apply("cancel")),
+        controls = {}
+        for key, title, command in (
+            ("start", "계획 지시 만들기", lambda: apply("start", paths=[path.strip() for path in path_entry.get().split(",")
+                                                                   if path.strip()])),
+            ("prompt", "계획 지시 다시 열기", lambda: apply("prompt")),
+            ("copy", "지시 복사", copy), ("cancel", "대기 취소", lambda: apply("cancel")),
         ):
-            ttk.Button(buttons, text=title, command=command).pack(side="left")
+            controls[key] = ttk.Button(buttons, text=title, command=command)
+            controls[key].pack(side="left", padx=3)
         actions = ttk.Frame(panel)
         actions.pack(fill="x")
-        for title, command in (
-            ("붙여넣은 결과 확인", lambda: import_result(pasted())), ("JSON 파일 가져오기", import_file),
-            ("Developer 지시 준비", developer), ("Verifier 빌드 계획", verifier),
+        for key, title, command in (
+            ("submit", "결과 확인", lambda: import_result(pasted())), ("file", "JSON 파일 가져오기", import_file),
+            ("developer", "구현 지시 준비", developer), ("verifier", "검증 계획 준비", verifier),
         ):
-            ttk.Button(actions, text=title, command=command).pack(side="left")
+            controls[key] = ttk.Button(actions, text=title, command=command)
+            controls[key].pack(side="left", padx=3)
+
+        def update_steps():
+            kind = shown["kind"] if shown else None
+            index, title, next_step = handoff_stage(shown)
+            live = bool(shown and time() < shown.get("expires", 0))
+            accepts = live and kind in ("supervised_requested", "supervised_developer",
+                                        "supervised_reviewer", "supervised_verifier")
+            waiting = accepts or (live and kind == "supervised_reviewed")
+            planned = kind == "supervised_imported" and shown.get("disposition") == "PROPOSED"
+            if kind == "supervised_imported" and not planned:
+                next_step = "대시보드의 질문에 답한 뒤 새 계획 지시를 만드세요."
+            if shown and "expires" in shown and not live and kind not in ("supervised_evidence", "supervised_review_blocked"):
+                next_step = "기존 요청이 만료되었습니다. 새 계획 지시를 만드세요."
+            for position, (name, badge) in enumerate(steps):
+                current = position == index
+                badge.configure(text=f"{position + 1:02d}  {name}", bg="#385ba0" if current else TILE,
+                                fg=INK if current else MUTED)
+            guide.configure(text=f"현재 · {title}\n다음 · {next_step}")
+            enabled = {"start": not waiting, "prompt": live and kind == "supervised_requested",
+                       "copy": bool(prompt.get("1.0", "end-1c")), "cancel": waiting,
+                       "submit": accepts, "file": accepts, "developer": live and planned,
+                       "verifier": live and kind == "supervised_reviewed"}
+            for key, button in controls.items():
+                button.configure(state="normal" if enabled[key] else "disabled")
+
         status.configure(text=describe())
+        update_steps()
 
     def requirement_settings(self):
         if self.view is None or not self.view["registration"]:
@@ -1317,6 +1406,8 @@ class CommandCenter:
         project_id = self.view["project_id"]
         panel = self.panel()
         panel.title("DevOrchestra · 요구사항 문서")
+        label(panel, "목표와 완료 기준은 프로젝트 전체를 안내합니다. 요구사항 문서는 이번 차수에 수행할 구체적인 작업을 설명합니다.",
+              bg=BG, wraplength=690).pack(fill="x", pady=(0, 8))
         catalog = Catalog(self.reader.ledger)
         panel.geometry("780x690")
         listing = ttk.Frame(panel)
@@ -1327,6 +1418,10 @@ class CommandCenter:
         role = ttk.Combobox(panel, values=tuple(REQUIREMENT_NAMES.values()), state="readonly")
         role.current(1)
         role.pack(fill="x")
+        role_help = label(panel, REQUIREMENT_HELP["FEATURE"], bg=BG, fg=CYAN, wraplength=690)
+        role_help.pack(fill="x", pady=(3, 7))
+        role.bind("<<ComboboxSelected>>", lambda _event: role_help.configure(
+            text=REQUIREMENT_HELP[REQUIREMENT_ROLES[role.current()]]))
         status = ttk.Label(panel, text="관련 항목을 선택한 뒤 문서를 추가하면 두 기록을 연결합니다.")
         status.pack(fill="x")
         history = []
