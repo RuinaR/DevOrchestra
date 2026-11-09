@@ -1,6 +1,7 @@
 """Trusted, revisioned project metadata. Registration grants no capabilities."""
 from datetime import datetime, timezone
 from hashlib import sha256
+import os
 from pathlib import Path, PureWindowsPath
 import re
 
@@ -19,6 +20,7 @@ FIELDS = frozenset(("project_id", "repository", "local_path", "documents", "git_
                     "roles", "budget", "requested_scope", "git_policy", *TEXT_FIELDS, *LIST_FIELDS))
 REQUIREMENT_ROLES = ("GOAL", "FEATURE", "DESIGN", "BUG", "IMPROVEMENT")
 MAX_REQUIREMENT_BYTES = 256 * 1024
+MAX_MANAGER_REQUIREMENT_BYTES = 512 * 1024
 
 
 def _requirement_path(relative):
@@ -28,6 +30,58 @@ def _requirement_path(relative):
                    or part.endswith((".", " ")) for part in relative.split("/"))):
         raise ValueError("Use a project-relative TXT or Markdown requirement path")
     return relative
+
+
+def _read_requirement(root, relative, state_boundary):
+    target = root / _requirement_path(relative)
+    check_path(target)
+    if not target.is_file():
+        raise Blocked("Requirement is missing")
+    actual = target.resolve(strict=True)
+    if not actual.is_relative_to(root.resolve(strict=True)) or actual.is_relative_to(state_boundary.resolve()):
+        raise Blocked("Requirement is outside the document boundary")
+    check_path(actual)
+    before = actual.lstat()
+    with actual.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not opened.st_ino or not os.path.samestat(before, opened):
+            raise Blocked("Requirement file identity changed")
+        content = stream.read(MAX_REQUIREMENT_BYTES + 1)
+        after = os.fstat(stream.fileno())
+        check_path(actual)
+        if (not os.path.samestat(after, actual.lstat())
+                or (opened.st_size, opened.st_mtime_ns) != (after.st_size, after.st_mtime_ns)):
+            raise Blocked("Requirement file changed during read")
+    if len(content) > MAX_REQUIREMENT_BYTES or not content.decode("utf-8-sig").strip():
+        raise ValueError("Use a nonempty UTF-8 document of at most 256 KiB")
+    return content
+
+
+def read_frozen_requirements(catalog, project_id, references, state_boundary):
+    """Read only registered, frozen revisions. A changed file needs a new revision."""
+    if not references:
+        return []
+    project = catalog["projects"].get(project_id)
+    if not project or not project["data"]["local_path"]:
+        raise Blocked("Requirement project is unregistered")
+    root = Path(project["data"]["local_path"])
+    registered = {item["id"]: item for item in catalog.get("requirements", {}).get(project_id, ())}
+    documents, seen, total = [], set(), 0
+    for ref in references:
+        if registered.get(ref["id"]) != ref or ref["id"] in seen:
+            raise Blocked("Requirement reference is not a unique registered revision")
+        seen.add(ref["id"])
+        try:
+            content = _read_requirement(root, ref["path"], state_boundary)
+        except (OSError, ValueError):
+            raise Blocked("Frozen requirement is unreadable") from None
+        if sha256(content).hexdigest() != ref["sha256"]:
+            raise Blocked("Frozen requirement changed; register a revision for a new session")
+        total += len(content)
+        if total > MAX_MANAGER_REQUIREMENT_BYTES:
+            raise Blocked("Manager requirement input exceeds its size limit")
+        documents.append({"ref": ref, "text": content.decode("utf-8-sig")})
+    return documents
 
 
 def _text(value, limit=512):
@@ -197,24 +251,12 @@ class Catalog:
             if not project or not project["data"]["local_path"]:
                 raise Blocked("Register the original project folder first")
             root = Path(project["data"]["local_path"])
-            target = root / relative
-            check_path(target)
-            if not target.is_file():
-                raise Blocked("Requirement is missing")
-            actual = target.resolve(strict=True)
-            if (not actual.is_relative_to(root.resolve(strict=True))
-                    or actual.is_relative_to(self.ledger.state_boundary.resolve())):
-                raise Blocked("Requirement is missing or outside the document boundary")
             history = view.get("requirements", {}).get(project_id, [])
             latest = next((item for item in reversed(history)
                            if item["path"].casefold() == relative.casefold()), None)
             if related is not None and not any(item["id"] == related for item in history):
                 raise Blocked("Related requirement does not belong to this project")
-            check_path(actual)
-            with actual.open("rb") as stream:
-                content = stream.read(MAX_REQUIREMENT_BYTES + 1)
-            if len(content) > MAX_REQUIREMENT_BYTES or not content.decode("utf-8-sig").strip():
-                raise ValueError("Use a nonempty UTF-8 document of at most 256 KiB")
+            content = _read_requirement(root, relative, self.ledger.state_boundary)
             checksum = sha256(content).hexdigest()
             if latest and (latest["sha256"], latest["role"], latest["related"]) == (checksum, role, related):
                 return latest

@@ -95,6 +95,18 @@ def parse_role_output(role, payload):
     return value
 
 
+def confirm_task_plan(payload, *, allowed_files, acceptance, budget, authority_ref):
+    """Validate a plan against Controller-selected limits; the result grants no capabilities."""
+    plan = parse_role_output("manager-planning", payload)
+    paths = plan["proposed_paths"]
+    if (plan["disposition"] != "PROPOSED" or not paths or len(set(paths)) != len(paths)
+            or any(path not in allowed_files for path in paths)
+            or not acceptance or plan["acceptance_checks"] != list(acceptance)):
+        raise Blocked("Manager plan exceeds the Controller task contract")
+    return {"paths": paths, "acceptance": list(acceptance), "budget": dict(budget),
+            "authority_ref": authority_ref, "proposal_ref": digest(plan)}
+
+
 def bind_instructions(request, layers):
     """Bind verified, Controller-supplied references. This does not load the files."""
     layers = tuple(layers)

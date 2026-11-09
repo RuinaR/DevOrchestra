@@ -336,7 +336,8 @@ class CommandCenter:
             view["project_states"].items() if key == view["project_id"])
             + f"\n요구사항 {workflow['requirements_count']}개"
               f" · 최근 작업 기준 {len(workflow['cycle_requirements'])}개"
-              f"{cycle_label}\n사용자 테스트 · {workflow['user_test_status']}")
+              f"{cycle_label}\n사용자 테스트 · {workflow['user_test_status']}"
+              + (" · 실제 검증 영수증 필요" if workflow["user_test_status"] == "NOT_AVAILABLE" else ""))
         self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}",
                                fg=color(view["project_state"]))
         registration = view["registration"]

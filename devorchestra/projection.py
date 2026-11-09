@@ -94,6 +94,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         recovery_state = "RECOVERY_REQUIRED"
     elif shutdown["state"] == "READY" and not shutdown["resume_problem"]:
         recovery_state = "RESUMABLE"
+    session = session_view(events, project_id)
     return {
         "schema_version": 1,
         "as_of_utc": observed_at,
@@ -111,6 +112,8 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
             "latest_cycle_state": latest.get("state"),
             "latest_cycle_evidence": "SYNTHETIC" if start else "NONE",
             "user_test_status": "NOT_AVAILABLE",
+            "user_test_block_reason": "TRUSTED_LIVE_VERIFIER_RECEIPT_REQUIRED",
+            "previous_cycle": session["start"].get("previous_cycle") if session else None,
         },
         "shutdown": shutdown,
         "recovery_state": recovery_state,
@@ -119,7 +122,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "setup": catalog.get("setups", {}).get(project_id),
         "catalog_version": catalog["version"],
         "configured_global_budget": catalog["global_budget"],
-        "development": session_view(events, project_id),
+        "development": session,
         "global_development": session_view(events),
         "project_state": view["state"],
         "project_states": {key: project_view(events, key)["state"] for key in names},

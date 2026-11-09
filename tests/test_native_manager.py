@@ -12,7 +12,7 @@ from unittest.mock import patch
 from devorchestra.adapter import Budget, RoleRequest, Scope
 from devorchestra.app_server import INSPECTION_CONFIG, _owned_stdio
 from devorchestra.lease import Blocked
-from devorchestra.ledger import Ledger
+from devorchestra.ledger import Ledger, digest
 from devorchestra.native_manager import ManagerApproval
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
@@ -120,6 +120,19 @@ class NativeManagerTests(unittest.TestCase):
     def test_live_path_is_blocked_before_any_intent(self):
         with self.assertRaisesRegex(Blocked, "GENERAL_ADMISSION_UNVERIFIED"):
             self.runner.plan_native_manager(self.approval, self.request)
+        self.assertEqual([], self.ledger.read())
+
+    def test_manager_documents_must_match_the_approved_request_hash_binding(self):
+        from devorchestra.native_manager import prepare_manager
+
+        context = {"project_id": self.request.project_id, "goal": self.request.goal,
+                   "requirements": [{"ref": {"id": "synthetic"}, "text": "Owner-selected fixture"}]}
+        with self.assertRaisesRegex(Blocked, "context is not bound"):
+            prepare_manager(self.ledger, self.approval, self.request, project_context=context)
+        request = replace(self.request, verified_input_refs=(digest(context),))
+        approval = replace(self.approval, request_hash=bind_instructions(request, self.layers))
+        messages, _ = prepare_manager(self.ledger, approval, request, project_context=context)
+        self.assertIn("Owner-selected fixture", messages[-1]["text"])
         self.assertEqual([], self.ledger.read())
 
     def test_valid_turn_drains_commits_and_does_not_admit_developer(self):

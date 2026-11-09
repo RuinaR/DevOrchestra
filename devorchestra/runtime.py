@@ -8,13 +8,13 @@ from uuid import uuid4
 
 from .adapter import (Budget, MockAdapter, NativeReceipt, Outcome, RoleRequest, Scope,
                       WindowsNativeCodexAdapter, normalize_mock)
-from .catalog import Catalog, latest_requirements
+from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .development import session_view, usage_totals, validate_proposal
 from .event_audit import Binding, FIXTURE_USAGE, Packet
 from .event_journal import EventJournal, OPEN_ROLE_EVENTS
 
 from .lease import Blocked, SlotBlocked, execution_slot
-from .ledger import digest
+from .ledger import canonical, digest
 from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
 from .shutdown import HELD, UNKNOWN, checkpoint, shutdown_state, transition
@@ -53,6 +53,7 @@ class Scenario(str, Enum):
     NORMAL = "normal"
     AGENT_ERROR = "agent-error"
     REVIEW_FAIL = "review-fail"
+    REVIEW_REWORK = "review-rework"
     VERIFY_FAIL = "verify-fail"
     TIME_LIMIT = "time-limit"
     TOKEN_LIMIT = "token-limit"
@@ -150,6 +151,12 @@ def mock_role(phase, scenario, history):
                 "diff": {"path": "fixture.txt", "before": "draft", "after": after}}
     if phase is State.REVIEWING:
         failed = scenario is Scenario.REVIEW_FAIL
+        if scenario is Scenario.REVIEW_REWORK:
+            return {"decision": "Injected review rework", "result": "OK",
+                    "review_output": {"decision": "REWORK", "coverage_gaps": [], "findings": [{
+                        "severity": "HIGH", "location": "fixture.txt", "observed": "Synthetic review finding",
+                        "impact": "Fixture acceptance incomplete", "required_fix": "Resolve fixture finding",
+                    }]}}
         return {"decision": "Injected review rejection" if failed else "Fixture scope accepted",
                 "result": "FAIL" if failed else "OK"}
     if phase is State.VERIFYING:
@@ -200,13 +207,30 @@ class Runner:
     def __init__(self, ledger):
         self.ledger = ledger
 
+    def manager_context(self, project_id, development_id):
+        """Assemble owner-selected documents in memory from a frozen session."""
+        events, _ = self.ledger.snapshot()
+        view = session_view(events, project_id)
+        if not view or view["start"]["development_id"] != development_id:
+            raise Blocked("Explicit latest project session required")
+        start = view["start"]
+        frozen = start["frozen"]
+        return {
+            "project_id": project_id, "development_id": development_id,
+            "goal": frozen["goal"], "acceptance": frozen["acceptance"],
+            "requirements": read_frozen_requirements(
+                Catalog(self.ledger).read(), project_id, frozen["requirements"], self.ledger.state_boundary,
+            ),
+            "previous_cycle": start.get("previous_cycle"),
+        }
+
     def plan_native_manager(self, approval, request):
         """Internal one-shot planning entry; never grants another role."""
         from pathlib import Path
         from .native_manager import (
             ManagerApproval, ROLE, prepare_manager, require_live_manager_admission, run_owned_manager,
         )
-        from .role_contract import TransitionEvidence, decide_transition
+        from .role_contract import TransitionEvidence, confirm_task_plan, decide_transition
 
         require_live_manager_admission()
         if (type(approval) is not ManagerApproval or type(request) is not RoleRequest
@@ -224,10 +248,22 @@ class Runner:
                                and event["run_id"] == request.run_id)
                            for event in events)):
                 raise Blocked("Manager requires idle, unused admission")
-            setup = Catalog(self.ledger).read()["setups"].get(request.project_id)
+            catalog = Catalog(self.ledger).read()
+            setup = catalog["setups"].get(request.project_id)
             if not setup or Path(setup["replica"]) != approval.replica:
                 raise Blocked("Manager replica does not match Controller registration")
-            prepare_manager(self.ledger, approval, request)
+            context = {}
+            if latest_requirements(catalog, request.project_id):
+                project_session = session_view(events, request.project_id)
+                if not project_session:
+                    raise Blocked("Manager requires frozen project requirements")
+                context["project_context"] = self.manager_context(
+                    request.project_id, project_session["start"]["development_id"],
+                )
+                frozen_refs = [item["ref"] for item in context["project_context"]["requirements"]]
+                if frozen_refs != latest_requirements(catalog, request.project_id):
+                    raise Blocked("Manager requires a current requirements baseline")
+            prepare_manager(self.ledger, approval, request, **context)
             fields = {key: getattr(request, key) for key in (
                 "project_id", "task_id", "run_id", "generation", "agent_run_id", "context_id", "role",
             )}
@@ -246,7 +282,11 @@ class Runner:
 
             def before_send():
                 nonlocal count, head, dispatched
-                prepare_manager(self.ledger, approval, request)
+                if context and self.manager_context(
+                    request.project_id, context["project_context"]["development_id"],
+                ) != context["project_context"]:
+                    raise Blocked("Manager requirements changed before dispatch")
+                prepare_manager(self.ledger, approval, request, **context)
 
                 def admit(current):
                     if (dispatched or time() >= request.deadline_utc_epoch
@@ -259,7 +299,7 @@ class Runner:
                 dispatched = True
 
             try:
-                proposal = run_owned_manager(self.ledger, approval, request, before_send, cancelled)
+                proposal = run_owned_manager(self.ledger, approval, request, before_send, cancelled, **context)
                 if not dispatched:
                     raise Blocked("Manager dispatch receipt missing")
             except Exception:
@@ -268,7 +308,6 @@ class Runner:
             result = {**fields, "kind": "native_manager_result", "owned_tree": "DRAINED",
                       "proposal_sha256": digest(proposal), "usage": "UNKNOWN", "authentication": "UNKNOWN",
                       "next_role_admission": "BLOCKED"}
-            from .ledger import canonical
             # Decide only from the verified result inside the commit transaction.
             def settle(current, current_head):
                 if current_head != head and (
@@ -286,6 +325,22 @@ class Runner:
                     next_role_and_reserve_funded=False, rework_remaining=0, repeated_failure=False,
                 )
                 result["transition_preview"] = decide_transition(ROLE, canonical(proposal).encode(), evidence)
+                if context and proposal["disposition"] == "PROPOSED":
+                    frozen = project_session["start"]["frozen"]
+                    # Catalog scope is a ceiling for review; it does not authorize Developer access.
+                    configured = catalog["projects"][request.project_id]["data"]
+                    try:
+                        candidate = confirm_task_plan(
+                            canonical(proposal).encode(), allowed_files=configured["requested_scope"]["files"],
+                            acceptance=frozen["acceptance"], budget=frozen["budget"],
+                            authority_ref=approval.request_hash,
+                        )
+                    except Blocked:
+                        result["transition_preview"] = "BLOCKED"
+                        result["task_candidate_status"] = "OUTSIDE_CONTROLLER_CONTRACT"
+                    else:
+                        result["task_candidate_status"] = "OWNER_SCOPE_REQUIRED"
+                        result["task_candidate_ref"] = digest(candidate)
                 return result
 
             try:
@@ -671,11 +726,21 @@ class Runner:
                     validate_budget(task_limits)
                 if type(cycles) is not int or not 1 <= cycles <= 100 or type(retries) is not int or not 0 <= retries < cycles:
                     raise ValueError("Invalid session cycle or retry limits")
-                frozen = freeze_project(project, Catalog(self.ledger).read())
+                catalog = Catalog(self.ledger).read()
+                frozen = freeze_project(project, catalog)
+                read_frozen_requirements(catalog, project, frozen["requirements"], self.ledger.state_boundary)
+                prior = session_view(events, project)
+                previous_cycle = None
+                if prior and prior["end"] and prior["current"]:
+                    last = prior["current"][-1]
+                    if last["kind"] == "role_finished" and last["state"] == "COMPLETED":
+                        previous_cycle = {"development_id": prior["start"]["development_id"],
+                                          "run_id": last["run_id"], "handoff_ref": last["handoff_ref"],
+                                          "evidence": "SYNTHETIC"}
                 now = time()
                 return record("session_started", project, uuid4().hex, frozen=frozen,
                               goal_hash=digest([frozen["goal"], frozen["acceptance"], frozen["guidance_hash"]]),
-                              goal=frozen["goal"], acceptance=frozen["acceptance"],
+                              goal=frozen["goal"], acceptance=frozen["acceptance"], previous_cycle=previous_cycle,
                               limits=limits, task_limits=task_limits, max_cycles=cycles, max_retries=retries,
                               started_epoch=now, deadline=now + limits["seconds"])
             if not view or view["start"]["development_id"] != development_id:
@@ -697,12 +762,16 @@ class Runner:
             selection = "INITIAL"
             if previous:
                 last = previous[-1]
-                if last["state"] != "COMPLETED" or view["usage_kind"] == "UNKNOWN":
+                rework = (last["kind"] == "role_finished" and last.get("handoff") == "NEW_REWORK_CYCLE"
+                          and last.get("role") == "Reviewer" and last.get("scope_released") is True
+                          and last.get("owned_children") == []
+                          and last.get("stream_settlement", {}).get("synthetic_usage_final") is True)
+                if (last["state"] != "COMPLETED" and not rework) or view["usage_kind"] == "UNKNOWN":
                     return finish("BLOCKED", last.get("reason", f"PREVIOUS_{last['state']}"))
                 approval = next((e for e in reversed(previous) if e["kind"] == "owner_approved_mock"), None)
                 if approval is None or not approval["issued"] <= time() < approval["expires"]:
                     return finish("BLOCKED", "PREVIOUS_APPROVAL_EXPIRED")
-                if "stream_settlement" in last:
+                if not rework and "stream_settlement" in last:
                     roles = [e for e in previous if e["kind"] == "role_finished"]
                     if (len(roles) != len(PHASES) or any(
                         not e.get("stream_settlement", {}).get("synthetic_usage_final")
@@ -710,12 +779,19 @@ class Runner:
                         or e.get("result") not in ("OK", "PASS") for e in roles
                     )):
                         return finish("BLOCKED", "INCOMPLETE_ROLE_EVIDENCE")
-                proof = next((e["handoff_ref"] for e in previous if e["kind"] == "role_finished"
-                              and e.get("role") == "Verifier" and e.get("result") == "PASS"), None)
-                try:
-                    selection = validate_proposal(last.get("manager_proposal"), start["goal_hash"], proof)
-                except Blocked:
-                    return finish("BLOCKED", "INVALID_MANAGER_PROPOSAL")
+                if rework:
+                    selection = "REWORK"
+                    if any(event.get("review_fingerprint") == last["review_fingerprint"]
+                           and event["run_id"] != last["run_id"]
+                           and event.get("development_id") == development_id for event in events):
+                        return finish("NO_PROGRESS", "REPEATED_REVIEW_FINDING")
+                else:
+                    proof = next((e["handoff_ref"] for e in previous if e["kind"] == "role_finished"
+                                  and e.get("role") == "Verifier" and e.get("result") == "PASS"), None)
+                    try:
+                        selection = validate_proposal(last.get("manager_proposal"), start["goal_hash"], proof)
+                    except Blocked:
+                        return finish("BLOCKED", "INVALID_MANAGER_PROPOSAL")
                 if selection not in ("NEXT", "REWORK"):
                     return finish(selection, f"MANAGER_{selection}")
                 if selection == "REWORK" and view["retries"] >= start["max_retries"]:
@@ -1097,8 +1173,34 @@ class _Session:
             next_state = State.BLOCKED
             result = {**result, "reason": "APPROVAL_EXPIRED"}
         if self.development_id and phase is State.PLANNING and next_state is State.DEVELOPING:
+            from .role_contract import confirm_task_plan
+            # The synthetic plan uses only fixture authority, including for registered projects.
+            plan = {"disposition": "PROPOSED", "priority_reason": "Synthetic workflow",
+                    "task_spec": result["decision"], "proposed_paths": ["fixture.txt"],
+                    "acceptance_checks": ["fixture-transition"], "stop_conditions": ["Fixture failure"]}
+            task = confirm_task_plan(canonical(plan).encode(), allowed_files=("fixture.txt",),
+                                     acceptance=("fixture-transition",), budget=task_budget,
+                                     authority_ref=approval["approval_id"])
             result["selected_task"] = {"goal_hash": start["goal_hash"], "cycle": start["cycle"],
-                                       "acceptance": start["acceptance"], "basis": start["selection_ref"]}
+                                       "acceptance": start["acceptance"], "basis": start["selection_ref"],
+                                       "fixture_contract": task}
+        if self.development_id and phase is State.DEVELOPING and next_state is State.REVIEWING:
+            task = prior.get("selected_task", {}).get("fixture_contract") if prior else None
+            # Older mock runs only ever had authority over this same fixed fixture.
+            paths = task["paths"] if task else ("fixture.txt",)
+            if result.get("diff", {}).get("path") not in paths:
+                next_state = State.BLOCKED
+                result["reason"] = "FIXTURE_CHANGE_OUTSIDE_TASK_CONTRACT"
+        transition_handoff = next_state.value
+        if self.development_id and phase is State.REVIEWING and next_state is State.VERIFYING and "review_output" in result:
+            from .role_contract import TransitionEvidence, decide_transition
+            # The scheduler acts on this preview only after the finish event commits.
+            transition_handoff = decide_transition(
+                "reviewer", canonical(result["review_output"]).encode(),
+                TransitionEvidence(True, True, True, True, True, 1, False),
+            )
+            next_state = State.FAILED
+            result["review_fingerprint"] = digest(result.pop("review_output"))
         if self.development_id and next_state is State.COMPLETED:
             proof = prior["handoff_ref"] if (prior and prior.get("role") == "Verifier"
                                               and prior.get("result") == "PASS") else None
@@ -1124,7 +1226,7 @@ class _Session:
             "role_finished", next_state, **evidence, **result, elapsed_seconds=elapsed,
             commands=[], exit_code="NOT_APPLICABLE", resource_peaks="UNKNOWN",
             measured_tokens="NOT_APPLICABLE", synthetic_tokens=settlement["synthetic_tokens"],
-            cost="NOT_APPLICABLE", retries=0, handoff=next_state.value,
+            cost="NOT_APPLICABLE", retries=0, handoff=transition_handoff if phase is State.REVIEWING else next_state.value,
             usage_kind="SYNTHETIC", estimated_tokens="UNKNOWN",
             synthetic_cost_microunits=settlement["synthetic_cost_microunits"],
             tool_audit=tool_audit, diff_ref=digest(result["diff"]) if "diff" in result else None,
