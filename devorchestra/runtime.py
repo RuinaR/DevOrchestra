@@ -293,12 +293,18 @@ class Runner:
             return result, proposal
 
     def inspect_native(self, approval):
-        """Internal owner entry for a single model-free App Server handshake."""
+        """Internal owner entry for a model-free handshake or fixed access probe."""
         from .app_server import NativeInspectionApproval, open_app_server, prepare_inspection
+        from .mxc_launcher import CLI_HASH, CLI_VERSION
+        from .native_access_probe import NativeAccessApproval, command_request, prepare_probe, probe_receipt
 
+        access = approval if type(approval) is NativeAccessApproval else None
+        if access:
+            approval = access.inspection
         if (type(approval) is not NativeInspectionApproval
                 or not re.fullmatch(r"[0-9a-f]{32}", approval.request_id)
-                or not time() < approval.expires_epoch):
+                or not time() < approval.expires_epoch
+                or (access and not re.fullmatch(r"[0-9a-f]{64}", access.powershell_sha256))):
             raise Blocked("Current App Server inspection approval required")
         with execution_slot() as abandoned:
             events, tail = self.ledger.snapshot(recover_journal=True)
@@ -308,10 +314,17 @@ class Runner:
                     or (development and not development["end"])
                     or any(event.get("request_id") == approval.request_id for event in events)):
                 raise Blocked("App Server inspection requires idle, unused admission")
-            work, environment, instructions = prepare_inspection(approval, self.ledger.local_directory("temp"))
+            work, environment, instructions = prepare_inspection(
+                approval, self.ledger.local_directory("temp"), access_probe=bool(access),
+            )
             fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",
                       "source": "WINDOWS_NATIVE_CODEX", "request_id": approval.request_id,
                       "instruction_sources": instructions}
+            if access:
+                command = command_request(work, prepare_probe(work, access.powershell_sha256))
+                fields.update(probe_kind="RESTRICTED_FILE_ACCESS", command_hash=digest(command),
+                              cli_sha256=CLI_HASH, cli_version=CLI_VERSION,
+                              powershell_sha256=access.powershell_sha256)
 
             def admit(current):
                 require_admission(current)
@@ -328,13 +341,31 @@ class Runner:
             try:
                 if cancelled():
                     raise Blocked("App Server inspection cancelled")
-                with open_app_server(approval.binary, work, environment, 15, cancelled) as server:
+                options = {"explicit_mxc": True} if access else {}
+                with open_app_server(approval.binary, work, environment, 15, cancelled, **options) as server:
                     policy = server.inspect_policy()
+                    if access:
+                        if policy != {"sandbox": "read-only", "approval": "never",
+                                      "managed_requirements_present": False}:
+                            raise Blocked("Access probe App Server policy mismatch")
+                        if command_request(work, prepare_probe(work, access.powershell_sha256)) != command:
+                            raise Blocked("Approved access probe changed")
+
+                        def admit_command(current):
+                            if time() >= approval.expires_epoch or shutdown_state(current)["state"] in HELD:
+                                raise Blocked("Access probe admission closed")
+
+                        count, head = self.ledger.append(count, head, {
+                            **fields, "kind": "native_inspection_dispatch",
+                        }, allow_shutdown=True, admission=admit_command)
+                        wire_result = server.request(3, "command/exec", command)
             except Exception:
                 # Preserve the durable unresolved intent without raw process errors.
                 raise Blocked("App Server inspection or owned drain unverified") from None
             result = {**fields, "kind": "native_inspection_result", "policy": policy,
                       "instruction_loading": "NOT_VERIFIED", "owned_tree": "DRAINED"}
+            if access:
+                result["access"] = probe_receipt(wire_result, work, command)
             self.ledger.append(count, head, result, allow_shutdown=True)
             return result
 

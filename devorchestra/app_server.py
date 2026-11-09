@@ -32,7 +32,7 @@ class NativeInspectionApproval:
     lab_root: Path
 
 
-def prepare_inspection(approval, lab_parent):
+def prepare_inspection(approval, lab_parent, *, access_probe=False):
     """Accept only an isolated, pre-staged lab with no credentials or plugins."""
     from .mxc_launcher import _known_folder
 
@@ -41,11 +41,14 @@ def prepare_inspection(approval, lab_parent):
     for path in (root, home, work, temporary):
         check_path(path)
     local = _known_folder(0x1C)
+    root_entries = {"home", "work", "tmp"} | ({"protected"} if access_probe else set())
+    work_entries = {"AGENTS.md"} | ({"allowed.txt"} if access_probe else set())
     if (root.parent != lab_parent
             or not root.name.startswith("app-server-")
-            or {p.name for p in root.iterdir()} != {"home", "work", "tmp"}
+            or (access_probe and root.name != f"app-server-{approval.request_id}")
+            or {p.name for p in root.iterdir()} != root_entries
             or {p.name for p in home.iterdir()} != {"AGENTS.md", "config.toml"}
-            or {p.name for p in work.iterdir()} != {"AGENTS.md"}
+            or {p.name for p in work.iterdir()} != work_entries
             or any(temporary.iterdir())):
         raise Blocked("App Server lab inventory rejected")
     config = home / "config.toml"

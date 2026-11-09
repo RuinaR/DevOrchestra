@@ -1,5 +1,15 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
+## P2.43 모델 없는 App Server 접근 검사
+
+다음 실측은 Controller 내부 `inspect_native(NativeAccessApproval(...))` 한 번이다. 기존 CLI 고정 해시 및 서명을 확인하고 명시적 MXC로 App Server를 Windows Job에 생성한다. `initialize`, `initialized`, `config/read`, `configRequirements/read` 뒤 `command/exec` 한 건을 보낸다. 관리 요구사항이 확인되거나 기대 프로필과 다르면 명령 전송을 차단한다. 모델·계정 RPC 및 외부 서비스 요청은 호출하지 않는다. 실제 네트워크 차단은 이 검사 범위 밖이다. [App Server 명령 계약](https://learn.chatgpt.com/docs/app-server#command-execution)
+
+별도 승인 시 새 `.ai-local/temp/app-server-<approval-id>` 아래 합성 `home`, `tmp`, `work`, `protected`만 준비한다. home에는 합성 AGENTS.md와 고정 read-only/never 설정을 두고 인증 파일은 넣지 않는다. work에는 합성 AGENTS.md와 allowed.txt, protected에는 protected.txt만 둔다. 표식 바이트 및 호스트 대조를 확인한다. 승인 해시의 System32 Windows PowerShell을 프로필 없는 고정 인자로 시작하고, `native_access_probe.py`의 인코딩된 파일 명령만 실행한다. 작업 경로 읽기 허용, 같은 파일 쓰기 거부, 보호 파일 읽기 거부(Win32 5), 두 표식 불변을 각각 확인한다. 접근 성공 또는 파일 변조를 별도 실패로 기록한다. 파일 부재·런타임 오류·실행 시작 실패는 거부 증거가 아니다.
+
+명령 상한 5초, App Server 통신 상한 15초, Job 상한 512 MiB와 프로세스 8개다. 프로세스 수는 보조 프로세스용 상한이다. 취소·시간 초과·초기화 불명 시 소유 Job만 정리하며, 결과를 확정할 수 없으면 내구 의도가 남아 새 입장을 차단한다. 파이프·핸들 정리 확인 후 정제 결과만 저장한다. 타 프로세스·창·입력 시험은 포함하지 않는다. 따라서 OS 비간섭 및 도구 통제는 별도 합성 자원으로 검증해야 한다.
+
+이번 단계에서 실제 CLI·PowerShell 프로브·모델은 실행하지 않았다. 기존 서명 CLI와 고정 해시는 읽기 전용으로 재확인했다. 실제 고정 빌드의 RPC 호환성은 첫 실측에서 확인한다. Manager 턴에는 별도로 검증된 OS·도구·네트워크·소유권 증거, 승인된 지침·목표·모델·추론·인증 경로, 실제 집행 가능한 사용량 한도와 단일 모델 승인 범위가 필요하다. 파일 검사 PASS만으로 역할 입장을 열지 않는다.
+
 ## P2.35 작업 지침 기준본
 
 소유자가 선택·확인한 전역 파일은 원본 바이트·SHA-256·UTC 시각·출처와 함께 사용자별 상태 디렉터리의 별도 해시 체인 DB에 보관한다. 공개 저장소 경로는 차단한다. 원본은 읽기 전용으로 열고, 개선본은 원본 바이트 뒤에 고정 Controller 계약을 덧붙인다. 전역 원본·Controller 계약·프로젝트 지침은 별개 권한 계층이다. 자연어 충돌은 사용자가 검토하며, 지침의 내용으로 Controller 권한을 확대할 수 없다.
