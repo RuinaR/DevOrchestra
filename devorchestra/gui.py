@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from uuid import uuid4
 
-from .catalog import Catalog, new_project
+from .catalog import Catalog, REQUIREMENT_ROLES, new_project
 from .lease import Blocked
 from .instructions import InstructionStore, selected_source, source_ref
 from .ledger import Ledger
@@ -122,7 +122,10 @@ class CommandCenter:
         self.project.pack(fill="x", pady=(7, 3))
         self.project.current(0)
         self.project.bind("<<ComboboxSelected>>", self.select_project)
-        ttk.Button(projects, text="Register", command=lambda: self.edit_settings("new")).pack(fill="x")
+        ttk.Button(projects, text="프로젝트 등록", command=lambda: self.edit_settings("new")).pack(fill="x")
+        ttk.Button(projects, text="요구사항 문서", command=self.requirement_settings).pack(fill="x")
+        self.development_button = ttk.Button(projects, text="자동 개발 시작 · 확인 중", state="disabled")
+        self.development_button.pack(fill="x")
         ttk.Button(projects, text="Project settings", command=lambda: self.edit_settings("edit")).pack(fill="x")
         ttk.Button(projects, text="Global limits", command=lambda: self.edit_settings("limits")).pack(fill="x")
         ttk.Button(projects, text="토큰 예비량", command=lambda: self.edit_settings("reserve")).pack(fill="x")
@@ -300,6 +303,7 @@ class CommandCenter:
         self.mission.configure(text="Ledger unavailable", fg=RED)
         self.goal.configure(text=reason, wraplength=350)
         self.project_states.configure(text="UNKNOWN")
+        self.development_button.configure(text="자동 개발 시작 · 확인 불가", state="disabled")
         for widget in (self.gates, self.safety, self.resources):
             widget.configure(text="UNKNOWN")
         for name, badge in self.phases:
@@ -322,9 +326,17 @@ class CommandCenter:
             if not development["current"] or state == "COMPLETED":
                 state = "SESSION READY"
         self.global_badge.configure(text=f"GLOBAL / {state} · {global_project}", fg=color(state))
+        workflow = view["workflow"]
+        self.development_button.configure(text=f"자동 개발 시작 · {workflow['development_admission']}")
+        cycle_status = workflow["latest_cycle_state"]
+        cycle_label = (f"\n최근 작업 · {cycle_status} ({workflow['latest_cycle_evidence']})"
+                       if cycle_status else "")
         self.project_states.configure(text="\n".join(
             f"{view['project_names'][key]} · {status}" for key, status in
-            view["project_states"].items() if key == view["project_id"]))
+            view["project_states"].items() if key == view["project_id"])
+            + f"\n요구사항 {workflow['requirements_count']}개"
+              f" · 최근 작업 기준 {len(workflow['cycle_requirements'])}개"
+              f"{cycle_label}\n사용자 테스트 · {workflow['user_test_status']}")
         self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}",
                                fg=color(view["project_state"]))
         registration = view["registration"]
@@ -710,6 +722,58 @@ class CommandCenter:
         selected.bind("<<ComboboxSelected>>", refresh)
         refresh()
 
+    def requirement_settings(self):
+        if self.view is None or not self.view["registration"]:
+            self.observation.configure(text="프로젝트를 먼저 등록하세요.")
+            return
+        project_id = self.view["project_id"]
+        panel = tk.Toplevel(self.root)
+        panel.title("DevOrchestra · 요구사항 문서")
+        catalog = Catalog(self.reader.ledger)
+        table = tk.Listbox(panel, width=84, height=12)
+        table.pack(fill="both", expand=True)
+        role = ttk.Combobox(panel, values=REQUIREMENT_ROLES, state="readonly")
+        role.set("FEATURE")
+        role.pack(fill="x")
+        status = ttk.Label(panel, text="관련 항목을 선택한 뒤 문서를 추가하면 두 기록을 연결합니다.")
+        status.pack(fill="x")
+        history = []
+
+        def refresh():
+            history[:] = catalog.read().get("requirements", {}).get(project_id, ())
+            table.delete(0, "end")
+            for item in reversed(history):
+                relation = f" · 관련 {item['related'][:8]}" if item["related"] else ""
+                table.insert("end", f"{item['path']} · {item['role']} · v{item['version']}"
+                                    f" · {item['sha256'][:12]}{relation}")
+
+        def register():
+            try:
+                record = catalog.read()["projects"][project_id]
+                folder = record["data"]["local_path"]
+                if not folder:
+                    raise Blocked("프로젝트 원본 폴더를 먼저 지정하세요.")
+                choice = filedialog.askopenfilename(parent=panel, initialdir=folder,
+                    title="프로젝트 안의 요구사항 문서 선택", filetypes=[("TXT / Markdown", "*.txt *.md")])
+                if not choice:
+                    return
+                relative = Path(choice).relative_to(Path(folder)).as_posix()
+                selected = table.curselection()
+                related = history[-1 - selected[0]]["id"] if selected else None
+                item = catalog.register_requirement(project_id, relative, role.get(), related=related)
+                refresh()
+                status.configure(text=f"등록 확인 · v{item['version']} · {item['sha256']}")
+                self.refresh()
+            except (Blocked, ValueError, OSError, sqlite3.Error, KeyError):
+                status.configure(text="등록 실패 · 경로, 파일 형식 또는 원장 상태를 확인하세요.")
+
+        ttk.Button(panel, text="문서 선택 및 등록", command=register).pack(anchor="e")
+        ttk.Button(panel, text="관련 항목 선택 해제", command=lambda: table.selection_clear(0, "end")).pack(anchor="e")
+        try:
+            refresh()
+        except (Blocked, ValueError, OSError, sqlite3.Error):
+            status.configure(text="요구사항 이력을 확인할 수 없습니다.")
+
     def edit_settings(self, mode):
         if self.view is None:
             return
@@ -737,6 +801,21 @@ class CommandCenter:
         document.insert("1.0", json.dumps(value, indent=2, ensure_ascii=False))
         status = label(editor, fg=AMBER)
         status.pack(fill="x")
+
+        def choose_folder():
+            folder = filedialog.askdirectory(parent=editor, title="기존 프로젝트 폴더 선택", mustexist=True)
+            if not folder:
+                return
+            try:
+                updated = json.loads(document.get("1.0", "end"))
+                updated["local_path"] = str(Path(folder))
+                document.delete("1.0", "end")
+                document.insert("1.0", json.dumps(updated, indent=2, ensure_ascii=False))
+            except (TypeError, ValueError):
+                status.configure(text="프로젝트 등록 필드를 확인하세요.")
+
+        if mode in ("new", "edit"):
+            ttk.Button(editor, text="프로젝트 폴더 선택", command=choose_folder).pack(anchor="e")
 
         def save():
             try:

@@ -1,10 +1,11 @@
 """Trusted, revisioned project metadata. Registration grants no capabilities."""
 from datetime import datetime, timezone
-from pathlib import PureWindowsPath
+from hashlib import sha256
+from pathlib import Path, PureWindowsPath
 import re
 
 from .lease import Blocked, execution_slot
-from .ledger import Ledger, check_path
+from .ledger import Ledger, check_path, digest
 from .token_reserve import validate_reserve
 
 ROLES = ("Manager", "Developer", "Reviewer", "Verifier")
@@ -16,6 +17,17 @@ LIST_FIELDS = ("acceptance", "priorities", "roadmap", "checks")
 SCOPE_FIELDS = ("files", "network", "tools")
 FIELDS = frozenset(("project_id", "repository", "local_path", "documents", "git_sha",
                     "roles", "budget", "requested_scope", "git_policy", *TEXT_FIELDS, *LIST_FIELDS))
+REQUIREMENT_ROLES = ("GOAL", "FEATURE", "DESIGN", "BUG", "IMPROVEMENT")
+MAX_REQUIREMENT_BYTES = 256 * 1024
+
+
+def _requirement_path(relative):
+    if (not _text(relative) or any(char in relative for char in ':\\<>|?*"')
+            or Path(relative).suffix.lower() not in (".md", ".txt")
+            or any(part.casefold() in ("", ".", "..", ".ai-local", ".git")
+                   or part.endswith((".", " ")) for part in relative.split("/"))):
+        raise ValueError("Use a project-relative TXT or Markdown requirement path")
+    return relative
 
 
 def _text(value, limit=512):
@@ -115,7 +127,7 @@ class Catalog:
 
     @staticmethod
     def _project(events):
-        projects, setups, limits = {}, {}, dict(DEFAULT_BUDGET)
+        projects, setups, requirements, limits = {}, {}, {}, dict(DEFAULT_BUDGET)
         reserve = None
         for index, event in enumerate(events, 1):
             if event["kind"] in ("project_saved", "setup_saved"):
@@ -135,9 +147,14 @@ class Catalog:
             elif event["kind"] == "token_reserve_saved":
                 validate_reserve(event["data"])
                 reserve = event["data"]
+            elif event["kind"] == "requirement_registered":
+                requirement = event["data"]
+                requirements.setdefault(requirement["project_id"], []).append(requirement)
             else:
                 raise Blocked("Unknown catalog event")
         view = {"projects": projects, "setups": setups, "global_budget": limits, "version": len(events)}
+        if requirements:
+            view["requirements"] = requirements
         if reserve is not None:
             view["token_reserve"] = reserve
         return view
@@ -165,6 +182,52 @@ class Catalog:
         validate_setup(data, self.ledger.state_boundary)
         return self._save("setup_saved", data, 0)
 
+    def register_requirement(self, project_id, relative, role, *, related=None):
+        """Owner-selected read of one document. Store references and hashes only."""
+        relative = _requirement_path(relative)
+        if role not in REQUIREMENT_ROLES:
+            raise ValueError("Unknown requirement role")
+        with execution_slot() as abandoned:
+            if abandoned:
+                raise Blocked("Abandoned slot requires inspection")
+            snapshot = self._snapshot()
+            events, tail = snapshot if snapshot is not None else ([], "")
+            view = self._project(events)
+            project = view["projects"].get(project_id)
+            if not project or not project["data"]["local_path"]:
+                raise Blocked("Register the original project folder first")
+            root = Path(project["data"]["local_path"])
+            target = root / relative
+            check_path(target)
+            if not target.is_file():
+                raise Blocked("Requirement is missing")
+            actual = target.resolve(strict=True)
+            if (not actual.is_relative_to(root.resolve(strict=True))
+                    or actual.is_relative_to(self.ledger.state_boundary.resolve())):
+                raise Blocked("Requirement is missing or outside the document boundary")
+            history = view.get("requirements", {}).get(project_id, [])
+            latest = next((item for item in reversed(history)
+                           if item["path"].casefold() == relative.casefold()), None)
+            if related is not None and not any(item["id"] == related for item in history):
+                raise Blocked("Related requirement does not belong to this project")
+            check_path(actual)
+            with actual.open("rb") as stream:
+                content = stream.read(MAX_REQUIREMENT_BYTES + 1)
+            if len(content) > MAX_REQUIREMENT_BYTES or not content.decode("utf-8-sig").strip():
+                raise ValueError("Use a nonempty UTF-8 document of at most 256 KiB")
+            checksum = sha256(content).hexdigest()
+            if latest and (latest["sha256"], latest["role"], latest["related"]) == (checksum, role, related):
+                return latest
+            now = datetime.now(timezone.utc).isoformat()
+            item = {"project_id": project_id, "path": relative, "role": role, "sha256": checksum,
+                    "version": latest["version"] + 1 if latest else 1,
+                    "supersedes": latest["id"] if latest else None, "related": related,
+                    "registered_at": now}
+            item["id"] = digest(item)
+            self.ledger.append(len(events), tail, {"kind": "requirement_registered",
+                                                  "data": item, "timestamp": now})
+            return item
+
     def _save(self, kind, data, revision):
         with execution_slot() as abandoned:
             if abandoned:
@@ -180,6 +243,10 @@ class Catalog:
             if kind in ("project_saved", "setup_saved"):
                 project = data["project"] if kind == "setup_saved" else data
                 latest = current["projects"].get(project["project_id"], {"revision": 0})["revision"]
+                if (current.get("requirements", {}).get(project["project_id"])
+                        and PureWindowsPath(project["local_path"]) != PureWindowsPath(
+                            current["projects"][project["project_id"]]["data"]["local_path"])):
+                    raise Blocked("Requirement references are bound to the original project folder")
                 if kind == "project_saved" and project["project_id"] in current["setups"]:
                     from .setup import validate_setup
                     validate_setup({"project": project, **current["setups"][project["project_id"]]},
@@ -191,3 +258,10 @@ class Catalog:
             event = {"kind": kind, "data": data, "timestamp": datetime.now(timezone.utc).isoformat()}
             self.ledger.append(len(events), tail, event)
             return len(events) + 1
+
+
+def latest_requirements(catalog, project_id):
+    latest = {}
+    for item in catalog.get("requirements", {}).get(project_id, ()):
+        latest[item["path"].casefold()] = item
+    return list(latest.values())

@@ -125,7 +125,7 @@ class ProjectionTests(unittest.TestCase):
         center.observation = Mock()
         center.render = Mock(wraps=center.render)
         center.clear = Mock(wraps=center.clear)
-        for attr in ("global_badge", "mission", "goal", "project_states", "gates",
+        for attr in ("global_badge", "mission", "goal", "project_states", "development_button", "gates",
                      "safety", "resources", "run_filter", "role_filter", "render_audit"):
             setattr(center, attr, Mock())
         center.phases = [(name, Mock()) for name in ("PLAN", "DEV", "REV", "VFY", "DEC")]

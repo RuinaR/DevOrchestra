@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .adapter import (Budget, MockAdapter, NativeReceipt, Outcome, RoleRequest, Scope,
                       WindowsNativeCodexAdapter, normalize_mock)
-from .catalog import Catalog
+from .catalog import Catalog, latest_requirements
 from .development import session_view, usage_totals, validate_proposal
 from .event_audit import Binding, FIXTURE_USAGE, Packet
 from .event_journal import EventJournal, OPEN_ROLE_EVENTS
@@ -189,9 +189,11 @@ def freeze_project(project_id, catalog):
     budget = {key: min(value, global_budget[key]) for key, value in project_budget.items()}
     acceptance = project.get("acceptance", ["Verify synthetic workflow"])
     guidance = registered["data"]["documents"] if registered else project["documents"]
+    requirements = latest_requirements(catalog, project_id)
     return {"project": project, "goal": goal, "acceptance": acceptance, "budget": budget,
             "project_budget": project_budget, "global_budget": global_budget,
-            "guidance_hash": digest([INSTRUCTION_VERSION, POLICY_HASH, guidance])}
+            "guidance_hash": digest([INSTRUCTION_VERSION, POLICY_HASH, guidance, requirements]),
+            "requirements": requirements}
 
 
 class Runner:

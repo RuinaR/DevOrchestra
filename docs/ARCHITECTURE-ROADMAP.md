@@ -1,5 +1,13 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
+## 요구사항 기반 사용자 워크플로
+
+기존 카탈로그에 프로젝트별 TXT/Markdown의 상대경로·역할·SHA-256·등록 시각·개정·관련 참조를 추가했다. 원문은 카탈로그나 실행 원장에 복제하지 않는다. 합성 세션과 작업은 등록한 최신 개정 참조를 시작 시점에 고정하며, 진행 중 재등록이 기존 증거를 바꾸지 않는다. Command Center에서 폴더 선택, 문서 등록·이력 조회, 현재 등록 수와 최근 작업 기준을 제공한다.
+
+실제 완료 판정은 동결 요구사항별 Verifier 영수증과 복제본·Git 근거에 귀속할 예정이다. 합성 완료와 사용자 테스트 대기는 별개이며 후자는 실제 결과 연결 전까지 제공하지 않는다. 미구현은 요구사항 본문의 검증된 전달, 변경·영향 및 기존 완료 요구사항 판정, 실제 결과·실행 방법·사용자 테스트 인계, GUI 자동 개발 제어와 연속 주기다.
+
+우선순위는 P2.44 바이너리 사전검사 증거를 보존하고, 별도 승인된 파일 경계 실측과 입장 게이트를 거쳐 실제 읽기 전용 Manager 한 역할에 동결 요구사항을 연결하는 것이다. 이후 구현·독립 검토·실제 Verifier·최종 Manager, 승인된 Git, 사용자 테스트 대기 및 개선 주기를 순서대로 연결한다.
+
 ## P2.43 모델 없는 App Server 접근 검사
 
 다음 실측은 Controller 내부 `inspect_native(NativeAccessApproval(...))` 한 번이다. 기존 CLI 고정 해시 및 서명을 확인하고 명시적 MXC로 App Server를 Windows Job에 생성한다. `initialize`, `initialized`, `config/read`, `configRequirements/read` 뒤 `command/exec` 한 건을 보낸다. 관리 요구사항이 확인되거나 기대 프로필과 다르면 명령 전송을 차단한다. 모델·계정 RPC 및 외부 서비스 요청은 호출하지 않는다. 실제 네트워크 차단은 이 검사 범위 밖이다. [App Server 명령 계약](https://learn.chatgpt.com/docs/app-server#command-execution)

@@ -1,7 +1,7 @@
 """Versioned, read-only evidence contract for the Windows console."""
 from datetime import datetime, timezone
 
-from .catalog import Catalog, DEFAULT_BUDGET
+from .catalog import Catalog, DEFAULT_BUDGET, latest_requirements
 from .dashboard import project_view
 from .development import session_view, usage_totals
 from .event_journal import OPEN_ROLE_EVENTS
@@ -25,6 +25,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     project_events = [dict(event, sequence=seq) for seq, event in enumerate(events, 1)
                       if event["project_id"] == project_id]
     start = view["run"]
+    requirements = latest_requirements(catalog, project_id)
     current = [e for e in project_events if start and e["run_id"] == start["run_id"]]
     latest = current[-1] if current else {}
     global_events = global_view["events"]
@@ -102,6 +103,15 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "project_name": names[project_id],
         "project_names": names,
         "registration": registration,
+        "requirements": requirements,
+        "workflow": {
+            "requirements_count": len(requirements),
+            "cycle_requirements": start.get("requirements", []) if start else [],
+            "development_admission": live["status"],
+            "latest_cycle_state": latest.get("state"),
+            "latest_cycle_evidence": "SYNTHETIC" if start else "NONE",
+            "user_test_status": "NOT_AVAILABLE",
+        },
         "shutdown": shutdown,
         "recovery_state": recovery_state,
         "token_policy": token_policy,
