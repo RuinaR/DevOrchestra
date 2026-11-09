@@ -7,10 +7,10 @@ import sqlite3
 from threading import Thread
 from time import monotonic, time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 from uuid import uuid4
 
-from .catalog import Catalog, REQUIREMENT_ROLES, new_project
+from .catalog import Catalog, REQUIREMENT_ROLES, new_project, read_frozen_requirements
 from .build_info import build_label
 from .default_instructions import defaults_text
 from .lease import Blocked
@@ -28,6 +28,7 @@ TEAL, AMBER, RED = "#78efca", "#ffd082", "#ff9da9"
 ROLE_MARKS = {"Manager": "01 / CMD", "Developer": "02 / DEV",
               "Reviewer": "03 / REV", "Verifier": "04 / VFY"}
 POLL_MS = 1500
+REQUIREMENT_NAMES = dict(zip(REQUIREMENT_ROLES, ("개발 목표", "기능 추가", "설계", "버그 수정", "개선 요청")))
 
 
 def storage_message(storage):
@@ -114,14 +115,14 @@ class CommandCenter:
         root.title(f"DevOrchestra | Command Center · {build_label()}")
         root.configure(bg=BG)
         root.geometry("1220x830")
-        root.minsize(900, 660)
+        root.minsize(760, 580)
         root.grid_columnconfigure(0, weight=1)
         root.grid_rowconfigure(3, weight=1)
         self.theme()
 
         header = tk.Frame(root, bg=BG, padx=16, pady=10)
         header.grid(row=0, column=0, sticky="ew")
-        label(header, "DEVORCHESTRA    /    COMMAND CENTER", 20, bg=BG, bold=True).pack(side="left")
+        label(header, "DevOrchestra · 개발 작업실", 18, bg=BG, bold=True).pack(side="left")
         self.global_badge = label(header, fg=CYAN, bg=BG, bold=True)
         self.global_badge.pack(side="right")
         self.observation = label(root, bg=BG, fg=MUTED)
@@ -131,7 +132,7 @@ class CommandCenter:
         command.grid(row=1, column=0, sticky="ew", padx=16)
         command.columnconfigure(1, weight=2)
         command.columnconfigure(2, weight=1)
-        projects = section(command, "01  /  PROJECTS")
+        projects = section(command, "프로젝트와 요구사항")
         projects.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         self.project = ttk.Combobox(projects, state="readonly", width=16,
                                     values=[PROJECTS[key].name for key in self.project_ids])
@@ -139,10 +140,8 @@ class CommandCenter:
         self.project.current(0)
         self.project.bind("<<ComboboxSelected>>", self.select_project)
         ttk.Button(projects, text="프로젝트 등록", command=self.register_project).pack(fill="x")
+        ttk.Button(projects, text="목표와 완료 기준 편집", command=lambda: self.register_project(edit=True)).pack(fill="x")
         ttk.Button(projects, text="요구사항 문서", command=self.requirement_settings).pack(fill="x")
-        self.development_button = ttk.Button(projects, text="자동 개발 시작 · 확인 중", state="disabled")
-        self.development_button.pack(fill="x")
-        ttk.Button(projects, text="감독형 Codex 작업", command=self.supervised_work).pack(fill="x")
         ttk.Button(projects, text="초기 설정", command=self.setup_wizard).pack(fill="x")
         ttk.Button(projects, text="작업 지침", command=self.instruction_settings).pack(fill="x")
         advanced = tk.Frame(projects, bg=PANEL)
@@ -157,6 +156,9 @@ class CommandCenter:
         self.mission.pack(fill="x", pady=(4, 0))
         self.goal = label(mission, fg=MUTED)
         self.goal.pack(fill="x")
+        self.development_button = ttk.Button(mission, text="개발 시작", command=self.supervised_work, state="disabled")
+        self.development_button.pack(fill="x", pady=(8, 2))
+        label(mission, "감독형 Codex · 지시를 복사하고 결과를 가져옵니다.", fg=MUTED).pack(fill="x")
         self.gates = label(mission)
         self.gates.pack(fill="x", pady=(3, 0))
         self.question_button = ttk.Button(mission, text="사용자 응답 대기 없음", state="disabled",
@@ -217,6 +219,7 @@ class CommandCenter:
         def toggle_details():
             nonlocal details_visible
             details_visible = not details_visible
+            self.details_visible = details_visible
             for frame in (safety, operations, audit):
                 (frame.grid if details_visible else frame.grid_remove)()
             if details_visible:
@@ -226,6 +229,8 @@ class CommandCenter:
                 self.gates.pack_forget()
                 advanced.pack_forget()
             root.grid_rowconfigure(3, weight=int(details_visible))
+            if self.view:
+                self.render()
 
         details_visible = True
         toggle_details()
@@ -236,18 +241,73 @@ class CommandCenter:
         root.after(POLL_MS, self.poll)
 
     def theme(self):
+        for control, options in {
+            "Toplevel": {"background": BG},
+            "Text": {"background": TILE, "foreground": INK, "insertBackground": INK,
+                     "selectBackground": EDGE, "selectForeground": INK,
+                     "highlightBackground": EDGE, "highlightColor": CYAN, "highlightThickness": 1,
+                     "font": "{Segoe UI} 11", "padX": 8, "padY": 6, "relief": "flat"},
+            "Listbox": {"background": TILE, "foreground": INK, "selectBackground": EDGE,
+                        "selectForeground": INK, "highlightBackground": EDGE, "highlightColor": CYAN,
+                        "highlightThickness": 1, "font": "{Segoe UI} 11"},
+        }.items():
+            for key, value in options.items():
+                self.root.option_add(f"*{control}.{key}", value)
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure(".", background=TILE, foreground=INK, fieldbackground=TILE,
                         bordercolor=EDGE, font=("Segoe UI", 10))
         style.configure("TButton", padding=(8, 5))
-        style.map("TButton", background=[("pressed", EDGE), ("active", "#254665")],
+        style.map("TButton", background=[("disabled", PANEL), ("pressed", EDGE), ("active", "#254665")],
+                  foreground=[("disabled", MUTED)],
                   bordercolor=[("focus", CYAN)])
+        for control in ("TEntry", "TCombobox", "TCheckbutton", "TNotebook.Tab"):
+            style.map(control, background=[("disabled", PANEL), ("selected", EDGE), ("active", "#254665")],
+                      bordercolor=[("invalid", RED), ("focus", CYAN)])
         style.map("TCombobox", fieldbackground=[("readonly", TILE)],
                   selectbackground=[("readonly", EDGE)], selectforeground=[("readonly", INK)])
         style.configure("Treeview", rowheight=24)
         style.map("Treeview", background=[("selected", "#315879")],
                   foreground=[("selected", INK)])
+
+    def confirm(self, title, text, *, parent):
+        dialog = tk.Toplevel(parent, bg=BG, padx=18, pady=14)
+        dialog.title(title)
+        dialog.transient(parent)
+        dialog.resizable(False, False)
+        label(dialog, text, size=11, bg=BG, wraplength=460).pack(fill="x", pady=(0, 12))
+        result = False
+
+        def finish(value=False):
+            nonlocal result
+            result = value
+            dialog.destroy()
+
+        controls = ttk.Frame(dialog)
+        controls.pack(anchor="e")
+        cancel = ttk.Button(controls, text="취소", command=finish)
+        cancel.pack(side="left", padx=6)
+        ttk.Button(controls, text="확인", command=lambda: finish(True)).pack(side="left")
+        dialog.protocol("WM_DELETE_WINDOW", finish)
+        dialog.bind("<Escape>", lambda _event: finish())
+        dialog.grab_set()
+        cancel.focus_set()
+        parent.wait_window(dialog)
+        return result
+
+    def panel(self):
+        window = tk.Toplevel(self.root, bg=BG, padx=12, pady=10)
+        window.bind("<Escape>", lambda _event: window.destroy())
+        return window
+
+    def editor_box(self, parent, *, height=4, state="normal"):
+        row = ttk.Frame(parent)
+        row.pack(fill="both", expand=True, pady=(2, 6))
+        editor = tk.Text(row, height=height, width=58, wrap="word", state=state)
+        self.scrollable(row, editor)
+        editor.bind("<Tab>", lambda event: (event.widget.tk_focusNext().focus_set(), "break")[1])
+        editor.bind("<Shift-Tab>", lambda event: (event.widget.tk_focusPrev().focus_set(), "break")[1])
+        return editor
 
     def build_audit(self, root):
         audit = section(root, "06  /  EVENT STREAM & EVIDENCE")
@@ -349,7 +409,7 @@ class CommandCenter:
                                fg=CYAN if first_run else RED)
         self.goal.configure(text=reason, wraplength=350)
         self.project_states.configure(text="UNKNOWN")
-        self.development_button.configure(text="자동 개발 시작 · 확인 불가", state="disabled")
+        self.development_button.configure(text="개발 시작", state="disabled")
         if hasattr(self, "question_button"):
             self.question_button.configure(state="disabled")
         for widget in (self.gates, self.safety, self.resources):
@@ -379,10 +439,16 @@ class CommandCenter:
             global_project = view["project_names"][development["start"]["project_id"]]
             if not development["current"] or state == "COMPLETED":
                 state = "SESSION READY"
-        self.global_badge.configure(text=f"GLOBAL / {state} · {global_project}", fg=color(state))
+        readable_state = {"IDLE": "대기 중", "WAITING_FOR_USER": "답변 필요", "SESSION READY": "다음 작업 준비",
+                          "COMPLETED": "완료", "BLOCKED": "차단됨", "PAUSED": "일시정지",
+                          "FAILED": "실패", "CANCELLED": "취소됨"}.get(state, "진행 중")
+        self.global_badge.configure(text=f"{readable_state} · {global_project}" if current else readable_state,
+                                    fg=color(state))
         workflow = view["workflow"]
-        self.development_button.configure(text=f"실제 자동 개발 · {workflow['development_admission']}",
-                                          state="disabled")
+        handoff = view.get("supervised_handoff")
+        self.development_button.configure(text="개발 작업 열기" if handoff else "개발 시작",
+                                          state="normal" if view["registration"] and workflow["requirements_count"]
+                                          else "disabled")
         next_action = {
             "ANSWER_QUESTION": "사용자 질문에 답변",
             "REGISTER_PROJECT": "프로젝트 폴더 등록",
@@ -413,15 +479,22 @@ class CommandCenter:
                                fg=color(view["project_state"]))
         registration = view["registration"]
         configured = registration["data"] if registration else None
-        goal = (f"{run['goal']}\nGen {run['generation']} · Run {run['run_id'][:10]}"
-                if run else "No recorded mission")
+        goal = "프로젝트를 등록하고 첫 요구사항을 추가하세요."
         if configured:
-            goal += (f"\nConfigured · {configured['stage']} · {configured['goal']}"
-                     f"\nAcceptance · {configured['acceptance'][0]}"
-                     f"\nDeclared Git SHA · {configured['git_sha'] or 'UNKNOWN'}"
-                     f"\nDeclared block · {configured['block_reason'] or 'none'}")
+            text = configured["goal"]
+            goal = "개발 목표\n" + text[:380] + ("…" if len(text) > 380 else "")
+            goal += f"\n완료 기준 {len(configured['acceptance'])}개 · 자동 실행 차단"
+        if handoff:
+            stages = {"supervised_requested": "계획 결과 대기", "supervised_imported": "계획 등록",
+                      "supervised_developer": "구현 결과 대기", "supervised_reviewer": "검토 결과 대기",
+                      "supervised_reviewed": "검증 준비", "supervised_verifier": "검증 결과 대기",
+                      "supervised_evidence": "산출물 확인 · 사용자 테스트 준비 미확인",
+                      "supervised_review_blocked": "재작업 또는 차단", "supervised_cancelled": "취소됨"}
+            goal += "\n감독형 작업 · " + stages.get(handoff["kind"], "확인 필요")
+            if handoff.get("artifacts"):
+                goal += "\n결과물 · " + ", ".join(handoff["artifacts"])[:250]
         session = view["development"]
-        if session:
+        if session and getattr(self, "details_visible", False):
             start, end = session["start"], session["end"]
             progress = session["progress"]
             latest_progress = progress["latest"]
@@ -493,7 +566,7 @@ class CommandCenter:
             return
         question = pending["question"]
         permission = question["type"] in AUTHORIZATION_TYPES
-        window = self.question_window = tk.Toplevel(self.root)
+        window = self.question_window = self.panel()
         window.title("권한 승인 요청" if permission else "사용자 판단 요청")
         window.configure(bg=PANEL, padx=14, pady=12)
         window.transient(self.root)
@@ -644,8 +717,11 @@ class CommandCenter:
         self.shutdown_label.configure(text=("복구 확인 필요 · " + problem) if problem else notice or titles[state])
         allowed = {"RUNNING": ("request",), "RESUMED": ("request",), "CANCELLED": ("request",),
                    "SCHEDULED": ("cancel", "finalize"), "READY": () if problem else ("resume",)}
+        active = bool(self.view and (self.view.get("recovery_state") == "UNKNOWN"
+                      or self.view.get("global_run") and self.view.get("global_state") in
+                      ("PLANNING", "DEVELOPING", "REVIEWING", "VERIFYING", "CHECKPOINTING", "PAUSED")))
         for action, button in self.shutdown_buttons.items():
-            enabled = self.shutdown_future is None and action in allowed.get(state, ())
+            enabled = self.shutdown_future is None and action in allowed.get(state, ()) and (action != "request" or active)
             button.configure(state="normal" if enabled else "disabled")
 
     def close_requested(self):
@@ -717,7 +793,7 @@ class CommandCenter:
             self.root.destroy()
 
     def setup_wizard(self):
-        wizard = tk.Toplevel(self.root)
+        wizard = self.panel()
         wizard.title("DevOrchestra · 초기 설정")
         wizard.configure(bg=PANEL, padx=12, pady=12)
         label(wizard, "저장소 준비 → 프로젝트 등록 → 요구사항 추가 → 감독형 Codex 작업",
@@ -747,70 +823,119 @@ class CommandCenter:
                    state="normal" if storage["status"] != "BLOCKED"
                    else "disabled").pack(anchor="e")
 
-    def register_project(self):
+    def register_project(self, *, edit=False):
         if self.view is None:
             self.setup_wizard()
             return
-        panel = tk.Toplevel(self.root)
-        panel.title("프로젝트 등록")
+        panel = self.panel()
+        existing = self.view["registration"] if edit else None
+        if edit and not existing:
+            panel.destroy()
+            self.observation.configure(text="편집할 프로젝트를 선택하세요.")
+            return
+        panel.title("프로젝트 편집" if edit else "프로젝트 등록")
         panel.configure(padx=16, pady=12)
         fields = {}
-        for title, key in (("프로젝트 이름", "name"), ("원본 프로젝트 폴더", "original"),
-                           ("목표와 설명", "goal"), ("완료 기준", "acceptance"),
-                           ("개발용 작업 폴더 (선택)", "replica")):
+        for title, key in (("프로젝트 이름", "name"), ("원본 프로젝트 폴더", "original")):
             ttk.Label(panel, text=title).pack(anchor="w")
             row = ttk.Frame(panel)
             row.pack(fill="x", pady=(2, 8))
             value = fields[key] = ttk.Entry(row, width=55)
             value.pack(side="left", fill="x", expand=True)
-            if key in ("original", "replica"):
+            if key == "original":
                 def choose(field=value):
                     folder = filedialog.askdirectory(parent=panel, mustexist=True)
                     if folder:
                         field.delete(0, "end")
                         field.insert(0, str(Path(folder)))
                 ttk.Button(row, text="폴더 선택", command=choose).pack(side="right", padx=(6, 0))
-        ttk.Label(panel, text="개발용 작업 폴더는 원본을 보호하기 위한 별도 작업 사본입니다.\n"
-                  "이미 준비한 폴더를 선택하거나 Developer 지시를 만들 때 지정하세요.").pack(anchor="w")
-        copy_source = tk.BooleanVar(panel, value=False)
-        ttk.Checkbutton(panel, text="지정한 새 작업 폴더에 원본 복사 (등록 시 별도 확인)",
-                        variable=copy_source).pack(anchor="w")
-        ttk.Label(panel, text="새 폴더는 전체 경로를 입력하세요. Git·로컬 앱 데이터와 알려진 비밀 파일은 제외합니다.",
-                  wraplength=525).pack(anchor="w")
+        ttk.Label(panel, text="목표와 상세 설명 · 최대 8,000자").pack(anchor="w")
+        goal = self.editor_box(panel, height=5)
+        ttk.Label(panel, text="완료 기준 · 한 줄에 한 항목, 최대 32개 (항목당 2,000자)").pack(anchor="w")
+        criteria = self.editor_box(panel, height=4)
+        options = ttk.Frame(panel)
+        ttk.Button(panel, text="개발용 작업 폴더와 추가 설정",
+                   command=lambda: options.pack_forget() if options.winfo_manager() else
+                   options.pack(fill="x", before=status)).pack(anchor="w", pady=4)
+        ttk.Label(options, text="원본을 보호하기 위한 별도 작업 사본입니다.").pack(anchor="w")
+        modes = ("나중에 지정", "기존 사본 선택", "새 사본 생성")
+        mode = ttk.Combobox(options, values=modes, state="readonly")
+        mode.current(0)
+        mode.pack(fill="x")
+        replica = fields["replica"] = ttk.Entry(options)
+        replica.pack(fill="x")
+
+        def choose_replica():
+            folder = filedialog.askdirectory(parent=panel, mustexist=True)
+            if folder:
+                replica.delete(0, "end")
+                replica.insert(0, str(Path(folder) / "development-copy") if mode.current() == 2 else folder)
+                if mode.current() == 0:
+                    mode.current(1)
+
+        ttk.Button(options, text="작업 폴더 또는 새 사본의 상위 폴더 선택", command=choose_replica).pack(anchor="w")
+        ttk.Label(options, text="프로젝트별 추가 지침 (원본 기준 Markdown 상대경로)").pack(anchor="w")
+        agents = ttk.Entry(options)
+        agents.pack(fill="x")
+        ttk.Label(options, text="기존 GitHub 저장소 주소 (선택 · 등록만 수행)").pack(anchor="w")
+        repository = ttk.Entry(options)
+        repository.pack(fill="x")
+        if existing:
+            data = existing["data"]
+            fields["name"].insert(0, data["name"])
+            fields["original"].insert(0, data["local_path"])
+            goal.insert("1.0", data["goal"])
+            criteria.insert("1.0", "\n".join(data["acceptance"]))
+            agents.insert(0, data["documents"].get("agents", ""))
+            repository.insert(0, data["repository"])
+            if self.view["setup"]:
+                replica.insert(0, self.view["setup"]["replica"])
+                mode.current(1)
         ttk.Label(panel, text="개발 모드 · 감독형 Codex  |  자동 실행은 차단됨").pack(anchor="w", pady=6)
-        add_docs = tk.BooleanVar(panel, value=True)
+        add_docs = tk.BooleanVar(panel, value=not edit)
         ttk.Checkbutton(panel, text="등록 후 요구사항 문서 추가", variable=add_docs).pack(anchor="w")
         status = ttk.Label(panel, wraplength=530)
         status.pack(fill="x")
 
         def save():
             values = {key: widget.get().strip() for key, widget in fields.items()}
+            values["goal"] = goal.get("1.0", "end-1c").strip()
+            acceptance = [line.strip() for line in criteria.get("1.0", "end-1c").splitlines() if line.strip()]
+            copying = mode.current() == 2
+            if mode.current() == 0:
+                values["replica"] = ""
             try:
-                if not all(values[key] for key in ("name", "goal", "original", "acceptance")):
+                if not acceptance or not all(values[key] for key in ("name", "goal", "original")):
                     raise ValueError("이름, 원본 폴더, 목표, 완료 기준을 입력하세요.")
                 for key in ("original", "replica"):
                     if values[key]:
                         path = Path(values[key])
                         check_path(path)
-                        if not path.is_dir() and not (key == "replica" and copy_source.get()):
+                        if not path.is_dir() and not (key == "replica" and copying):
                             raise ValueError("존재하는 폴더를 선택하세요.")
-                identity = "project-" + uuid4().hex[:12]
-                data = new_project(identity, values["name"], values["goal"])
-                data.update(local_path=str(Path(values["original"])), acceptance=[values["acceptance"]])
+                identity = existing["data"]["project_id"] if existing else "project-" + uuid4().hex[:12]
+                data = dict(existing["data"]) if existing else new_project(identity, values["name"], values["goal"])
+                documents = {key: value for key, value in data["documents"].items() if key != "agents"}
+                if agents.get().strip():
+                    documents["agents"] = agents.get().strip()
+                data.update(name=values["name"], goal=values["goal"], documents=documents,
+                            local_path=str(Path(values["original"])), acceptance=acceptance,
+                            repository=repository.get().strip())
+                revision = existing["revision"] if existing else 0
                 catalog = Catalog(self.reader.ledger)
                 if values["replica"]:
                     setup = {"project": data, "replica": str(Path(values["replica"])), "wait_seconds": 10}
                     validate_setup(setup, self.reader.ledger.state_boundary)
-                    if copy_source.get():
-                        if not messagebox.askyesno("개발용 작업 사본 만들기",
+                    if copying:
+                        if not self.confirm("개발용 작업 사본 만들기",
                                                    "표시된 원본 파일을 지정한 새 폴더에 복사하시겠습니까? "
                                                    "복사 전에 프로젝트에 비공개 파일이 포함됐는지 확인하세요.",
                                                    parent=panel):
                             return
                         create_work_copy(Path(values["original"]), Path(values["replica"]))
-                    catalog.save_setup(setup)
+                    catalog.save_setup(setup, revision)
                 else:
-                    catalog.save_project(data)
+                    catalog.save_project(data, revision)
             except (Blocked, OSError, ValueError, sqlite3.Error) as error:
                 status.configure(text=str(error) if isinstance(error, (Blocked, ValueError)) else
                                  "폴더 권한과 로컬 저장소 상태를 확인하세요.")
@@ -824,18 +949,24 @@ class CommandCenter:
                 if open_docs:
                     self.requirement_settings()
 
-        ttk.Button(panel, text="프로젝트 등록", command=save).pack(anchor="e")
+        ttk.Button(panel, text="저장" if edit else "프로젝트 등록", command=save).pack(anchor="e")
 
     def instruction_settings(self):
-        panel = tk.Toplevel(self.root)
+        panel = self.panel()
         panel.title("DevOrchestra · 작업 지침")
+        panel.geometry("840x650")
         project_id = self.project_ids[self.project.current()]
         status = tk.StringVar(value="원본과 개선본은 이 PC에만 보관됩니다.")
         ttk.Label(panel, textvariable=status, wraplength=640).pack(fill="x")
         selected = ttk.Combobox(panel, state="readonly", width=42)
         selected.pack(fill="x")
-        preview = tk.Text(panel, width=82, height=22, wrap="word", state="disabled")
-        preview.pack(fill="both", expand=True)
+        sections = {"global": "전역 개발지침", "manager-planning": "계획 지침", "developer": "구현 지침",
+                    "reviewer": "검토 지침", "verifier": "검증 지침", "project": "프로젝트 추가 지침",
+                    "original": "전역 원본 (보존용)"}
+        category = ttk.Combobox(panel, values=tuple(sections.values()), state="readonly")
+        category.current(0)
+        category.pack(fill="x", pady=6)
+        preview = self.editor_box(panel, height=22, state="disabled")
         reviewed = None
         project_ref = None
         reviewed_replica = None
@@ -845,6 +976,70 @@ class CommandCenter:
             preview.delete("1.0", "end")
             preview.insert("1.0", text)
             preview.configure(state="disabled")
+
+        def show_applied(_event=None):
+            try:
+                store = InstructionStore(self.reader.ledger)
+                pin = store.default_pin()
+                defaults = store.active_defaults()
+                role = tuple(sections)[category.current()]
+                catalog = Catalog(self.reader.ledger).read()
+                project = catalog["projects"].get(project_id, {}).get("data")
+                setup = catalog["setups"].get(project_id)
+                if role == "project":
+                    from .instructions import instruction_bytes
+                    relative = project["documents"].get("agents") if project else None
+                    if relative:
+                        source = Path(project["local_path"]) / relative
+                        data = instruction_bytes(source)
+                        from hashlib import sha256
+                        status.set(f"적용 중 · {relative}\nSHA-256 {sha256(data).hexdigest()}")
+                        show(data.decode("utf-8-sig"))
+                    else:
+                        status.set("프로젝트 추가 지침 미지정 · 프로젝트 편집에서 지정 가능")
+                        show("")
+                    return
+                active = store.active(project_id)
+                if role == "global" and active:
+                    if not setup:
+                        raise Blocked("프로젝트 지침의 작업 폴더를 확인하세요.")
+                    show(store.verify(active, Path(setup["replica"])).decode("utf-8-sig"))
+                    status.set(f"프로젝트별 개인 기준 적용 중 · {active['version']}\nSHA-256 {active['sha256']}")
+                    return
+                drafts = store.active_role_drafts(project_id)
+                if role in drafts:
+                    show(drafts[role])
+                    status.set("프로젝트에서 승인한 역할 초안 적용 중")
+                elif role in defaults:
+                    item = defaults[role]
+                    status.set(f"{'보존용' if role == 'original' else '개인 기본 지침 적용 중'} · {item['version']}"
+                               f"\n출처 · {Path(pin['manifest']).parent / item['path']}\nSHA-256 {item['sha256']}")
+                    show(item["text"])
+                else:
+                    status.set("개인 기본 지침 미연결 · 공개 기본 지침 사용 중")
+                    show(defaults_text())
+            except (Blocked, OSError, ValueError, sqlite3.Error, KeyError, TypeError):
+                status.set("변경됨 또는 확인 필요 · 지침을 다시 확인하고 연결하세요.")
+                show("")
+
+        def connect_defaults():
+            choice = filedialog.askopenfilename(parent=panel, title="기존 개인 지침 MANIFEST.json 선택",
+                                                filetypes=[("JSON", "*.json")])
+            if not choice:
+                return
+            try:
+                store = InstructionStore(self.reader.ledger)
+                manifest = Path(choice)
+                verified = store.inspect_defaults(manifest)
+                show("\n\n".join(f"{sections[role]} · {item['version']} · {item['sha256']}\n{item['text']}"
+                                 for role, item in verified.items()))
+                panel.update_idletasks()
+                if self.confirm("개인 기본 지침 연결", "표시된 기존 지침을 이 저장소의 감독형 개발 기본으로 연결할까요?",
+                                parent=panel):
+                    store.approve_defaults(manifest, verified)
+                    show_applied()
+            except (Blocked, OSError, ValueError, sqlite3.Error, KeyError, TypeError):
+                status.set("연결 실패 · 누락된 지침 또는 해시가 다른 지침을 확인하세요.")
 
         def refresh(_event=None):
             nonlocal reviewed, project_ref, reviewed_replica
@@ -896,7 +1091,7 @@ class CommandCenter:
 
         def backup():
             path = filedialog.askopenfilename(parent=panel, title="설정에서 확인한 전역 AGENTS 파일 선택")
-            if not path or not messagebox.askyesno(
+            if not path or not self.confirm(
                 "원본 로컬 백업", "선택한 전역 지침의 원본 바이트를 이 PC에 백업하시겠습니까?", parent=panel,
             ):
                 return
@@ -907,7 +1102,7 @@ class CommandCenter:
                 status.set("원본 백업 또는 무결성 확인에 실패했습니다.")
 
         def approve():
-            if not reviewed or not messagebox.askyesno(
+            if not reviewed or not self.confirm(
                 "기준 지침 승인", "표시된 개선본과 프로젝트 지침을 검토했으며 충돌이 없습니까?\n"
                 "선택 버전을 다음 작업에 24시간 동안 승인합니다.", parent=panel,
             ):
@@ -944,7 +1139,7 @@ class CommandCenter:
                     return
                 show("\n\n".join(f"{role}\n{text}" for role, text in drafts.items()))
                 panel.update_idletasks()
-                if messagebox.askyesno("역할 초안 연결", "검토한 로컬 역할 초안을 이 프로젝트의 감독형 지시에 포함할까요?",
+                if self.confirm("역할 초안 연결", "검토한 로컬 역할 초안을 이 프로젝트의 감독형 지시에 포함할까요?",
                                        parent=panel):
                     store.approve_role_drafts(project_id, drafts)
                     status.set("역할 초안 연결됨 · 감독형 지시에만 적용")
@@ -953,7 +1148,8 @@ class CommandCenter:
 
         controls = ttk.Frame(panel)
         controls.pack(fill="x")
-        ttk.Button(controls, text="기본 지침 보기", command=lambda: show(defaults_text())).pack(side="left")
+        ttk.Button(controls, text="적용 지침 보기", command=show_applied).pack(side="left")
+        ttk.Button(controls, text="개인 기본 지침 연결", command=connect_defaults).pack(side="left")
         ttk.Button(controls, text="로컬 역할 초안 연결", command=local_roles).pack(side="left")
         ttk.Button(controls, text="개인 지침 선택 및 백업", command=backup).pack(side="left")
         ttk.Button(controls, text="상태 다시 확인", command=refresh).pack(side="left")
@@ -961,14 +1157,16 @@ class CommandCenter:
         approve_button = ttk.Button(controls, text="선택 버전 승인 / 복원", command=approve)
         approve_button.pack(side="left")
         selected.bind("<<ComboboxSelected>>", refresh)
+        category.bind("<<ComboboxSelected>>", show_applied)
         refresh()
+        show_applied()
 
     def supervised_work(self):
         if not self.view or not self.view["registration"]:
             self.observation.configure(text="프로젝트를 먼저 등록하세요.")
             return
         project_id = self.view["project_id"]
-        panel = tk.Toplevel(self.root)
+        panel = self.panel()
         panel.title(f"감독형 Codex · {project_id}")
         ttk.Label(panel, text="지시를 직접 전달하고 결과 JSON을 가져오세요. 자동 모델 호출은 차단 상태입니다.",
                   wraplength=660).pack(fill="x")
@@ -1117,25 +1315,50 @@ class CommandCenter:
             self.observation.configure(text="프로젝트를 먼저 등록하세요.")
             return
         project_id = self.view["project_id"]
-        panel = tk.Toplevel(self.root)
+        panel = self.panel()
         panel.title("DevOrchestra · 요구사항 문서")
         catalog = Catalog(self.reader.ledger)
-        table = tk.Listbox(panel, width=84, height=12)
-        table.pack(fill="both", expand=True)
-        role = ttk.Combobox(panel, values=REQUIREMENT_ROLES, state="readonly")
-        role.set("FEATURE")
+        panel.geometry("780x690")
+        listing = ttk.Frame(panel)
+        listing.pack(fill="both", expand=True)
+        table = tk.Listbox(listing, width=62, height=7, exportselection=False)
+        self.scrollable(listing, table)
+        preview = self.editor_box(panel, height=7, state="disabled")
+        role = ttk.Combobox(panel, values=tuple(REQUIREMENT_NAMES.values()), state="readonly")
+        role.current(1)
         role.pack(fill="x")
         status = ttk.Label(panel, text="관련 항목을 선택한 뒤 문서를 추가하면 두 기록을 연결합니다.")
         status.pack(fill="x")
         history = []
+
+        def selected_item():
+            selected = table.curselection()
+            return history[-1 - selected[0]] if selected else None
+
+        def show_document(_event=None):
+            item = selected_item()
+            text = "등록된 문서가 없습니다. 첫 문서를 작성하거나 프로젝트 안의 TXT/Markdown 파일을 선택하세요."
+            if item:
+                try:
+                    documents = read_frozen_requirements(catalog.read(), project_id, [item],
+                                                         self.reader.ledger.state_boundary)
+                    text = documents[0]["text"]
+                except (Blocked, OSError, ValueError, sqlite3.Error):
+                    text = "이 개정의 파일 내용이 현재 경로와 일치하지 않습니다. 등록 이력은 보존됩니다."
+            elif history:
+                text = "문서를 선택하면 현재 파일이 등록한 개정과 일치하는지 확인하고 내용을 표시합니다."
+            preview.configure(state="normal")
+            preview.delete("1.0", "end")
+            preview.insert("1.0", text)
+            preview.configure(state="disabled")
 
         def refresh():
             history[:] = catalog.read().get("requirements", {}).get(project_id, ())
             table.delete(0, "end")
             for item in reversed(history):
                 relation = f" · 관련 {item['related'][:8]}" if item["related"] else ""
-                table.insert("end", f"{item['path']} · {item['role']} · v{item['version']}"
-                                    f" · {item['sha256'][:12]}{relation}")
+                table.insert("end", f"{item['path']} · {REQUIREMENT_NAMES[item['role']]} · v{item['version']}{relation}")
+            show_document()
 
         def register():
             try:
@@ -1148,17 +1371,53 @@ class CommandCenter:
                 if not choice:
                     return
                 relative = Path(choice).relative_to(Path(folder)).as_posix()
-                selected = table.curselection()
-                related = history[-1 - selected[0]]["id"] if selected else None
-                item = catalog.register_requirement(project_id, relative, role.get(), related=related)
+                related = selected_item()
+                item = catalog.register_requirement(project_id, relative, REQUIREMENT_ROLES[role.current()],
+                                                    related=related["id"] if related else None)
                 refresh()
                 status.configure(text=f"등록 확인 · v{item['version']} · {item['sha256']}")
                 self.refresh()
             except (Blocked, ValueError, OSError, sqlite3.Error, KeyError):
                 status.configure(text="등록 실패 · 경로, 파일 형식 또는 원장 상태를 확인하세요.")
 
-        ttk.Button(panel, text="문서 선택 및 등록", command=register).pack(anchor="e")
-        ttk.Button(panel, text="관련 항목 선택 해제", command=lambda: table.selection_clear(0, "end")).pack(anchor="e")
+        def write_document():
+            related = selected_item()
+            editor = self.panel()
+            editor.title("요구사항 작성")
+            ttk.Label(editor, text="원본 프로젝트 안에 새 Markdown 파일을 만듭니다. 기존 파일은 유지됩니다.").pack(anchor="w")
+            name = ttk.Entry(editor, width=58)
+            name.insert(0, "requirements-" + uuid4().hex[:8] + ".md")
+            name.pack(fill="x", pady=6)
+            body = self.editor_box(editor, height=14)
+            notice = ttk.Label(editor, wraplength=480)
+            notice.pack(fill="x")
+
+            def save_document():
+                try:
+                    item = catalog.write_requirement(
+                        project_id, name.get().strip(), body.get("1.0", "end-1c"),
+                        REQUIREMENT_ROLES[role.current()], related=related["id"] if related else None,
+                    )
+                except FileExistsError:
+                    notice.configure(text="같은 이름의 문서가 있습니다. 새 파일명을 입력하세요.")
+                    return
+                except (Blocked, OSError, ValueError, sqlite3.Error, KeyError):
+                    notice.configure(text="저장 또는 등록 실패. 폴더·권한을 확인하고, 이미 저장된 파일은 가져오기를 사용하세요.")
+                    return
+                editor.destroy()
+                refresh()
+                status.configure(text=f"등록 완료 · {item['path']} · 다음 개발 기준본에 반영됩니다.")
+                self.refresh()
+
+            ttk.Button(editor, text="새 파일로 저장 및 등록", command=save_document).pack(anchor="e")
+
+        table.bind("<<ListboxSelect>>", show_document)
+        controls = ttk.Frame(panel)
+        controls.pack(fill="x", pady=6)
+        ttk.Button(controls, text="요구사항 직접 작성", command=write_document).pack(side="left", padx=3)
+        ttk.Button(controls, text="TXT / Markdown 가져오기", command=register).pack(side="left", padx=3)
+        ttk.Button(controls, text="관련 문서 선택 해제",
+                   command=lambda: (table.selection_clear(0, "end"), show_document())).pack(side="left", padx=3)
         try:
             refresh()
         except (Blocked, ValueError, OSError, sqlite3.Error):
@@ -1180,7 +1439,7 @@ class CommandCenter:
             value, revision = registration["data"], registration["revision"]
         else:
             value, revision = new_project("new-project", "New project", "Synthetic workflow goal"), 0
-        editor = tk.Toplevel(self.root)
+        editor = self.panel()
         editor.title("Owner configuration · registration grants no execution permission")
         editor.configure(bg=PANEL, padx=12, pady=12)
         body = tk.Frame(editor, bg=PANEL)

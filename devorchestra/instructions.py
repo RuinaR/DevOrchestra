@@ -3,6 +3,7 @@ from base64 import b64decode, b64encode
 from datetime import datetime, timezone
 from difflib import unified_diff
 from hashlib import sha256
+import json
 from pathlib import Path
 from time import time
 from uuid import uuid4
@@ -13,6 +14,11 @@ from .ledger import Ledger, check_path, digest
 
 NAMES = ("AGENTS.override.md", "AGENTS.md")
 LIMIT = 32 * 1024
+DEFAULT_FILES = {
+    "original": "global/original-AGENTS.md", "global": "global/improved-AGENTS.md",
+    "manager-planning": "roles/manager-planning.md", "developer": "roles/developer.md",
+    "reviewer": "roles/reviewer.md", "verifier": "roles/verifier-contract.md",
+}
 SUPPLEMENT = b"""
 ## DevOrchestra Controller contract
 
@@ -87,6 +93,53 @@ class InstructionStore:
     def _events(self):
         check_path(self.ledger.path)
         return self.ledger.read() if self.ledger.path.exists() else []
+
+    def inspect_defaults(self, manifest):
+        parsed = json.loads(instruction_bytes(manifest))
+        entries = parsed["documents"]
+        verified = {}
+        for role, relative in DEFAULT_FILES.items():
+            matches = [item for item in entries if item["path"] == relative]
+            data = instruction_bytes(manifest.parent / relative)
+            checksum = sha256(data).hexdigest()
+            if len(matches) != 1 or matches[0]["sha256"] != checksum or matches[0]["bytes"] != len(data):
+                raise Blocked(f"지침 해시 확인 필요 · {role}")
+            verified[role] = {"path": relative, "version": matches[0]["version"],
+                              "sha256": checksum, "text": data.decode("utf-8-sig")}
+        return verified
+
+    def approve_defaults(self, manifest, reviewed):
+        with execution_slot() as abandoned:
+            if abandoned or self.inspect_defaults(manifest) != reviewed:
+                raise Blocked("검토한 기본 지침이 바뀌었습니다.")
+            if not self.ledger.path.exists():
+                self.ledger.initialize()
+            references = {role: {key: value for key, value in item.items() if key != "text"}
+                          for role, item in reviewed.items()}
+            current = self.default_pin()
+            if current and current["manifest"] == str(manifest) and current["references"] == references:
+                return
+            self.ledger.update(lambda _events, _tail: {
+                "kind": "instruction_defaults_approved", "manifest": str(manifest), "references": references,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+    def default_pin(self):
+        return next((event for event in reversed(self._events())
+                     if event["kind"] == "instruction_defaults_approved"), None)
+
+    def active_defaults(self):
+        pin = self.default_pin()
+        if pin is None:
+            return {}
+        try:
+            current = self.inspect_defaults(Path(pin["manifest"]))
+            if {role: {key: value for key, value in item.items() if key != "text"}
+                    for role, item in current.items()} != pin["references"]:
+                raise Blocked("승인한 기본 지침이 변경되었습니다.")
+            return current
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise Blocked("기본 지침 연결을 확인하세요.") from error
 
     def backup(self, source):
         """Called only after the owner explicitly selects and confirms a source."""

@@ -143,6 +143,20 @@ class RequirementWorkflowTests(unittest.TestCase):
         self.assertIn("Private fixture draft", prompt)
         self.assertNotIn("Private fixture draft", str(self.ledger.read()))
 
+    def test_multiline_project_and_authored_requirement_reopen_without_overwrite(self):
+        goal = "첫 번째 목표\n" + "상세 설명 " * 100
+        criteria = ["실행 방법 확인", "결과 검증 " * 110]
+        self.catalog.save_project({**self.project, "goal": goal, "acceptance": criteria}, self.revision)
+        initial = self.catalog.register_requirement("sample", "goal.md", "GOAL")
+        authored = self.catalog.write_requirement("sample", "bug.md", "첫 줄\n재현 단계", "BUG", related=initial["id"])
+        with self.assertRaises(FileExistsError):
+            self.catalog.write_requirement("sample", "bug.md", "Do not overwrite", "BUG")
+        opened = Catalog(Ledger.for_project(self.ledger.state_boundary.parent)).read()
+        self.assertEqual(goal, opened["projects"]["sample"]["data"]["goal"])
+        self.assertEqual(criteria, opened["projects"]["sample"]["data"]["acceptance"])
+        self.assertEqual(initial["id"], authored["related"])
+        self.assertEqual("첫 줄\n재현 단계", (self.source / "bug.md").read_text(encoding="utf-8"))
+
     def test_revisions_are_frozen_in_session_and_visible_in_projection(self):
         reader = ProjectionReader(self.ledger)
         self.assertEqual("REGISTER_REQUIREMENTS", reader.read("sample")["workflow"]["next_action"])

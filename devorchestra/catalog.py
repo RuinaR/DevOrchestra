@@ -107,9 +107,16 @@ def validate_project(data):
     if (not _text(project_id, 48) or not re.fullmatch("[a-z0-9][a-z0-9-]*", project_id)
             or project_id in FIXTURE_IDS):
         raise ValueError("Invalid or reserved project ID")
-    if any(not _text(data[key]) for key in TEXT_FIELDS) or not data["name"].strip() or not data["goal"].strip():
+    if (any(not _text(data[key]) for key in TEXT_FIELDS if key != "goal")
+            or not isinstance(data["goal"], str) or not 0 < len(data["goal"].strip()) <= 8000
+            or len(data["goal"]) > 8000
+            or any(not (char.isprintable() or char in "\r\n\t") for char in data["goal"])
+            or not data["name"].strip()):
         raise ValueError("Invalid project text")
-    if any(not _strings(data[key]) for key in LIST_FIELDS) or not data["acceptance"]:
+    criteria = data["acceptance"]
+    if (any(not _strings(data[key]) for key in LIST_FIELDS if key != "acceptance")
+            or not isinstance(criteria, list) or not 1 <= len(criteria) <= 32
+            or any(not _text(item, 2000) or not item.strip() for item in criteria)):
         raise ValueError("Invalid project criteria or lists")
     repo = data["repository"]
     if not _text(repo, 256) or (repo and not re.fullmatch(
@@ -229,12 +236,12 @@ class Catalog:
         validate_reserve(data)
         return self._save("token_reserve_saved", data, revision)
 
-    def save_setup(self, data):
+    def save_setup(self, data, revision=0):
         from .setup import environment_status, validate_setup
         if not environment_status()["windows_x64"]:
             raise Blocked("Setup requires Windows x64")
         validate_setup(data, self.ledger.state_boundary)
-        return self._save("setup_saved", data, 0)
+        return self._save("setup_saved", data, revision)
 
     def register_requirement(self, project_id, relative, role, *, related=None):
         """Owner-selected read of one document. Store references and hashes only."""
@@ -269,6 +276,27 @@ class Catalog:
             self.ledger.append(len(events), tail, {"kind": "requirement_registered",
                                                   "data": item, "timestamp": now})
             return item
+
+    def write_requirement(self, project_id, relative, text, role, *, related=None):
+        """Explicit owner action. Create a Markdown file exclusively, then register it."""
+        relative = _requirement_path(relative)
+        if not relative.lower().endswith(".md") or role not in REQUIREMENT_ROLES or not text.strip():
+            raise ValueError("Markdown 문서 이름과 내용을 입력하세요.")
+        data = text.encode("utf-8")
+        if len(data) > MAX_REQUIREMENT_BYTES:
+            raise ValueError("문서는 UTF-8 기준 256 KiB까지 저장할 수 있습니다.")
+        current = self.read()
+        if related is not None and not any(item["id"] == related for item in
+                                           current.get("requirements", {}).get(project_id, ())):
+            raise Blocked("관련 요구사항을 다시 선택하세요.")
+        root = Path(current["projects"][project_id]["data"]["local_path"])
+        target = root / relative
+        check_path(target)
+        if not target.parent.is_dir() or target.is_relative_to(self.ledger.state_boundary):
+            raise Blocked("프로젝트 안의 기존 문서 폴더를 선택하세요.")
+        with target.open("xb") as stream:
+            stream.write(data)
+        return self.register_requirement(project_id, relative, role, related=related)
 
     def _save(self, kind, data, revision):
         with execution_slot() as abandoned:
