@@ -99,6 +99,6 @@ class NativeAccessProbeTests(unittest.TestCase):
             self.assertEqual("PASS", result["access"]["status"])
             self.assertEqual("NOT_VERIFIED", result["access"]["desktop_noninterference"])
             self.assertNotIn(OUTPUT, str(self.ledger.read()))
-            with self.assertRaisesRegex(Blocked, "unused admission"):
+            with self.assertRaisesRegex(Blocked, "DUPLICATE_REQUEST"):
                 self.runner.inspect_native(self.approval)
             launched.assert_called_once()

@@ -10,10 +10,12 @@ import unittest
 from unittest.mock import patch
 
 from devorchestra.app_server import (
-    MAX_FRAME, MAX_NOTICES_PER_REQUEST, AppServer, NativeInspectionApproval, _owned_stdio, instruction_sources,
+    INSPECTION_CONFIG, MAX_FRAME, MAX_NOTICES_PER_REQUEST, AppServer, NativeInspectionApproval, _owned_stdio,
+    instruction_sources,
 )
 from devorchestra.lease import Blocked, execution_slot
 from devorchestra.ledger import Ledger
+from devorchestra.native_access_probe import ALLOWED, PROTECTED, NativeAccessApproval
 from devorchestra.runtime import Runner
 
 
@@ -195,9 +197,92 @@ class AppServerTests(unittest.TestCase):
                 receipt = runner.inspect_native(approval)
                 self.assertEqual("DRAINED", receipt["owned_tree"])
                 self.assertEqual("NOT_VERIFIED", receipt["instruction_loading"])
-                with self.assertRaises(Blocked):
+                with self.assertRaisesRegex(Blocked, "DUPLICATE_REQUEST"):
                     Runner(Ledger(ledger.path)).inspect_native(approval)
                 launch.assert_called_once()
+
+    def test_controller_distinguishes_preflight_blocks_before_launch(self):
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            audit = root / "audit"
+            ledger = Ledger(audit / "probe.sqlite3")
+            runner = Runner(ledger)
+            runner.command("init")
+            lab = root / ("app-server-" + "d" * 32)
+            approval = NativeInspectionApproval("d" * 32, time() + 60, root / "codex.exe", lab)
+            expired = NativeInspectionApproval("d" * 32, time() - 1, approval.binary, lab)
+
+            def expect(value, stage, code):
+                previous = set(audit.glob("app-server-preflight-*.json"))
+                with self.assertRaisesRegex(Blocked, code):
+                    runner.inspect_native(value)
+                (receipt,) = set(audit.glob("app-server-preflight-*.json")) - previous
+                data = json.loads(receipt.read_bytes())
+                self.assertEqual({"request_id": approval.request_id if value else None,
+                                  "status": "BLOCKED", "stage": stage, "failure_code": code}, data)
+
+            with patch("devorchestra.app_server.open_app_server") as launch:
+                expect(None, "APPROVAL", "APPROVAL_INVALID")
+                expect(expired, "APPROVAL", "APPROVAL_EXPIRED")
+                with execution_slot():
+                    expect(approval, "EXECUTION_SLOT", "EXECUTION_SLOT_BUSY")
+                with patch.object(ledger, "snapshot", side_effect=Blocked("private path")):
+                    expect(approval, "LEDGER", "LEDGER_INTEGRITY_FAILED")
+                expect(approval, "SYNTHETIC_LAB", "SYNTHETIC_LAB_PARENT_MISMATCH")
+                self.assertEqual([], ledger.read())
+                ledger.append(0, ledger.snapshot()[1], {
+                    "kind": "native_inspection_intent", "request_id": "e" * 32,
+                })
+                expect(approval, "ADMISSION", "PRIOR_NATIVE_UNRESOLVED")
+                self.assertEqual(["native_inspection_intent"], [e["kind"] for e in ledger.read()])
+                launch.assert_not_called()
+
+    def test_nested_lab_passes_parent_check_and_reports_distinct_file_preflights(self):
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            ledger = Ledger(root / "probe.sqlite3")
+            runner = Runner(ledger)
+            runner.command("init")
+            lab = ledger.local_directory("temp") / ("app-server-" + "a" * 32)
+            for name in ("home", "tmp", "work", "protected"):
+                (lab / name).mkdir(parents=True)
+            (lab / "home" / "config.toml").write_bytes(INSPECTION_CONFIG.encode("ascii"))
+            (lab / "home" / "AGENTS.md").write_bytes(b"synthetic")
+            (lab / "work" / "allowed.txt").write_bytes(b"wrong")
+            (lab / "protected" / "protected.txt").write_bytes(PROTECTED)
+            approval = NativeAccessApproval(
+                NativeInspectionApproval("a" * 32, time() + 60, root / "codex.exe", lab), "b" * 64,
+            )
+            with patch("devorchestra.app_server.open_app_server") as launch, \
+                    patch("devorchestra.mxc_launcher._known_folder", return_value=root), \
+                    patch("devorchestra.system_powershell.hold_system_powershell",
+                          side_effect=Blocked("private signature detail")):
+                with self.assertRaisesRegex(Blocked, "INSTRUCTION_INVALID"):
+                    runner.inspect_native(approval)
+                (lab / "work" / "AGENTS.md").write_bytes(b"synthetic")
+                with self.assertRaisesRegex(Blocked, "MARKER_INVALID"):
+                    runner.inspect_native(approval)
+                (lab / "work" / "allowed.txt").write_bytes(ALLOWED)
+                with self.assertRaisesRegex(Blocked, "POWERSHELL_IDENTITY_INVALID"):
+                    runner.inspect_native(approval)
+                launch.assert_not_called()
+            self.assertEqual([], ledger.read())
+
+    def test_binary_identity_block_retains_durable_intent_and_writes_preflight_receipt(self):
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            ledger = Ledger(root / "probe.sqlite3")
+            runner = Runner(ledger)
+            runner.command("init")
+            approval = NativeInspectionApproval("f" * 32, time() + 60, root / "codex.exe", root)
+            with patch("devorchestra.app_server.prepare_inspection", return_value=(root, {}, {})), \
+                    patch("devorchestra.app_server._owned_stdio") as launch:
+                with self.assertRaisesRegex(Blocked, "BINARY_IDENTITY_INVALID"):
+                    runner.inspect_native(approval)
+                launch.assert_not_called()
+            self.assertEqual(["native_inspection_intent"], [e["kind"] for e in ledger.read()])
+            (receipt,) = root.glob("app-server-preflight-*.json")
+            self.assertEqual("CLI_IDENTITY", json.loads(receipt.read_bytes())["stage"])
 
     def test_result_write_failure_keeps_intent_and_preserves_cleanup_receipt(self):
         with TemporaryDirectory(dir=Path.cwd()) as directory:

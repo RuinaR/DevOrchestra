@@ -1,10 +1,10 @@
 """Fixed model-free App Server file boundary probe for an approved synthetic lab."""
 from base64 import b64encode
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .app_server import NativeInspectionApproval
+from .app_server import NativeInspectionApproval, inspection_check
 from .lease import Blocked
 from .ledger import check_path, digest
 
@@ -41,11 +41,14 @@ def prepare_probe(work, powershell_sha256):
                 or not _matches(allowed, ALLOWED) or not _matches(protected, PROTECTED)):
             raise Blocked("Synthetic probe markers changed")
 
-    verify_markers()
-    # Positive host control: known marker bytes and a write-capable open without mutation.
-    with allowed.open("r+b"):
-        pass
-    with hold_system_powershell(powershell_sha256) as (shell, recheck_identity):
+    with inspection_check("MARKERS", "MARKER_INVALID"):
+        verify_markers()
+        # Positive host control: known marker bytes and a write-capable open without mutation.
+        with allowed.open("r+b"):
+            pass
+    with ExitStack() as resources:
+        with inspection_check("POWERSHELL_IDENTITY", "POWERSHELL_IDENTITY_INVALID"):
+            shell, recheck_identity = resources.enter_context(hold_system_powershell(powershell_sha256))
         def before_dispatch():
             verify_markers()
             recheck_identity()

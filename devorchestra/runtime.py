@@ -13,7 +13,7 @@ from .development import session_view, usage_totals, validate_proposal
 from .event_audit import Binding, FIXTURE_USAGE, Packet
 from .event_journal import EventJournal, OPEN_ROLE_EVENTS
 
-from .lease import Blocked, execution_slot
+from .lease import Blocked, SlotBlocked, execution_slot
 from .ledger import digest
 from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
@@ -296,30 +296,72 @@ class Runner:
 
     def inspect_native(self, approval):
         """Internal owner entry for a model-free handshake or fixed access probe."""
+        from .app_server import InspectionBlocked, NativeInspectionApproval, save_preflight_diagnostic
+        from .native_access_probe import NativeAccessApproval
+
+        inspection = approval.inspection if type(approval) is NativeAccessApproval else approval
+        request_id = None
+        if (type(inspection) is NativeInspectionApproval and isinstance(inspection.request_id, str)
+                and re.fullmatch(r"[0-9a-f]{32}", inspection.request_id)):
+            request_id = inspection.request_id
+        try:
+            return self._inspect_native(approval, request_id)
+        except (InspectionBlocked, SlotBlocked) as error:
+            failure = (InspectionBlocked("EXECUTION_SLOT", error.code)
+                       if isinstance(error, SlotBlocked) else error)
+            try:
+                save_preflight_diagnostic(self.ledger, request_id, failure)
+            except (Blocked, OSError):
+                raise Blocked(f"{failure.code}; PREFLIGHT_RECEIPT_WRITE_FAILED") from None
+            raise failure from None
+
+    def _inspect_native(self, approval, request_id):
         from contextlib import ExitStack
-        from .app_server import NativeInspectionApproval, open_app_server, prepare_inspection, save_inspection_diagnostic
+        from math import isfinite
+        from .app_server import InspectionBlocked, inspection_check, open_app_server, prepare_inspection, save_inspection_diagnostic
         from .mxc_launcher import CLI_HASH, CLI_VERSION
         from .native_access_probe import NativeAccessApproval, command_request, prepare_probe, probe_receipt
 
         access = approval if type(approval) is NativeAccessApproval else None
         if access:
             approval = access.inspection
-        if (type(approval) is not NativeInspectionApproval
-                or not re.fullmatch(r"[0-9a-f]{32}", approval.request_id)
-                or not time() < approval.expires_epoch
-                or (access and not re.fullmatch(r"[0-9a-f]{64}", access.powershell_sha256))):
-            raise Blocked("Current App Server inspection approval required")
+        if (request_id is None or type(approval.expires_epoch) not in (int, float)
+                or (type(approval.expires_epoch) is float and not isfinite(approval.expires_epoch))
+                or (access and (not isinstance(access.powershell_sha256, str)
+                                or not re.fullmatch(r"[0-9a-f]{64}", access.powershell_sha256)))):
+            raise InspectionBlocked("APPROVAL", "APPROVAL_INVALID")
+
+        def check_approval():
+            if time() >= approval.expires_epoch:
+                raise InspectionBlocked("APPROVAL", "APPROVAL_EXPIRED")
+
+        def admit(current):
+            check_approval()
+            if any(event.get("request_id") == request_id for event in current):
+                raise InspectionBlocked("ADMISSION", "DUPLICATE_REQUEST")
+            if shutdown_state(current)["state"] in HELD:
+                raise InspectionBlocked("ADMISSION", "SHUTDOWN_ADMISSION_CLOSED")
+            if native_unresolved(current):
+                raise InspectionBlocked("ADMISSION", "PRIOR_NATIVE_UNRESOLVED")
+            if diagnostic_unresolved(current):
+                raise InspectionBlocked("ADMISSION", "PRIOR_DIAGNOSTIC_UNRESOLVED")
+            if pending_budget_stop(current):
+                raise InspectionBlocked("ADMISSION", "PENDING_BUDGET_STOP")
+
+        check_approval()
         with execution_slot() as abandoned, ExitStack() as resources:
-            events, tail = self.ledger.snapshot(recover_journal=True)
-            require_admission(events)
+            if abandoned:
+                raise InspectionBlocked("EXECUTION_SLOT", "ABANDONED_SLOT")
+            with inspection_check("LEDGER", "LEDGER_INTEGRITY_FAILED"):
+                events, tail = self.ledger.snapshot(recover_journal=True)
+                admit(events)
             run, development = last_run(events), session_view(events)
-            if (abandoned or (run and run[-1]["state"] not in TERMINAL)
-                    or (development and not development["end"])
-                    or any(event.get("request_id") == approval.request_id for event in events)):
-                raise Blocked("App Server inspection requires idle, unused admission")
-            work, environment, instructions = prepare_inspection(
-                approval, self.ledger.local_directory("temp"), access_probe=bool(access),
-            )
+            if (run and run[-1]["state"] not in TERMINAL) or (development and not development["end"]):
+                raise InspectionBlocked("ADMISSION", "ACTIVE_DEVELOPMENT")
+            with inspection_check("SYNTHETIC_LAB", "SYNTHETIC_LAB_INVALID"):
+                work, environment, instructions = prepare_inspection(
+                    approval, self.ledger.local_directory("temp"), access_probe=bool(access),
+                )
             fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",
                       "source": "WINDOWS_NATIVE_CODEX", "request_id": approval.request_id,
                       "instruction_sources": instructions}
@@ -330,22 +372,21 @@ class Runner:
                               cli_sha256=CLI_HASH, cli_version=CLI_VERSION,
                               powershell_sha256=access.powershell_sha256)
 
-            def admit(current):
-                require_admission(current)
-                if time() >= approval.expires_epoch:
-                    raise Blocked("App Server inspection approval expired")
-
             def cancelled():
                 current, _ = self.ledger.snapshot()
                 return time() >= approval.expires_epoch or shutdown_state(current)["state"] in HELD
 
-            count, head = self.ledger.append(len(events), tail, {
-                **fields, "kind": "native_inspection_intent",
-            }, admission=admit)
+            with inspection_check("LEDGER", "LEDGER_INTENT_WRITE_FAILED"):
+                count, head = self.ledger.append(len(events), tail, {
+                    **fields, "kind": "native_inspection_intent",
+                }, admission=admit)
             server = None
             try:
-                if cancelled():
-                    raise Blocked("App Server inspection cancelled")
+                with inspection_check("LEDGER", "LEDGER_INTEGRITY_FAILED"):
+                    current, _ = self.ledger.snapshot()
+                check_approval()
+                if shutdown_state(current)["state"] in HELD:
+                    raise InspectionBlocked("ADMISSION", "SHUTDOWN_ADMISSION_CLOSED")
                 options = {"explicit_mxc": True} if access else {}
                 with open_app_server(approval.binary, work, environment, 15, cancelled, **options) as server:
                     policy = server.inspect_policy()
@@ -365,7 +406,9 @@ class Runner:
                         recheck_probe()
                         wire_result = server.request(3, "command/exec", command)
                 resources.close()
-            except Exception:
+            except Exception as error:
+                if server is None and isinstance(error, InspectionBlocked):
+                    raise
                 # Preserve the durable unresolved intent without raw process errors.
                 try:
                     save_inspection_diagnostic(self.ledger, approval.request_id, server,

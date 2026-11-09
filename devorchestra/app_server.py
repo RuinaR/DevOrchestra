@@ -8,8 +8,10 @@ import json
 import os
 from pathlib import Path
 from queue import Empty, Full, Queue
+import sqlite3
 from threading import Event, Thread
 from time import monotonic
+from uuid import uuid4
 
 from .job_probe import (
     ExtendedLimits, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
@@ -44,23 +46,42 @@ class NativeInspectionApproval:
     lab_root: Path
 
 
+class InspectionBlocked(Blocked):
+    def __init__(self, stage, code):
+        super().__init__(code)
+        self.stage = stage
+        self.code = code
+
+
+@contextmanager
+def inspection_check(stage, code):
+    try:
+        yield
+    except InspectionBlocked:
+        raise
+    except (Blocked, OSError, sqlite3.Error):
+        raise InspectionBlocked(stage, code) from None
+    except Exception:
+        raise InspectionBlocked(stage, "UNKNOWN_PREFLIGHT_FAILURE") from None
+
+
 def prepare_inspection(approval, lab_parent, *, access_probe=False):
     """Accept only an isolated, pre-staged lab with no credentials or plugins."""
     from .mxc_launcher import _known_folder
 
     root = approval.lab_root
+    if root.parent != lab_parent:
+        raise InspectionBlocked("SYNTHETIC_LAB", "SYNTHETIC_LAB_PARENT_MISMATCH")
     home, work, temporary = (root / part for part in ("home", "work", "tmp"))
     for path in (root, home, work, temporary):
         check_path(path)
-    local = _known_folder(0x1C)
     root_entries = {"home", "work", "tmp"} | ({"protected"} if access_probe else set())
     work_entries = {"AGENTS.md"} | ({"allowed.txt"} if access_probe else set())
-    if (root.parent != lab_parent
-            or not root.name.startswith("app-server-")
+    if (not root.name.startswith("app-server-")
             or (access_probe and root.name != f"app-server-{approval.request_id}")
             or {p.name for p in root.iterdir()} != root_entries
-            or {p.name for p in home.iterdir()} != {"AGENTS.md", "config.toml"}
-            or {p.name for p in work.iterdir()} != work_entries
+            or {p.name for p in home.iterdir()} - {"AGENTS.md"} != {"config.toml"}
+            or {p.name for p in work.iterdir()} - {"AGENTS.md"} != work_entries - {"AGENTS.md"}
             or any(temporary.iterdir())):
         raise Blocked("App Server lab inventory rejected")
     config = home / "config.toml"
@@ -68,10 +89,12 @@ def prepare_inspection(approval, lab_parent, *, access_probe=False):
     with config.open("rb") as stream:
         if stream.read(len(INSPECTION_CONFIG) + 1) != INSPECTION_CONFIG.encode("ascii"):
             raise Blocked("App Server lab configuration rejected")
-    sources = instruction_sources(home, work)
-    windows = _known_folder(0x24)
+    with inspection_check("INSTRUCTIONS", "INSTRUCTION_INVALID"):
+        sources = instruction_sources(home, work)
+    with inspection_check("LAUNCH_ENVIRONMENT", "HOST_FOLDER_UNVERIFIED"):
+        local, windows, program_data = (_known_folder(folder) for folder in (0x1C, 0x24, 0x23))
     env = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,
-           "LOCALAPPDATA": str(local), "ProgramData": str(_known_folder(0x23)),
+           "LOCALAPPDATA": str(local), "ProgramData": str(program_data),
            "PATH": str(windows / "System32"), "CODEX_HOME": str(home),
            "TEMP": str(temporary), "TMP": str(temporary)}
     return work, env, sources
@@ -412,8 +435,20 @@ def save_inspection_diagnostic(ledger, request_id, server, status):
         data["failure_code"] = status
     elif status != "RESULT_COMMITTED" and data["failure_code"] is None:
         data["failure_code"] = status
+    _write_inspection_receipt(path, {"request_id": request_id, "status": status, **data})
+
+
+def save_preflight_diagnostic(ledger, request_id, failure):
+    directory = ledger.local_directory("logs", create=True)
+    path = directory / f"app-server-preflight-{uuid4().hex}.json"
+    check_path(path)
+    _write_inspection_receipt(path, {"request_id": request_id, "status": "BLOCKED",
+                                    "stage": failure.stage, "failure_code": failure.code})
+
+
+def _write_inspection_receipt(path, data):
     with path.open("x", encoding="utf-8", newline="\n") as stream:
-        stream.write(canonical({"request_id": request_id, "status": status, **data}) + "\n")
+        stream.write(canonical(data) + "\n")
         stream.flush()
         os.fsync(stream.fileno())
 
@@ -507,13 +542,16 @@ def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled, *,
     """Pinned App Server entry for a future approved Controller admission."""
     from .mxc_launcher import CLI_HASH, _pin, _signed_offline
 
-    check_path(cwd)
-    if (not cwd.is_dir() or binary.name.casefold() != "codex.exe"
-            or not 0 < timeout <= 60):
-        raise Blocked("App Server path or working directory rejected")
-    _pin(binary, CLI_HASH)
-    if not _signed_offline(binary):
-        raise Blocked("App Server signature unverified")
+    with inspection_check("SYNTHETIC_LAB", "SYNTHETIC_LAB_INVALID"):
+        check_path(cwd)
+        if not cwd.is_dir() or not 0 < timeout <= 60:
+            raise Blocked("App Server path or working directory rejected")
+    with inspection_check("CLI_IDENTITY", "BINARY_IDENTITY_INVALID"):
+        if binary.name.casefold() != "codex.exe":
+            raise Blocked("App Server binary path rejected")
+        _pin(binary, CLI_HASH)
+        if not _signed_offline(binary):
+            raise Blocked("App Server signature unverified")
     argv = ["-c", "windows.sandbox=mxc", "app-server"] if explicit_mxc else ["app-server"]
     with _owned_stdio(binary, argv, cwd, environment, timeout, cancelled) as connection:
         yield connection
