@@ -32,7 +32,16 @@ for line in sys.stdin:
         'configRequirements/read': {'requirements': None},
     }[msg['method']]
     print(json.dumps({'id': msg['id'], 'result': result}), flush=True)
+    if msg['method'] == 'initialize':
+        print(json.dumps({'method': 'remoteControl/status/changed', 'params': {
+            'status': 'disabled', 'installationId': 'synthetic-installation',
+            'serverName': 'synthetic-host', 'environmentId': None,
+        }, 'emittedAtMs': 1794172800000}), flush=True)
 """
+
+REMOTE_DISABLED = (b'{"method":"remoteControl/status/changed","params":{"status":"disabled",'
+                   b'"installationId":"private installation","serverName":"private name",'
+                   b'"environmentId":null},"emittedAtMs":1794172800000}\n')
 
 
 class AppServerTests(unittest.TestCase):
@@ -62,19 +71,17 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(1, len(output.getvalue().splitlines()))
         self.assertNotIn("private fixture", str(connection.diagnostic_receipt()))
 
-    def test_allowed_warning_before_response_is_bounded_and_redacted(self):
-        messages = (b'{"method":"warning","params":{"message":"private fixture"},'
-                    b'"emittedAtMs":1794172800000}\n'
-                    b'{"id":1,"result":{"config":{}}}\n')
+    def test_disabled_remote_status_before_response_is_bounded_and_redacted(self):
+        messages = REMOTE_DISABLED + b'{"id":1,"result":{"config":{}}}\n'
         connection = AppServer(BytesIO(messages), BytesIO(), 1, lambda: False)
         self.assertEqual({"config": {}}, connection.request(1, "config/read", {}))
         receipt = connection.diagnostic_receipt()
         self.assertEqual(["NOTIFICATION", "MATCHED_RESPONSE"],
                          [item["classification"] for item in receipt["protocol"]])
-        self.assertNotIn("private fixture", str(receipt))
+        self.assertNotIn("private", str(receipt))
         self.assertNotIn("1794172800000", str(receipt))
 
-    def test_config_warning_is_consumed_but_requires_policy_review(self):
+    def test_config_warning_stops_policy_inspection(self):
         messages = (b'{"id":0,"result":{"platformOs":"windows"}}\n'
                     b'{"method":"configWarning","params":{"summary":"private fixture","details":null,'
                     b'"path":"private path","range":{"start":{"line":1,"column":2},'
@@ -86,6 +93,42 @@ class AppServerTests(unittest.TestCase):
             connection.inspect_policy()
         self.assertNotIn("private fixture", str(connection.diagnostic_receipt()))
         self.assertNotIn("private path", str(connection.diagnostic_receipt()))
+
+    def test_official_notifications_are_classified_without_granting_permission(self):
+        cases = [
+            (REMOTE_DISABLED.replace(b'"disabled"', b'"connected"'), "STATUS",
+             "REMOTE_CONTROL_REQUIRES_REVIEW"),
+            (REMOTE_DISABLED.replace(b'"private name"', b'false'), "STATUS", "INVALID_NOTIFICATION_METADATA"),
+            (b'{"method":"warning","params":{"message":"private"}}\n', "WARNING", "WARNING_REQUIRES_REVIEW"),
+            (b'{"method":"windows/worldWritableWarning","params":{"private-key":"private"}}\n',
+             "SECURITY", "SECURITY_NOTIFICATION_REQUIRES_REVIEW"),
+            (b'{"method":"account/updated","params":{"private-key":"private"}}\n',
+             "ACCOUNT", "ACCOUNT_NOTIFICATION_BLOCKED"),
+            (b'{"method":"thread/started","params":{}}\n', "ACTIVITY", "UNSUPPORTED_NOTIFICATION"),
+            (b'{"method":"private-method","params":{"private-key":"private"}}\n',
+             "UNCLASSIFIED", "UNSUPPORTED_NOTIFICATION"),
+        ]
+        for frame, category, code in cases:
+            with self.subTest(category=category, code=code):
+                output = BytesIO()
+                connection = AppServer(BytesIO(frame), output, 1, lambda: False)
+                with self.assertRaisesRegex(Blocked, code):
+                    connection.request(1, "config/read", {})
+                notice, failure = connection.diagnostic_receipt()["protocol"]
+                self.assertEqual(category, notice["shape"]["category"])
+                self.assertEqual("dict", notice["shape"]["params_type"])
+                self.assertEqual(code, failure["classification"])
+                self.assertNotIn("private", str((notice, failure)))
+                self.assertEqual(1, len(output.getvalue().splitlines()))
+
+    def test_queued_security_warning_blocks_command_before_send(self):
+        output = BytesIO()
+        frame = b'{"method":"windows/worldWritableWarning","params":{}}\n'
+        connection = AppServer(BytesIO(frame), output, 1, lambda: False)
+        connection.reader.join(1)
+        with self.assertRaisesRegex(Blocked, "SECURITY_NOTIFICATION_REQUIRES_REVIEW"):
+            connection.request(3, "command/exec", {})
+        self.assertEqual(b"", output.getvalue())
 
     def test_message_failures_have_distinct_codes(self):
         cases = [
@@ -116,8 +159,7 @@ class AppServerTests(unittest.TestCase):
             (b'{"id":1,"id":1,"result":{}}\n', "INVALID_JSON"),
             (b"", "EOF"),
             (b"x" * (MAX_FRAME + 1), "FRAME_TOO_LARGE"),
-            (b'{"method":"warning","params":{"message":"fixture"}}\n'
-             * (MAX_NOTICES_PER_REQUEST + 1), "NOTIFICATION_LIMIT"),
+            (REMOTE_DISABLED * (MAX_NOTICES_PER_REQUEST + 1), "NOTIFICATION_LIMIT"),
         ]
         for frames, expected in cases:
             with self.subTest(expected=expected):

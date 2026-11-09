@@ -26,13 +26,31 @@ from .instructions import selected_source, source_ref
 MAX_FRAME = 256 * 1024
 MAX_MESSAGES = 4096
 MAX_NOTICES_PER_REQUEST = 16
+REMOTE_STATUS = "remoteControl/status/changed"
+NOTIFICATION_CATEGORIES = {
+    REMOTE_STATUS: "STATUS",
+    "warning": "WARNING", "deprecationNotice": "WARNING",
+    "configWarning": "CONFIGURATION", "externalAgentConfig/import/progress": "CONFIGURATION",
+    "externalAgentConfig/import/completed": "CONFIGURATION",
+    "guardianWarning": "SECURITY", "windows/worldWritableWarning": "SECURITY",
+    "windowsSandbox/setupCompleted": "SECURITY", "autoApprovalReview/strictReviewRequired": "SECURITY",
+    "account/updated": "ACCOUNT", "account/login/completed": "ACCOUNT",
+    "account/rateLimits/updated": "ACCOUNT", "account/gatewayOAuth/changed": "ACCOUNT",
+    "mcpServer/oauthLogin/completed": "ACCOUNT", "modelProvider/authRecoveryStarted": "ACCOUNT",
+    "modelProvider/authRecoveryCompleted": "ACCOUNT",
+    "thread/started": "ACTIVITY", "turn/started": "ACTIVITY", "turn/completed": "ACTIVITY",
+    "item/started": "ACTIVITY", "item/completed": "ACTIVITY", "item/agentMessage/delta": "ACTIVITY",
+    "thread/tokenUsage/updated": "ACTIVITY", "model/rerouted": "ACTIVITY",
+    "command/exec/outputDelta": "ACTIVITY", "mcpServer/startupStatus/updated": "ACTIVITY",
+    "serverRequest/resolved": "ACTIVITY", "fs/changed": "ACTIVITY",
+}
 SAFE_METHODS = frozenset((
     "initialize", "initialized", "config/read", "configRequirements/read", "command/exec",
     "thread/start", "thread/started", "turn/start", "turn/started", "turn/completed",
     "item/started", "item/completed", "item/agentMessage/delta", "thread/tokenUsage/updated",
     "warning", "configWarning", "item/commandExecution/requestApproval",
     "item/fileChange/requestApproval", "item/permissions/requestApproval", "tool/requestUserInput",
-))
+)) | frozenset(NOTIFICATION_CATEGORIES)
 ERROR_CODES = {-32700: "PARSE_ERROR", -32600: "INVALID_REQUEST", -32601: "METHOD_NOT_FOUND",
                -32602: "INVALID_PARAMS", -32603: "INTERNAL_ERROR", -32001: "OVERLOADED"}
 INSPECTION_CONFIG = 'sandbox_mode = "read-only"\napproval_policy = "never"\n'
@@ -113,7 +131,6 @@ class AppServer:
         self.request_ids = set()
         self.completed_ids = set()
         self.received = 0
-        self.config_warning_seen = False
         self.failure_code = None
         self.diagnostics = deque(maxlen=32)
         self.cleanup_receipt = {"job": "UNKNOWN", "pipes": "UNKNOWN"}
@@ -304,7 +321,13 @@ class AppServer:
             method = message["method"]
             if "id" in message:
                 self._fail("SERVER_REQUEST_BLOCKED", method=method, matches=matches, valid=True, size=size)
-            self._note("NOTIFICATION", method=method, valid=True, size=size)
+            params = message.get("params")
+            self._note("NOTIFICATION", method=method, valid=True, size=size, shape={
+                "category": NOTIFICATION_CATEGORIES.get(method, "UNCLASSIFIED"),
+                "params_type": type(params).__name__ if "params" in message else "ABSENT",
+                "params_members": len(params) if isinstance(params, (dict, list)) else None,
+                "has_emitted_at": "emittedAtMs" in message,
+            })
         else:
             if type(identifier) is int and identifier in self.completed_ids:
                 self._fail("DUPLICATE_RESPONSE", matches=matches, valid=True, size=size)
@@ -324,15 +347,36 @@ class AppServer:
 
     def _informational(self, message):
         method, params = message["method"], message.get("params")
-        if method not in ("warning", "configWarning"):
+        category = NOTIFICATION_CATEGORIES.get(method)
+        if method == REMOTE_STATUS:
+            if (not isinstance(params, dict)
+                    or params.keys() - {"status", "serverName", "installationId", "environmentId"}
+                    or params.get("status") not in ("disabled", "connecting", "connected", "errored")
+                    or any(not isinstance(params.get(key), str) or not 0 < len(params[key]) <= 256
+                           for key in ("serverName", "installationId"))
+                    or (params.get("environmentId") is not None
+                        and (not isinstance(params["environmentId"], str) or len(params["environmentId"]) > 256))):
+                self._fail("INVALID_NOTIFICATION_METADATA", method=method, valid=True)
+            if params["status"] != "disabled" or params.get("environmentId") is not None:
+                self._fail("REMOTE_CONTROL_REQUIRES_REVIEW", method=method, valid=True)
+            return True
+        if category == "ACCOUNT":
+            self._fail("ACCOUNT_NOTIFICATION_BLOCKED", method=method, valid=True)
+        if category == "SECURITY":
+            self._fail("SECURITY_NOTIFICATION_REQUIRES_REVIEW", method=method, valid=True)
+        if method == "warning":
+            self._fail("WARNING_REQUIRES_REVIEW", method=method, valid=True)
+        if method != "configWarning":
+            if category == "CONFIGURATION":
+                self._fail("CONFIG_NOTIFICATION_REQUIRES_REVIEW", method=method, valid=True)
+            if category == "WARNING":
+                self._fail("WARNING_REQUIRES_REVIEW", method=method, valid=True)
             return False
-        field = "message" if method == "warning" else "summary"
-        if not isinstance(params, dict) or not isinstance(params.get(field), str):
+        if not isinstance(params, dict) or not isinstance(params.get("summary"), str):
             self._fail("INVALID_NOTIFICATION", method=method, valid=True)
-        if method == "configWarning":
-            # The pinned v2 config schema puts optional metadata inside params.
-            location = params.get("range")
-            if (params.keys() - {"summary", "details", "path", "range"}
+        # The pinned v2 config schema puts optional metadata inside params.
+        location = params.get("range")
+        if (params.keys() - {"summary", "details", "path", "range"}
                     or any(value is not None and (not isinstance(value, str) or len(value) > 8192)
                            for value in (params.get("details"), params.get("path")))
                     or (location is not None and (not isinstance(location, dict)
@@ -341,9 +385,8 @@ class AppServer:
                                or any(type(value) is not int or not 1 <= value < 2**64
                                       for value in point.values())
                                for point in location.values())))):
-                self._fail("INVALID_NOTIFICATION_METADATA", method=method, valid=True)
-            self.config_warning_seen = True
-        return True
+            self._fail("INVALID_NOTIFICATION_METADATA", method=method, valid=True)
+        self._fail("CONFIG_WARNING_REQUIRES_REVIEW", method=method, valid=True)
 
     def request(self, request_id, method, params, on_notification=None, *, allowed_notifications=()):
         if type(request_id) is not int or request_id in self.request_ids or self.request_method is not None:
@@ -352,6 +395,8 @@ class AppServer:
         self.request_id = request_id
         self.request_method = method if method in SAFE_METHODS else "UNRECOGNIZED"
         try:
+            if method in ("command/exec", "thread/start", "turn/start"):
+                self.check_trailing_messages(before_dispatch=True)
             self.send({"id": request_id, "method": method, "params": params})
             for _ in range(MAX_NOTICES_PER_REQUEST + 1):
                 reply = self.receive()
@@ -367,13 +412,15 @@ class AppServer:
         finally:
             self.request_id = self.request_method = None
 
-    def check_trailing_messages(self):
+    def check_trailing_messages(self, *, before_dispatch=False):
         for _ in range(MAX_NOTICES_PER_REQUEST + 1):
             try:
                 line = self.frames.get_nowait()
             except Empty:
                 return
             if line is None:
+                if before_dispatch:
+                    self._fail("EOF")
                 return
             message = self._decode(line)
             if not self._informational(message):
@@ -397,8 +444,6 @@ class AppServer:
         values = config.get("config")
         if not isinstance(values, dict) or "requirements" not in requirements:
             raise Blocked("App Server policy response incomplete")
-        if self.config_warning_seen:
-            self._fail("CONFIG_WARNING_REQUIRES_REVIEW", method="configWarning")
         sandbox = values.get("sandbox_mode")
         approval = values.get("approval_policy")
         return {
@@ -533,8 +578,6 @@ def _owned_stdio(executable, argv, cwd, environment, timeout, cancelled):
                     connection._fail(reason, size=size)
                 if drained:
                     connection.check_trailing_messages()
-                    if connection.config_warning_seen:
-                        connection._fail("CONFIG_WARNING_REQUIRES_REVIEW", method="configWarning")
 
 
 @contextmanager
