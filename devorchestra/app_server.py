@@ -121,15 +121,18 @@ class AppServer:
                     self.read_failure = ("QUEUE_LIMIT", None)
                 self.broken.set()
 
-    def _note(self, classification, *, method=None, matches=None, valid=None, size=None, error=None):
-        self.diagnostics.append({
+    def _note(self, classification, *, method=None, matches=None, valid=None, size=None, error=None, shape=None):
+        record = {
             "stage": "RPC" if self.request_method else "STREAM",
             "request_method": self.request_method,
             "classification": classification,
             "server_method": method if isinstance(method, str) and method in SAFE_METHODS
             else "UNRECOGNIZED" if method is not None else None,
             "id_matches": matches, "json_valid": valid, "frame_bytes": size, "error": error,
-        })
+        }
+        if shape is not None:
+            record["shape"] = shape
+        self.diagnostics.append(record)
 
     def _fail(self, classification, **fields):
         self.failure_code = classification
@@ -208,41 +211,93 @@ class AppServer:
             self.failure_code = "INVALID_JSON"
             self._note("INVALID_JSON", valid=False, size=len(line))
             raise Blocked("App Server INVALID_JSON") from None
-        size = len(line)
-        if not isinstance(message, dict) or message.get("jsonrpc", "2.0") != "2.0":
-            self._fail("INVALID_ENVELOPE", valid=True, size=size)
+        self._validate_envelope(message, len(line))
+        self._classify_message(message, len(line))
+        return message
+
+    def _validate_envelope(self, message, size):
+        if not isinstance(message, dict):
+            self._fail("ENVELOPE_TOP_LEVEL_TYPE", valid=True, size=size,
+                       shape={"top_level": type(message).__name__})
+        fields = {"jsonrpc", "id", "method", "params", "trace", "emittedAtMs", "result", "error"}
         has_id = "id" in message
         identifier = message.get("id")
         matches = type(identifier) is int and identifier == self.request_id if has_id else None
+        method = message.get("method")
+        has_result, has_error = "result" in message, "error" in message
+
+        def reject(code, allowed=fields):
+            self._fail(code, method=method if isinstance(method, str) else None,
+                       matches=matches, valid=True, size=size, shape={
+                           "field_types": {key: type(message[key]).__name__
+                                           for key in sorted(fields.intersection(message))},
+                           "unexpected_field_count": len(message.keys() - allowed),
+                       })
+
+        if message.get("jsonrpc", "2.0") != "2.0":
+            reject("ENVELOPE_JSONRPC_FIELD")
+        if has_id and (type(identifier) not in (int, str)
+                       or (type(identifier) is int and not -(2**63) <= identifier < 2**63)):
+            reject("ENVELOPE_ID_FIELD")
+        if "method" in message:
+            if not isinstance(method, str) or not method:
+                reject("ENVELOPE_METHOD_FIELD")
+            if has_result or has_error:
+                reject("ENVELOPE_RESULT_ERROR_CONFLICT")
+            if not isinstance(message.get("params"), (dict, list, type(None))):
+                reject("ENVELOPE_PARAMS_TYPE")
+            allowed = {"method", "params", "jsonrpc"}
+            # The pinned Codex rpc.rs defines trace for requests only.
+            if has_id:
+                allowed |= {"id", "trace"}
+                trace = message.get("trace")
+                if trace is not None and (not isinstance(trace, dict)
+                        or trace.keys() - {"traceparent", "tracestate"}
+                        or any(value is not None and (not isinstance(value, str) or len(value) > 512)
+                               for value in trace.values())):
+                    reject("ENVELOPE_METADATA_FIELD", allowed)
+            else:
+                # ServerNotificationEnvelope adds this field on the actual stdio output.
+                allowed.add("emittedAtMs")
+                emitted_at = message.get("emittedAtMs")
+                if "emittedAtMs" in message and (type(emitted_at) is not int
+                                                  or not 0 <= emitted_at < 2**63):
+                    reject("ENVELOPE_METADATA_FIELD", allowed)
+        else:
+            if not has_id:
+                reject("ENVELOPE_ID_FIELD")
+            if has_result and has_error:
+                reject("ENVELOPE_RESULT_ERROR_CONFLICT")
+            if not (has_result or has_error):
+                reject("ENVELOPE_RESPONSE_FIELDS")
+            allowed = {"id", "jsonrpc", "result", "error"}
+        if message.keys() - allowed:
+            reject("ENVELOPE_METADATA_FIELD", allowed)
+
+    def _classify_message(self, message, size):
+        identifier = message.get("id")
+        matches = type(identifier) is int and identifier == self.request_id
         if "method" in message:
             method = message["method"]
-            if (not isinstance(method, str) or not method or "result" in message or "error" in message
-                    or ("params" in message and not isinstance(message["params"], (dict, list, type(None))))
-                    or set(message) - {"id", "method", "params", "jsonrpc"}):
-                self._fail("INVALID_ENVELOPE", valid=True, size=size)
-            if has_id:
-                self._fail("SERVER_REQUEST_BLOCKED" if type(identifier) in (int, str)
-                           else "INVALID_ENVELOPE", method=method, matches=matches, valid=True, size=size)
+            if "id" in message:
+                self._fail("SERVER_REQUEST_BLOCKED", method=method, matches=matches, valid=True, size=size)
             self._note("NOTIFICATION", method=method, valid=True, size=size)
         else:
-            if (not has_id or type(identifier) not in (int, str)
-                    or ("result" in message) == ("error" in message)
-                    or set(message) - {"id", "result", "error", "jsonrpc"}):
-                self._fail("INVALID_ENVELOPE", matches=matches, valid=True, size=size)
             if type(identifier) is int and identifier in self.completed_ids:
                 self._fail("DUPLICATE_RESPONSE", matches=matches, valid=True, size=size)
             if not matches:
                 self._fail("UNEXPECTED_RESPONSE_ID", matches=False, valid=True, size=size)
             if "error" in message:
                 error = message["error"]
-                if not isinstance(error, dict) or type(error.get("code")) is not int or not isinstance(error.get("message"), str):
+                if (not isinstance(error, dict) or error.keys() - {"code", "message", "data"}
+                        or type(error.get("code")) is not int or not -(2**63) <= error["code"] < 2**63
+                        or not isinstance(error.get("message"), str)):
                     self._fail("INVALID_ERROR_RESPONSE", matches=True, valid=True, size=size)
                 self._fail("RPC_ERROR", matches=True, valid=True, size=size,
                            error=ERROR_CODES.get(error["code"], "OTHER_RPC_ERROR"))
             if not isinstance(message["result"], dict):
                 self._fail("INVALID_RESULT", matches=True, valid=True, size=size)
             self._note("MATCHED_RESPONSE", matches=True, valid=True, size=size)
-        return message
 
     def _informational(self, message):
         method, params = message["method"], message.get("params")
@@ -252,6 +307,18 @@ class AppServer:
         if not isinstance(params, dict) or not isinstance(params.get(field), str):
             self._fail("INVALID_NOTIFICATION", method=method, valid=True)
         if method == "configWarning":
+            # The pinned v2 config schema puts optional metadata inside params.
+            location = params.get("range")
+            if (params.keys() - {"summary", "details", "path", "range"}
+                    or any(value is not None and (not isinstance(value, str) or len(value) > 8192)
+                           for value in (params.get("details"), params.get("path")))
+                    or (location is not None and (not isinstance(location, dict)
+                        or location.keys() != {"start", "end"}
+                        or any(not isinstance(point, dict) or point.keys() != {"line", "column"}
+                               or any(type(value) is not int or not 1 <= value < 2**64
+                                      for value in point.values())
+                               for point in location.values())))):
+                self._fail("INVALID_NOTIFICATION_METADATA", method=method, valid=True)
             self.config_warning_seen = True
         return True
 

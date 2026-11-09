@@ -52,14 +52,17 @@ class AppServerTests(unittest.TestCase):
 
     def test_server_approval_request_is_never_answered(self):
         output = BytesIO()
-        request = b'{"id":9,"method":"item/commandExecution/requestApproval","params":{}}\n'
+        request = (b'{"id":"server-9","method":"item/commandExecution/requestApproval","params":{},'
+                   b'"trace":{"traceparent":"private fixture","tracestate":null}}\n')
         connection = AppServer(BytesIO(request), output, 1, lambda: False)
         with self.assertRaisesRegex(Blocked, "SERVER_REQUEST_BLOCKED"):
             connection.initialize()
         self.assertEqual(1, len(output.getvalue().splitlines()))
+        self.assertNotIn("private fixture", str(connection.diagnostic_receipt()))
 
     def test_allowed_warning_before_response_is_bounded_and_redacted(self):
-        messages = (b'{"method":"warning","params":{"message":"private fixture"}}\n'
+        messages = (b'{"method":"warning","params":{"message":"private fixture"},'
+                    b'"emittedAtMs":1794172800000}\n'
                     b'{"id":1,"result":{"config":{}}}\n')
         connection = AppServer(BytesIO(messages), BytesIO(), 1, lambda: False)
         self.assertEqual({"config": {}}, connection.request(1, "config/read", {}))
@@ -67,22 +70,47 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(["NOTIFICATION", "MATCHED_RESPONSE"],
                          [item["classification"] for item in receipt["protocol"]])
         self.assertNotIn("private fixture", str(receipt))
+        self.assertNotIn("1794172800000", str(receipt))
 
     def test_config_warning_is_consumed_but_requires_policy_review(self):
         messages = (b'{"id":0,"result":{"platformOs":"windows"}}\n'
-                    b'{"method":"configWarning","params":{"summary":"private fixture"}}\n'
+                    b'{"method":"configWarning","params":{"summary":"private fixture","details":null,'
+                    b'"path":"private path","range":{"start":{"line":1,"column":2},'
+                    b'"end":{"line":1,"column":3}}}}\n'
                     b'{"id":1,"result":{"config":{"sandbox_mode":"read-only","approval_policy":"never"}}}\n'
                     b'{"id":2,"result":{"requirements":null}}\n')
         connection = AppServer(BytesIO(messages), BytesIO(), 1, lambda: False)
         with self.assertRaisesRegex(Blocked, "CONFIG_WARNING_REQUIRES_REVIEW"):
             connection.inspect_policy()
         self.assertNotIn("private fixture", str(connection.diagnostic_receipt()))
+        self.assertNotIn("private path", str(connection.diagnostic_receipt()))
 
     def test_message_failures_have_distinct_codes(self):
         cases = [
-            (b'{"method":"private-user-value","params":{}}\n', "UNSUPPORTED_NOTIFICATION"),
+            (b'{"method":"private-user-value","params":{},"emittedAtMs":1794172800000}\n',
+             "UNSUPPORTED_NOTIFICATION"),
             (b'{"id":1,"error":{"code":-32601,"message":"private detail"}}\n', "RPC_ERROR"),
-            (b'{"id":1,"result":{},"error":{}}\n', "INVALID_ENVELOPE"),
+            (b'[]\n', "ENVELOPE_TOP_LEVEL_TYPE"),
+            (b'{"jsonrpc":"private","id":1,"result":{}}\n', "ENVELOPE_JSONRPC_FIELD"),
+            (b'{"method":false}\n', "ENVELOPE_METHOD_FIELD"),
+            (b'{"method":"warning","params":"private"}\n', "ENVELOPE_PARAMS_TYPE"),
+            (b'{"method":"warning","params":{},"trace":{}}\n', "ENVELOPE_METADATA_FIELD"),
+            (b'{"method":"warning","params":{},"emittedAtMs":true}\n', "ENVELOPE_METADATA_FIELD"),
+            (b'{"method":"warning","params":{},"emittedAtMs":9223372036854775808}\n',
+             "ENVELOPE_METADATA_FIELD"),
+            (b'{"id":1,"result":{},"emittedAtMs":1794172800000}\n', "ENVELOPE_METADATA_FIELD"),
+            (b'{"id":1,"method":"warning","emittedAtMs":1794172800000}\n',
+             "ENVELOPE_METADATA_FIELD"),
+            (b'{"id":1,"result":{},"private-key":"private-value"}\n', "ENVELOPE_METADATA_FIELD"),
+            (b'{"id":1,"method":"warning","trace":{"private-key":"private-value"}}\n',
+             "ENVELOPE_METADATA_FIELD"),
+            (b'{"result":{}}\n', "ENVELOPE_ID_FIELD"),
+            (b'{"id":true,"result":{}}\n', "ENVELOPE_ID_FIELD"),
+            (b'{"id":1,"result":{},"error":{}}\n', "ENVELOPE_RESULT_ERROR_CONFLICT"),
+            (b'{"id":1}\n', "ENVELOPE_RESPONSE_FIELDS"),
+            (b'{"id":1,"result":[]}\n', "INVALID_RESULT"),
+            (b'{"method":"configWarning","params":{"summary":"private","path":[]}}\n',
+             "INVALID_NOTIFICATION_METADATA"),
             (b'{"id":1,"id":1,"result":{}}\n', "INVALID_JSON"),
             (b"", "EOF"),
             (b"x" * (MAX_FRAME + 1), "FRAME_TOO_LARGE"),
@@ -99,6 +127,18 @@ class AppServerTests(unittest.TestCase):
                 self.assertNotIn("private", str(connection.diagnostic_receipt()))
                 if expected == "RPC_ERROR":
                     self.assertEqual("METHOD_NOT_FOUND", record["error"])
+
+    def test_envelope_receipt_records_types_and_counts_without_raw_fields(self):
+        frame = b'{"id":1,"result":{},"private-key":"private-value"}\n'
+        connection = AppServer(BytesIO(frame), BytesIO(), 1, lambda: False)
+        with self.assertRaisesRegex(Blocked, "ENVELOPE_METADATA_FIELD"):
+            connection.request(1, "config/read", {})
+        record = connection.diagnostic_receipt()["protocol"][-1]
+        self.assertEqual({"field_types": {"id": "int", "result": "dict"},
+                          "unexpected_field_count": 1}, record["shape"])
+        self.assertTrue(record["id_matches"])
+        self.assertEqual(len(frame), record["frame_bytes"])
+        self.assertNotIn("private", str(record))
 
     def test_duplicate_response_is_rejected_during_next_request_and_after_close(self):
         frames = b'{"id":1,"result":{}}\n{"id":1,"result":{}}\n'
