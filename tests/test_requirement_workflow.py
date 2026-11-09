@@ -64,6 +64,8 @@ class RequirementWorkflowTests(unittest.TestCase):
                                                raw=json.dumps(envelope).encode(), replica_path=str(replica))
         self.assertIn("src/main.py", draft)
         self.assertIn("separate owner approval", draft)
+        self.assertEqual(draft, self.runner.supervised_handoff(
+            "reopen_role", "sample", expected_request=request, raw=json.dumps(envelope).encode()))
         self.assertNotIn("Implement sample", str(self.ledger.read()))
         view = ProjectionReader(self.ledger).read("sample")
         self.assertEqual("NOT_VERIFIED", view["supervised_handoff"]["execution_evidence"])
@@ -89,6 +91,15 @@ class RequirementWorkflowTests(unittest.TestCase):
         outside.unlink()
         reviewer = role("developer_submit", draft, change_report)
         self.assertIn("observed_changes", reviewer)
+        self.runner = Runner(Ledger.for_project(self.ledger.state_boundary.parent))
+        count = len(self.ledger.read())
+        reopened = self.runner.supervised_handoff("reopen_role", "sample", expected_request=request)
+        first = json.loads(reviewer.split("\n\n", 1)[1])
+        restored = json.loads(reopened.split("\n\n", 1)[1])
+        self.assertEqual(first["response_envelope"], restored["response_envelope"])
+        self.assertEqual(first["observed_changes"], restored["observed_changes"])
+        self.assertIsNone(restored["developer_report"])
+        self.assertEqual(count, len(self.ledger.read()))
         self.assertEqual("ACCEPT_FOR_VERIFICATION", role(
             "reviewer_submit", reviewer,
             {"decision": "ACCEPT_FOR_VERIFICATION", "findings": [], "coverage_gaps": []},
@@ -97,9 +108,13 @@ class RequirementWorkflowTests(unittest.TestCase):
                 "output_folder": "dist", "artifacts": ["dist/app.zip"], "type": "PACKAGE"}
         verifier = self.runner.supervised_handoff("verifier", "sample", expected_request=request,
                                                  raw=json.dumps(plan).encode())
+        self.assertEqual(verifier, self.runner.supervised_handoff(
+            "reopen_role", "sample", expected_request=request))
         (replica / "dist").mkdir()
         artifact = replica / "dist" / "app.zip"
         artifact.write_bytes(b"Synthetic output")
+        self.assertEqual(verifier, self.runner.supervised_handoff(
+            "reopen_role", "sample", expected_request=request))
         from hashlib import sha256
         receipt = {"environment": plan["environment"], "commands": plan["commands"], "exit_codes": [0],
                    "artifacts": {"dist/app.zip": sha256(artifact.read_bytes()).hexdigest()},

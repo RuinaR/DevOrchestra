@@ -116,6 +116,45 @@ def _role_prompt(item, role, instructions, policies, **context):
     }, ensure_ascii=False, indent=2)
 
 
+def _reviewer_prompt(item, project, policies, developer_report=None):
+    return _role_prompt(
+        item, "reviewer", "Review read-only. Inspect the changed files in the selected replica. "
+        "Check acceptance, safety, scope and unnecessary complexity or duplicated validation. "
+        "Return the JSON envelope; do not edit, build or use external tools.", policies,
+        replica=item["replica"], acceptance=project["acceptance"], observed_changes=item["observed"],
+        developer_report_sha256=item["report_sha256"], developer_report=developer_report,
+    )
+
+
+def _developer_prompt(item, plan, documents, project, policies):
+    return _role_prompt(
+        item, "developer", "DEVELOPER HANDOFF. Obtain separate owner approval before any file action. "
+        "Follow existing user and project development instructions. Use only the selected replica "
+        "and listed relative paths. Commands, Git mutations, network, external apps and privilege "
+        "changes are outside this handoff. Verification is handled after Reviewer review.", policies,
+        replica=item["replica"], plan=plan, requirements=documents, acceptance=project["acceptance"],
+    )
+
+
+def _verifier_prompt(item, project, policies):
+    saved = item["build_plan"]
+    plan = {key: saved[key] for key in ("commands", "environment", "output_folder", "artifacts", "type")}
+    return _role_prompt(
+        item, "verifier", "Owner approval is required before running only the listed commands in the replica. "
+        "Return the exact receipt JSON with observed exit codes and independently calculated artifact hashes. "
+        "Never run generated executables. Text reports are not independently verified execution.", policies,
+        replica=item["replica"], build_plan=plan,
+        receipt_fields={"environment": plan["environment"], "commands": plan["commands"], "exit_codes": [],
+                        "artifacts": {path: "<SHA-256>" for path in plan["artifacts"]},
+                        "criteria": project["acceptance"]},
+    )
+
+
+def _verifier_source(image, plan):
+    return {**image, "files": {path: info for path, info in image["files"].items()
+                               if path not in plan["artifacts"]}}
+
+
 def _build_plan(raw):
     if type(raw) is not bytes or len(raw) > MAX_HANDOFF_BYTES:
         raise Blocked("Use a bounded JSON build plan")
@@ -141,7 +180,7 @@ def _build_plan(raw):
     return plan
 
 
-def _external_stages(action, entry, project, raw, record, event, policies):
+def _external_stages(action, entry, project, raw, record, event, policies, documents):
     replica = Path(entry["replica"])
     image = snapshot(replica)
     bound = {**event("", entry), "expires": entry["expires"], "revision": entry["revision"],
@@ -163,19 +202,12 @@ def _external_stages(action, entry, project, raw, record, event, policies):
                 or set(declared) != set(observed)):
             raise Blocked("Developer report does not match observed replica changes")
         item = advance("supervised_reviewer", observed=observed, report_sha256=digest(result))
-        return _role_prompt(
-            item, "reviewer", "Review read-only. Inspect the changed files in the selected replica. "
-            "Check acceptance, safety, scope and unnecessary complexity or duplicated validation. "
-            "Return the JSON envelope; do not edit, build or use external tools.", policies,
-            replica=str(replica), acceptance=project["acceptance"], observed_changes=observed,
-            developer_report=result,
-        )
+        return _reviewer_prompt(item, project, policies, result)
     if action == "verifier_submit" and entry["kind"] == "supervised_verifier":
         _, receipt = _read_result(raw, entry, "verifier")
         plan = entry["build_plan"]
         artifacts = {path: image["files"][path] for path in plan["artifacts"] if path in image["files"]}
-        source = {**image, "files": {path: info for path, info in image["files"].items()
-                                    if path not in artifacts}}
+        source = _verifier_source(image, plan)
         if (revision(source) != entry["replica_revision"]
                 or type(receipt) is not dict
                 or set(receipt) != {"environment", "commands", "exit_codes", "artifacts", "criteria"}
@@ -198,8 +230,20 @@ def _external_stages(action, entry, project, raw, record, event, policies):
                 review_sha256=entry["review_sha256"],
                 execution_evidence="OWNER_REPORTED", user_test_status="NOT_AVAILABLE")
         return "OWNER_REPORTED" if successful else "BUILD_FAILED_REPORTED"
+    if action == "reopen_role" and entry["kind"] == "supervised_verifier":
+        if revision(_verifier_source(image, entry["build_plan"])) != entry["replica_revision"]:
+            raise Blocked("Replica changed after evidence was recorded")
+        return _verifier_prompt(entry, project, policies)
     if revision(image) != entry["replica_revision"]:
         raise Blocked("Replica changed after evidence was recorded")
+    if action == "reopen_role":
+        if entry["kind"] == "supervised_developer":
+            _, plan = _read_result(raw, entry)
+            if digest(plan) != entry.get("plan_sha256"):
+                raise Blocked("Reopen the exact approved Manager JSON to restore this Developer handoff")
+            return _developer_prompt(entry, plan, documents, project, policies)
+        if entry["kind"] == "supervised_reviewer":
+            return _reviewer_prompt(entry, project, policies)
     if action == "reviewer_submit" and entry["kind"] == "supervised_reviewer":
         _, result = _read_result(raw, entry, "reviewer")
         decision = result["decision"]
@@ -213,15 +257,7 @@ def _external_stages(action, entry, project, raw, record, event, policies):
         if any(path in image["files"] for path in plan["artifacts"]):
             raise Blocked("Use fresh output files so old artifacts cannot be imported")
         item = advance("supervised_verifier", build_plan=plan, review_sha256=entry["review_sha256"])
-        return _role_prompt(
-            item, "verifier", "Owner approval is required before running only the listed commands in the replica. "
-            "Return the exact receipt JSON with observed exit codes and independently calculated artifact hashes. "
-            "Never run generated executables. Text reports are not independently verified execution.", policies,
-            replica=str(replica), build_plan=plan,
-            receipt_fields={"environment": plan["environment"], "commands": plan["commands"], "exit_codes": [],
-                            "artifacts": {path: "<SHA-256>" for path in plan["artifacts"]},
-                            "criteria": project["acceptance"]},
-        )
+        return _verifier_prompt(item, project, policies)
     raise Blocked("This role is not current")
 
 
@@ -340,13 +376,13 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
             record(result, admit_import)
             return result["disposition"]
 
-        if action in ("developer_submit", "reviewer_submit", "verifier", "verifier_submit"):
+        if action in ("developer_submit", "reviewer_submit", "verifier", "verifier_submit", "reopen_role"):
             require_admission(events, allow_supervised=True)
             if (entry != current or time() >= entry.get("expires", 0)
                     or any(entry[key] != value for key, value in frozen.items())):
                 raise Blocked("Role handoff is stale or replaced")
-            read_frozen_requirements(catalog, project_id, refs, ledger.state_boundary)
-            return _external_stages(action, entry, project, raw, record, event, policies)
+            documents = read_frozen_requirements(catalog, project_id, refs, ledger.state_boundary)
+            return _external_stages(action, entry, project, raw, record, event, policies, documents)
 
         if action != "developer" or entry["kind"] != "supervised_imported" or entry["disposition"] != "PROPOSED":
             raise Blocked("A verified Manager import is required")
@@ -372,12 +408,6 @@ def handoff(runner, action, project_id, *, raw=None, expected_request=None, repl
         image = snapshot(replica)
         item = {**event("supervised_developer", entry), **frozen, "expires": entry["expires"],
                 "replica": str(replica), "replica_revision": revision(image), "image": image,
-                "paths": plan["proposed_paths"], "execution_evidence": "NOT_VERIFIED"}
+                "paths": plan["proposed_paths"], "plan_sha256": digest(plan), "execution_evidence": "NOT_VERIFIED"}
         record(item, require_admission)
-        return _role_prompt(
-            item, "developer", "DEVELOPER HANDOFF. Obtain separate owner approval before any file action. "
-            "Follow existing user and project development instructions. Use only the selected replica "
-            "and listed relative paths. Commands, Git mutations, network, external apps and privilege "
-            "changes are outside this handoff. Verification is handled after Reviewer review.", policies,
-            replica=str(replica), plan=plan, requirements=documents, acceptance=project["acceptance"],
-        )
+        return _developer_prompt(item, plan, documents, project, policies)

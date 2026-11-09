@@ -1262,8 +1262,8 @@ class CommandCenter:
                  "READY": "실행 전 검사 준비"}[decision["state"]]
         label(panel, state, size=13, bold=True, bg=BG).pack(fill="x")
         label(panel, decision["message"], bg=BG, wraplength=520).pack(fill="x", pady=8)
-        label(panel, "자동 개발 백엔드 · 별도 승인한 공식 Codex App Server 후보\n"
-              "사용자 지침은 승인된 파일과 해시를 실행 전에 확인합니다.",
+        label(panel, "지금 사용 가능 · 기존 Codex에 지시를 직접 전달하는 감독형 개발\n"
+              "자동 개발 후보 · 공식 App Server (실행 경계 확인 전 차단)",
               bg=BG, fg=MUTED, wraplength=520).pack(fill="x", pady=(0, 8))
         if summary := decision["summary"]:
             budget = summary["budget_ceiling"]
@@ -1354,7 +1354,7 @@ class CommandCenter:
                     action, project_id, raw=raw, expected_request=shown["request_id"] if shown else None, **options,
                 )
                 shown = latest_handoff(self.reader.ledger.read(), project_id)
-                if action in ("start", "prompt", "developer", "developer_submit", "verifier"):
+                if action in ("start", "prompt", "developer", "developer_submit", "verifier", "reopen_role"):
                     show(result)
                 else:
                     show(None)
@@ -1425,11 +1425,22 @@ class CommandCenter:
             if setup or replica:
                 apply("developer", pasted(), replica_path=replica)
 
+        def reopen():
+            if shown and shown["kind"] == "supervised_requested":
+                apply("prompt")
+            elif shown and shown["kind"] == "supervised_developer":
+                if not pasted().strip():
+                    status.configure(text="승인했던 Manager 결과 JSON을 아래 칸에 붙여넣고 다시 열기를 누르세요.")
+                    return
+                apply("reopen_role", pasted())
+            else:
+                apply("reopen_role")
+
         controls = {}
         for key, title, command in (
             ("start", "계획 지시 만들기", lambda: apply("start", paths=[path.strip() for path in path_entry.get().split(",")
                                                                    if path.strip()])),
-            ("prompt", "계획 지시 다시 열기", lambda: apply("prompt")),
+            ("prompt", "현재 지시 다시 열기", reopen),
             ("copy", "지시 복사", copy), ("cancel", "대기 취소", lambda: apply("cancel")),
         ):
             controls[key] = ttk.Button(buttons, text=title, command=command)
@@ -1460,7 +1471,7 @@ class CommandCenter:
                 badge.configure(text=f"{position + 1:02d}  {name}", bg="#385ba0" if current else TILE,
                                 fg=INK if current else MUTED)
             guide.configure(text=f"현재 · {title}\n다음 · {next_step}")
-            enabled = {"start": not waiting, "prompt": live and kind == "supervised_requested",
+            enabled = {"start": not waiting, "prompt": accepts,
                        "copy": bool(prompt.get("1.0", "end-1c")), "cancel": waiting,
                        "submit": accepts, "file": accepts, "developer": live and planned,
                        "verifier": live and kind == "supervised_reviewed"}

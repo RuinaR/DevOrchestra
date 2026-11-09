@@ -19,6 +19,8 @@ REQUIRED_BOUNDARIES = (
     ("SIDE_EFFECTING_TOOLS_UNVERIFIED", "파일 수정·명령 실행·다른 앱 접근을 호출 전에 막는 경계가 확인되지 않았습니다."),
     ("PROVIDER_EGRESS_UNVERIFIED", "App Server가 승인된 공식 제공자에만 연결되는지 확인되지 않았습니다."),
 )
+# These are online Manager boundaries. Complete offline isolation and VM
+# acceptance belong to enhanced/diagnostic modes, not this admission path.
 DISABLED_FEATURES = (
     "shell_tool", "computer_use", "apps", "plugins", "hooks", "multi_agent",
     "multi_agent_v2", "code_mode", "code_mode_host", "request_permissions_tool", "memories",
