@@ -39,6 +39,8 @@ def _verify_manager_config(config):
             or config.get("forced_login_method") != "chatgpt"
             or config.get("web_search") != "disabled" or config.get("mcp_servers") != {}):
         raise Blocked("Manager effective tool restrictions unverified")
+    if config.get("model_provider") not in (None, "openai"):
+        raise Blocked("Manager effective provider differs from the approved OpenAI provider")
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,8 @@ def _input_receipt(approval, request, messages, discovered):
         raise Blocked("Manager input or JSON output reserve exceeds the approved allowance")
     return {"frame_bytes": frame_bytes, "input_sizing_allowance": input_allowance,
             "context_limit_tokens": limit, "output_reserve_tokens": reserve,
+            "launcher_config_sha256": sha256(MANAGER_CONFIG.encode("ascii")).hexdigest(),
+            "turn_template_sha256": sha256(wire.encode("ascii")).hexdigest(),
             "provider_token_enforcement": "NOT_VERIFIED"}
 
 
@@ -218,11 +222,20 @@ def _start_read_only_thread(server, request, replica, expected_sources, before_t
     return thread_id
 
 
+def inspect_manager_thread_only(server, request, replica, expected_sources, before_thread):
+    """Protocol stage only. Caller must independently enforce host egress and own the Job."""
+    inspect_manager_policy(server, replica, experimental_api=True)
+    _start_read_only_thread(server, request, replica, expected_sources, before_thread)
+    return {"thread_policy": "CONFIRMED", "instruction_sources": "CONFIRMED",
+            "account_rpc_sent": False, "turn_rpc_sent": False}
+
+
 def _collect_plan(server, request, replica, messages, expected_sources, before_thread, before_send):
     inspect_manager_policy(server, replica, experimental_api=True)
     identity = server.request(9, "account/read", {"refreshToken": False})
     account = identity.get("account")
-    if type(account) is not dict or account.get("type") != "chatgpt":
+    if (type(account) is not dict or account.get("type") != "chatgpt"
+            or identity.get("requiresOpenaiAuth") is not True):
         raise Blocked("Manager requires an existing ChatGPT subscription sign-in")
     thread_id = _start_read_only_thread(server, request, replica, expected_sources, before_thread)
     early = []

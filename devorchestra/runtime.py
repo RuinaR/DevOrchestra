@@ -389,7 +389,11 @@ class Runner:
                     request.project_id, context["project_context"]["development_id"],
                 ) != context["project_context"]:
                     raise Blocked("Manager requirements changed before dispatch")
-                prepare_manager(self.ledger, approval, request, **context)
+                _, _, current_sizing = prepare_manager(
+                    self.ledger, approval, request, include_input_receipt=True, **context,
+                )
+                if current_sizing != sizing:
+                    raise Blocked("Manager wire contract changed before dispatch")
 
                 def admit(current):
                     if (len(dispatch_events) != expected_count or time() >= request.deadline_utc_epoch

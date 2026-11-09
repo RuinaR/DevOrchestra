@@ -17,7 +17,7 @@ from devorchestra.ledger import Ledger, digest
 from devorchestra.manager_api import ENDPOINT, build_manager_api_draft, parse_manager_api_result
 from devorchestra.native_manager import (
     DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval, ManagerPolicyApproval,
-    _start_read_only_thread, inspect_manager_policy,
+    inspect_manager_thread_only,
 )
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
@@ -76,7 +76,8 @@ for line in sys.stdin:
         'initialize': {'platformOs':'windows'},
         'config/read': {'config': config},
         'configRequirements/read': {'requirements':None},
-        'account/read': {'account': {'type':'apiKey' if mode == 'api-account' else 'chatgpt'}},
+        'account/read': {'account': {'type':'apiKey' if mode == 'api-account' else 'chatgpt'},
+                         'requiresOpenaiAuth': mode != 'wrong-auth-provider'},
         'thread/start': {'thread': {'id':'thr-fixture', 'ephemeral':True}, 'approvalPolicy':'never',
                          'approvalsReviewer':'user', 'modelProvider':'openai', 'reasoningEffort':'low',
                          'instructionSources': [] if mode == 'wrong-instructions' or not cwd else
@@ -176,11 +177,10 @@ class NativeManagerTests(unittest.TestCase):
         with _owned_stdio(Path(sys.executable), argv, self.replica,
                           {"SystemRoot": os.environ["SystemRoot"], "CODEX_HOME": str(home)},
                           10, lambda: False) as server:
-            inspect_manager_policy(server, self.replica, experimental_api=True)
             sources = (home / "AGENTS.md", self.replica / "AGENTS.md")
-            self.assertEqual("thr-fixture", _start_read_only_thread(
-                server, self.request, self.replica, sources, lambda: None,
-            ))
+            receipt = inspect_manager_thread_only(server, self.request, self.replica, sources, lambda: None)
+            self.assertEqual({"thread_policy": "CONFIRMED", "instruction_sources": "CONFIRMED",
+                              "account_rpc_sent": False, "turn_rpc_sent": False}, receipt)
         self.assertEqual("DRAINED_NORMALLY", server.cleanup_receipt["job"])
         self.assertEqual("CLOSED", server.cleanup_receipt["pipes"])
 
@@ -270,7 +270,7 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual([], self.ledger.read())
 
     def test_effective_tool_or_thread_policy_mismatch_blocks_turn(self):
-        pre_thread_failures = ("tools-enabled", "api-account", "async-feature-enabled")
+        pre_thread_failures = ("tools-enabled", "api-account", "async-feature-enabled", "wrong-auth-provider")
         for mode in (*pre_thread_failures, "unsafe-thread", "network-thread", "wrong-instructions"):
             with self.subTest(mode=mode):
                 self.ledger = Ledger(self.ledger.path.with_name(f"{mode}.sqlite3"),
