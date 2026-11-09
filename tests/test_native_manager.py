@@ -18,7 +18,7 @@ from devorchestra.ledger import Ledger, digest
 from devorchestra.manager_api import ENDPOINT, build_manager_api_draft, parse_manager_api_result
 from devorchestra.native_manager import (
     DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval, ManagerPolicyApproval,
-    inspect_manager_thread_only,
+    inspect_manager_thread_only, manager_admission,
 )
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
@@ -194,6 +194,23 @@ class NativeManagerTests(unittest.TestCase):
             self.runner.plan_native_manager(self.approval, self.request)
         self.assertEqual([], self.ledger.read())
 
+    def test_manager_admission_requires_both_trusted_boundaries_then_fresh_approval_and_cli(self):
+        tools = "SIDE_EFFECTING_TOOLS_UNVERIFIED"
+        egress = "PROVIDER_EGRESS_UNVERIFIED"
+        self.assertEqual(tools, manager_admission(self.approval)["reason"])
+        with patch("devorchestra.native_manager._verified_manager_boundaries", return_value={tools}):
+            self.assertEqual(egress, manager_admission(self.approval)["reason"])
+        with patch("devorchestra.native_manager._verified_manager_boundaries", return_value={tools, egress}), \
+                patch("devorchestra.native_manager.verify_app_server_binary") as verify:
+            self.assertEqual("NEEDS_OWNER_APPROVAL", manager_admission()["state"])
+            self.assertEqual("NEEDS_OWNER_APPROVAL",
+                             manager_admission(replace(self.approval, expires_epoch=0))["state"])
+            verify.assert_not_called()
+            self.assertEqual("READY", manager_admission(self.approval)["state"])
+            verify.assert_called_once_with(self.approval.binary)
+            verify.side_effect = Blocked("fixture invalid CLI")
+            self.assertEqual("BINARY_IDENTITY_INVALID", manager_admission(self.approval)["reason"])
+
     def test_responses_draft_is_tool_free_and_rejects_unexpected_response_items(self):
         request = replace(self.request, budget=replace(self.request.budget, cost_microunits=1))
         with self.assertRaisesRegex(Blocked, "RESPONSES_DISABLED_SUBSCRIPTION_ONLY"):
@@ -335,6 +352,9 @@ class NativeManagerTests(unittest.TestCase):
         catalog.save_project(project, revision)
         catalog.register_requirement("sample", "goal.md", "GOAL")
         context = self.runner.native_manager_context("sample")
+        preview = self.runner.inspect_manager_admission("sample")
+        self.assertEqual("BLOCKED", preview["state"])
+        self.assertEqual(digest(context), preview["summary"]["input_sha256"])
         self.request = replace(self.request, project_id="sample", verified_input_refs=(digest(context),))
         self.approval = replace(self.approval, request_hash=bind_instructions(self.request, self.layers))
         self.assertEqual([], self.ledger.read())

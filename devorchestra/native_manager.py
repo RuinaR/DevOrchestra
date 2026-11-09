@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 from time import time
 
-from .app_server import INSPECTION_CONFIG, MAX_FRAME, NativeInspectionApproval, open_app_server
+from .app_server import INSPECTION_CONFIG, MAX_FRAME, NativeInspectionApproval, open_app_server, verify_app_server_binary
 from .instructions import instruction_bytes, selected_source
 from .lease import Blocked
 from .ledger import canonical, check_path, digest
@@ -15,6 +15,10 @@ from .role_contract import OUTPUT_SCHEMAS, bind_instructions, parse_role_output
 
 
 ROLE = "manager-planning"
+REQUIRED_BOUNDARIES = (
+    ("SIDE_EFFECTING_TOOLS_UNVERIFIED", "파일 수정·명령 실행·다른 앱 접근을 호출 전에 막는 경계가 확인되지 않았습니다."),
+    ("PROVIDER_EGRESS_UNVERIFIED", "App Server가 승인된 공식 제공자에만 연결되는지 확인되지 않았습니다."),
+)
 DISABLED_FEATURES = (
     "shell_tool", "computer_use", "apps", "plugins", "hooks", "multi_agent",
     "multi_agent_v2", "code_mode", "code_mode_host", "request_permissions_tool", "memories",
@@ -100,11 +104,40 @@ def _input_receipt(approval, request, messages, discovered):
             "provider_token_enforcement": "NOT_VERIFIED"}
 
 
-def require_live_manager_admission():
-    # General development does not depend on VM or enhanced A/B/C evidence.
-    # The remaining blockers are provider-only host egress and pre-execution
-    # restrictions on side-effecting tools, including non-executor handlers.
-    raise Blocked(f'{live_preflight()["reason"]}: MANAGER_PRE_EXECUTION_BOUNDARY_UNVERIFIED')
+def _verified_manager_boundaries():
+    # The fixed backend currently has no trusted issuer for either boundary.
+    # Sandbox settings, synthetic peers, user approval and prior offline tests
+    # cannot attest to App Server egress or server-side tool enforcement.
+    return frozenset()
+
+
+def manager_admission(approval=None):
+    verified = _verified_manager_boundaries()
+    for code, message in REQUIRED_BOUNDARIES:
+        if code not in verified:
+            return {"state": "BLOCKED", "reason": code, "message": message}
+    if (type(approval) is not ManagerApproval or not isinstance(approval.request_id, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", approval.request_id)
+            or type(approval.expires_epoch) not in (int, float) or not time() < approval.expires_epoch):
+        return {"state": "NEEDS_OWNER_APPROVAL", "reason": "OWNER_APPROVAL_REQUIRED",
+                "message": "이 요청의 읽기 전용 Manager 턴 1회에 대한 사용자 승인이 필요합니다."}
+    try:
+        verify_app_server_binary(approval.binary)
+    except (Blocked, OSError, ValueError, AttributeError):
+        return {"state": "BLOCKED", "reason": "BINARY_IDENTITY_INVALID",
+                "message": "승인된 Codex CLI의 서명과 해시를 확인할 수 없습니다."}
+    return {"state": "READY", "reason": None, "message": "승인된 요청의 실행 전 검사를 진행할 수 있습니다."}
+
+
+def require_live_manager_admission(approval=None):
+    decision = manager_admission(approval)
+    if decision["state"] == "BLOCKED":
+        if decision["reason"] in dict(REQUIRED_BOUNDARIES):
+            raise Blocked(f'{live_preflight()["reason"]}: MANAGER_PRE_EXECUTION_BOUNDARY_UNVERIFIED'
+                          f': {decision["reason"]}')
+        raise Blocked(decision["reason"])
+    if decision["state"] != "READY":
+        raise Blocked(decision["reason"])
 
 
 def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False):

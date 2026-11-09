@@ -355,6 +355,22 @@ class Runner:
             ],
         }
 
+    def inspect_manager_admission(self, project_id):
+        """Read-only preview for the project picker. It cannot grant a turn."""
+        from .native_manager import manager_admission
+
+        try:
+            context = self.native_manager_context(project_id)
+        except (Blocked, OSError, ValueError):
+            return {"state": "BLOCKED", "reason": "REQUIREMENTS_UNAVAILABLE",
+                    "message": "프로젝트에 현재 내용과 일치하는 요구사항을 등록하세요.", "summary": None}
+        decision = manager_admission()
+        return {**decision, "summary": {
+            "model": context["model"], "reasoning": context["reasoning"],
+            "requirements": len(context["requirements"]), "input_sha256": digest(context),
+            "budget_ceiling": context["budget_ceiling"],
+        }}
+
     def plan_native_manager(self, approval, request):
         """Internal one-shot planning entry; never grants another role."""
         from pathlib import Path
@@ -363,10 +379,8 @@ class Runner:
         )
         from .role_contract import TransitionEvidence, confirm_task_plan, decide_transition
 
-        require_live_manager_admission()
-        if (type(approval) is not ManagerApproval or type(request) is not RoleRequest
-                or not re.fullmatch(r"[0-9a-f]{32}", approval.request_id)
-                or not time() < approval.expires_epoch):
+        require_live_manager_admission(approval)
+        if type(approval) is not ManagerApproval or type(request) is not RoleRequest:
             raise Blocked("Current Manager owner approval required")
         with execution_slot() as abandoned:
             events, tail = self.ledger.snapshot(recover_journal=True)
@@ -413,6 +427,7 @@ class Runner:
 
             def record_dispatch(kind, expected_count):
                 nonlocal count, head
+                require_live_manager_admission(approval)
                 if context and self.native_manager_context(request.project_id) != context["project_context"]:
                     raise Blocked("Manager requirements changed before dispatch")
                 _, _, current_sizing = prepare_manager(

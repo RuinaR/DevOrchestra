@@ -186,7 +186,7 @@ class CommandCenter:
         self.mission.pack(fill="x", pady=(4, 0))
         self.goal = label(mission, fg=MUTED)
         self.goal.pack(fill="x")
-        self.development_button = ttk.Button(mission, text="감독형 개발 시작", command=self.supervised_work,
+        self.development_button = ttk.Button(mission, text="개발 시작", command=self.development_start,
                                              style="Primary.TButton", state="disabled")
         self.development_button.pack(fill="x", pady=(8, 2))
         label(mission, "자동 실행은 권한 경계 확인 전까지 차단됩니다. 감독형은 지시와 결과를 직접 전달합니다.",
@@ -492,7 +492,7 @@ class CommandCenter:
                                fg=CYAN if first_run else RED)
         self.goal.configure(text=reason, wraplength=350)
         self.project_states.configure(text="UNKNOWN")
-        self.development_button.configure(text="감독형 개발 시작", state="disabled")
+        self.development_button.configure(text="개발 시작", state="disabled")
         if hasattr(self, "next_brief"):
             self.next_brief.configure(text=reason)
         if hasattr(self, "question_button"):
@@ -531,7 +531,7 @@ class CommandCenter:
                                     fg=color(state))
         workflow = view["workflow"]
         handoff = view.get("supervised_handoff")
-        self.development_button.configure(text="감독형 작업 이어보기" if handoff else "감독형 개발 시작",
+        self.development_button.configure(text="개발 작업 열기" if handoff else "개발 시작",
                                           state="normal" if view["registration"] and workflow["requirements_count"]
                                           else "disabled")
         next_action = {
@@ -1247,6 +1247,35 @@ class CommandCenter:
         category.bind("<<ComboboxSelected>>", show_applied)
         refresh()
         show_applied()
+
+    def development_start(self):
+        if not self.view or not self.view["registration"]:
+            return
+        project_id = self.view["project_id"]
+        try:
+            decision = self.controller.inspect_manager_admission(project_id)
+        except (Blocked, OSError, sqlite3.Error, ValueError):
+            decision = {"state": "BLOCKED", "message": "로컬 저장소를 확인할 수 없습니다.", "summary": None}
+        panel = self.panel()
+        panel.title("개발 시작 · Manager 준비")
+        state = {"BLOCKED": "자동 Manager 준비 차단", "NEEDS_OWNER_APPROVAL": "사용자 승인 필요",
+                 "READY": "실행 전 검사 준비"}[decision["state"]]
+        label(panel, state, size=13, bold=True, bg=BG).pack(fill="x")
+        label(panel, decision["message"], bg=BG, wraplength=520).pack(fill="x", pady=8)
+        if summary := decision["summary"]:
+            budget = summary["budget_ceiling"]
+            model = ("등록된 실제 모델 없음" if summary["model"] == "mock-v1" else summary["model"])
+            label(panel, f"모델 · {model} / {summary['reasoning']}\n"
+                  f"입력 · 등록 요구사항 {summary['requirements']}개\n"
+                  f"권한 · 읽기 전용 계획, 승인 요청 및 작업 도구 사용 없음\n"
+                  f"등록 상한 · {budget['seconds']}초 / {budget['tokens']} 토큰",
+                  bg=BG, wraplength=520).pack(fill="x", pady=(0, 8))
+
+        def supervised():
+            panel.destroy()
+            self.supervised_work()
+
+        ttk.Button(panel, text="감독형 Codex 작업으로 계속", command=supervised).pack(anchor="e")
 
     def supervised_work(self):
         if not self.view or not self.view["registration"]:
