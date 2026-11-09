@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from devorchestra.app_server import (
     INSPECTION_CONFIG, MAX_FRAME, MAX_NOTICES_PER_REQUEST, AppServer, NativeInspectionApproval, _owned_stdio,
-    instruction_sources,
+    STANDALONE_WINDOWS_APP_SERVER, instruction_sources, open_app_server,
 )
 from devorchestra.lease import Blocked, execution_slot
 from devorchestra.ledger import Ledger
@@ -45,6 +45,25 @@ REMOTE_DISABLED = (b'{"method":"remoteControl/status/changed","params":{"status"
 
 
 class AppServerTests(unittest.TestCase):
+    def test_standalone_candidate_uses_stdio_without_cli_subcommand(self):
+        cwd = Path.cwd()
+        binary = cwd / STANDALONE_WINDOWS_APP_SERVER
+        pin = "a" * 64
+        seen = []
+
+        @contextmanager
+        def transport(executable, argv, *_args):
+            seen.append((executable, argv))
+            yield None
+
+        with patch("devorchestra.app_server.verify_app_server_binary") as verify, \
+                patch("devorchestra.app_server._owned_stdio", side_effect=transport):
+            with open_app_server(binary, cwd, {}, 15, lambda: False,
+                                 explicit_mxc=True, approved_sha256=pin):
+                pass
+        verify.assert_called_once_with(binary, approved_sha256=pin)
+        self.assertEqual([(binary, ["-c", "windows.sandbox=mxc", "--listen", "stdio://"])], seen)
+
     def test_owned_stdio_handshake_and_drain_with_local_peer(self):
         with execution_slot() as abandoned:
             self.assertFalse(abandoned)

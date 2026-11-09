@@ -595,12 +595,16 @@ def _owned_stdio(executable, argv, cwd, environment, timeout, cancelled):
                     connection.check_trailing_messages()
 
 
+STANDALONE_WINDOWS_APP_SERVER = "codex-app-server-x86_64-pc-windows-msvc.exe"
+
+
 def verify_app_server_binary(binary: Path, *, approved_sha256=None):
     """Check the pinned CLI without launching it or fetching trust material."""
     from .mxc_launcher import CLI_HASH, _pin, _signed_offline
 
     with inspection_check("CLI_IDENTITY", "BINARY_IDENTITY_INVALID"):
-        if binary.name.casefold() != "codex.exe":
+        allowed = ("codex.exe",) if approved_sha256 is None else ("codex.exe", STANDALONE_WINDOWS_APP_SERVER)
+        if binary.name.casefold() not in allowed:
             raise Blocked("App Server binary path rejected")
         if approved_sha256 is not None and (type(approved_sha256) is not str
                                              or not re.fullmatch(r"[0-9a-f]{64}", approved_sha256)):
@@ -619,6 +623,10 @@ def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled, *,
         if not cwd.is_dir() or not 0 < timeout <= 60:
             raise Blocked("App Server path or working directory rejected")
     verify_app_server_binary(binary, approved_sha256=approved_sha256)
-    argv = ["-c", "windows.sandbox=mxc", "app-server"] if explicit_mxc else ["app-server"]
+    argv = ["-c", "windows.sandbox=mxc"] if explicit_mxc else []
+    if binary.name.casefold() == STANDALONE_WINDOWS_APP_SERVER:
+        argv += ["--listen", "stdio://"]
+    else:
+        argv += ["app-server"]
     with _owned_stdio(binary, argv, cwd, environment, timeout, cancelled) as connection:
         yield connection
