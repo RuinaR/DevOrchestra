@@ -76,11 +76,12 @@ def source_ref(path, data):
 
 class InstructionStore:
     def __init__(self, runtime_ledger):
-        path = runtime_ledger.path.parent / "private-instructions" / "baselines.sqlite3"
+        path = runtime_ledger.local_directory("instructions") / "baselines.sqlite3"
         repository = Path(__file__).resolve().parent.parent
         # The checked-out source tree is never a private storage location.
         if (repository / ".git").exists() and path.resolve().is_relative_to(repository):
-            raise Blocked("Private instructions require storage outside the repository")
+            if runtime_ledger.local_root != repository / ".ai-local":
+                raise Blocked("Private instructions require the designated local storage")
         self.ledger = Ledger(path)
 
     def _events(self):

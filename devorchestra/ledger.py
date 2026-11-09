@@ -1,6 +1,7 @@
 """SQLite event ledger. Every read validates one consistent snapshot."""
 import hashlib
 import json
+import os
 import sqlite3
 import stat
 from contextlib import closing
@@ -35,8 +36,48 @@ def check_path(path):
 
 
 class Ledger:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, local_root=None):
         self.path = path
+        self.local_root = local_root
+
+    @classmethod
+    def for_project(cls, project_root=None):
+        """Resolve default state from this source checkout, independent of cwd."""
+        if os.name != "nt":
+            raise Blocked("Windows local storage required")
+        project_root = Path(__file__).absolute().parent.parent if project_root is None else project_root
+        check_path(project_root)
+        if not project_root.is_dir():
+            raise Blocked("DevOrchestra project root unavailable")
+        root = project_root / ".ai-local"
+        check_path(root)
+        if root.exists() and not root.is_dir():
+            raise Blocked("Local storage root conflicts with a file")
+        ledger = cls(root / "state" / "p1.sqlite3", local_root=root)
+        for name in ("instructions", "state", "logs", "recovery", "temp"):
+            ledger.local_directory(name)
+        check_path(ledger.path)
+        return ledger
+
+    @property
+    def state_boundary(self):
+        return self.local_root if self.local_root is not None else self.path.parent
+
+    def local_directory(self, name, *, create=False):
+        if name not in ("instructions", "state", "logs", "recovery", "temp"):
+            raise ValueError("Unknown local storage category")
+        if self.local_root is None:
+            # Explicitly constructed ledgers are used by isolated fixtures.
+            directory = self.path.parent / "private-instructions" if name == "instructions" else self.path.parent
+        else:
+            directory = self.local_root / name
+        check_path(directory)
+        if directory.exists() and not directory.is_dir():
+            raise Blocked("Local storage directory conflicts with a file")
+        if create:
+            directory.mkdir(parents=True, exist_ok=True)
+            check_path(directory)
+        return directory
 
     def connect(self, mode):
         check_path(self.path)
@@ -44,6 +85,9 @@ class Ledger:
 
     def initialize(self):
         check_path(self.path)
+        if self.local_root is not None:
+            for name in ("instructions", "state", "logs", "recovery", "temp"):
+                self.local_directory(name, create=True)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Existing databases, including empty or damaged ones, are never reset.
         with self.path.open("xb"):

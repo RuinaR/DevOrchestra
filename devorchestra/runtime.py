@@ -210,7 +210,7 @@ class Runner:
                     or (development and not development["end"])
                     or any(event.get("request_id") == approval.request_id for event in events)):
                 raise Blocked("App Server inspection requires idle, unused admission")
-            work, environment, instructions = prepare_inspection(approval)
+            work, environment, instructions = prepare_inspection(approval, self.ledger.local_directory("temp"))
             fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",
                       "source": "WINDOWS_NATIVE_CODEX", "request_id": approval.request_id,
                       "instruction_sources": instructions}
@@ -312,7 +312,7 @@ class Runner:
             pin = next(event["instruction_pin"] for event in run
                        if event["kind"] == "instruction_baseline_pinned")
             replica = Path(catalog["setups"][run[0]["project_id"]]["replica"])
-            parent = self.ledger.path.parent / "native-homes"
+            parent = self.ledger.local_directory("temp", create=True) / "native-homes"
             check_path(parent)
             parent.mkdir(exist_ok=True)
             return InstructionStore(self.ledger).stage_home(pin, replica, parent / uuid4().hex)
@@ -545,7 +545,8 @@ class Runner:
                     raise Blocked("Synthetic child assignment unverified")
                 session.emit("job_created", session.state, **evidence, active_processes=active)
 
-            receipt = _run_probe(fixture, self.ledger.path.parent, created, cancel_requested)
+            receipt = _run_probe(fixture, self.ledger.local_directory("temp", create=True),
+                                 created, cancel_requested)
             if receipt["active_processes"] != 0:
                 raise Blocked("Previous Job is not drained")
             return session.emit("job_drained", session.state, **evidence, **receipt)

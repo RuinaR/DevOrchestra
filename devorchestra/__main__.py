@@ -1,9 +1,7 @@
 """Local owner console. No server, model, shell or external service adapter."""
 import argparse
 import json
-import os
 import sqlite3
-from pathlib import Path
 from time import sleep
 import sys
 
@@ -11,7 +9,7 @@ from .catalog import Catalog, new_project
 from .dashboard import project_view, render
 from .development import session_view
 from .lease import Blocked
-from .ledger import Ledger, canonical
+from .ledger import Ledger, canonical, check_path
 from .policy import DEFAULT_BACKEND, DevelopmentMode, ExecutionBackend, live_preflight
 from .runtime import Runner, Scenario
 
@@ -20,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("init")
+    commands.add_parser("local-status", help="Inspect project-local storage without creating it")
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -66,9 +65,14 @@ def main():
         print(canonical(live_preflight(args.requires, backend=args.backend, mode=args.mode)))
         return 2
     try:
-        if os.name != "nt" or not os.environ.get("LOCALAPPDATA"):
-            raise Blocked("Windows LOCALAPPDATA required")
-        ledger = Ledger(Path(os.environ["LOCALAPPDATA"]) / "DevOrchestra" / "p1.sqlite3")
+        ledger = Ledger.for_project()
+        if args.action == "local-status":
+            instructions = ledger.local_directory("instructions") / "baselines.sqlite3"
+            check_path(instructions)
+            print(canonical({"storage": ".ai-local", "runtime_present": ledger.path.is_file(),
+                             "instructions_present": instructions.is_file(),
+                             "legacy_import": "NOT_ATTEMPTED"}))
+            return
         if args.action == "shutdown":
             print(canonical(Runner(ledger).shutdown(args.transition, args.request_id,
                                                     expected_generation=args.generation)))

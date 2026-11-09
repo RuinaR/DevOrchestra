@@ -32,7 +32,7 @@ class NativeInspectionApproval:
     lab_root: Path
 
 
-def prepare_inspection(approval):
+def prepare_inspection(approval, lab_parent):
     """Accept only an isolated, pre-staged lab with no credentials or plugins."""
     from .mxc_launcher import _known_folder
 
@@ -41,7 +41,7 @@ def prepare_inspection(approval):
     for path in (root, home, work, temporary):
         check_path(path)
     local = _known_folder(0x1C)
-    if (root.parent != local / "DevOrchestra-Lab"
+    if (root.parent != lab_parent
             or not root.name.startswith("app-server-")
             or {p.name for p in root.iterdir()} != {"home", "work", "tmp"}
             or {p.name for p in home.iterdir()} != {"AGENTS.md", "config.toml"}

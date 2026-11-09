@@ -43,12 +43,16 @@ def validate_setup(data, state_path=None):
                  r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\bbearer\s+[a-z0-9._-]{12,})",
                  str(project)):
         raise ValueError("Credential material cannot be saved by setup")
-    paths = [_path(project["local_path"]), _path(data["replica"])]
+    original, replica = _path(project["local_path"]), _path(data["replica"])
+    if original == replica or original in replica.parents or replica in original.parents:
+        raise ValueError("Original and replica must be separate")
     if state_path is not None:
-        paths.append(_path(str(state_path)))
-    if any(a == b or a in b.parents or b in a.parents
-           for index, a in enumerate(paths) for b in paths[index + 1:]):
-        raise ValueError("Original, replica and local state must be separate")
+        state = _path(str(state_path))
+        # The original checkout may contain its own .ai-local directory.
+        if (state in (original, replica) or state in original.parents or state in replica.parents
+                or replica in state.parents
+                or (original in state.parents and state.name.casefold() != ".ai-local")):
+            raise ValueError("Replica and private local state must be separate")
     if type(data["wait_seconds"]) is not int or not 1 <= data["wait_seconds"] <= 60:
         raise ValueError("Shutdown wait must be 1–60 seconds")
     if any(project["requested_scope"][key] for key in ("network", "tools", "files")):

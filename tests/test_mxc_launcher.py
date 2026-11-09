@@ -120,7 +120,7 @@ class LauncherTests(unittest.TestCase):
         with execution_slot():
             with self.assertRaisesRegex(Blocked, "slot busy"):
                 self.run_probe()
-        self.prepare.side_effect = lambda: (self.runner.shutdown("request"), self.prepared)[1]
+        self.prepare.side_effect = lambda _lab: (self.runner.shutdown("request"), self.prepared)[1]
         with self.assertRaises(Blocked):
             self.run_probe()
         self.launch.assert_not_called()

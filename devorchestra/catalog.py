@@ -102,7 +102,8 @@ def new_project(project_id, name, goal):
 class Catalog:
     """Owner configuration controller with a separate hash-chained local ledger."""
     def __init__(self, runtime_ledger):
-        self.ledger = Ledger(runtime_ledger.path.with_name(runtime_ledger.path.stem + "-catalog.sqlite3"))
+        self.ledger = Ledger(runtime_ledger.path.with_name(runtime_ledger.path.stem + "-catalog.sqlite3"),
+                             local_root=runtime_ledger.local_root)
 
     def _snapshot(self):
         check_path(self.ledger.path)
@@ -161,7 +162,7 @@ class Catalog:
         from .setup import environment_status, validate_setup
         if not environment_status()["windows_x64"]:
             raise Blocked("Setup requires Windows x64")
-        validate_setup(data, self.ledger.path.parent)
+        validate_setup(data, self.ledger.state_boundary)
         return self._save("setup_saved", data, 0)
 
     def _save(self, kind, data, revision):
@@ -182,7 +183,7 @@ class Catalog:
                 if kind == "project_saved" and project["project_id"] in current["setups"]:
                     from .setup import validate_setup
                     validate_setup({"project": project, **current["setups"][project["project_id"]]},
-                                   self.ledger.path.parent)
+                                   self.ledger.state_boundary)
             else:
                 latest = current["version"]
             if type(revision) is not int or latest != revision:

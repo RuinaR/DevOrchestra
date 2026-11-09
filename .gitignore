@@ -76,6 +76,7 @@ config.local.*
 *.local.yml
 
 # Persistent orchestration runtime data: always local and private
+/.ai-local/
 local_data/
 runtime_data/
 app_data/

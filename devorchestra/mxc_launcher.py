@@ -96,7 +96,7 @@ def _pin(path, expected):
         raise Blocked("Executable pin mismatch")
 
 
-def _prepare():
+def _prepare(lab):
     if os.name != "nt":
         raise Blocked("Windows diagnostic only")
     local, windows, program_data = (_known_folder(folder) for folder in (0x1C, 0x24, 0x23))
@@ -126,7 +126,6 @@ def _prepare():
         check_path(path)
         if path.exists():
             raise Blocked("Managed configuration requires review")
-    lab = local / "DevOrchestra-Lab"
     check_path(lab)
     root = lab / f"mxc-native-{uuid4().hex}"
     root.mkdir()
@@ -234,7 +233,7 @@ def _run(ledger, approval):
                   "source": "OWNED_MXC_DIAGNOSTIC", "request_id": approval.request_id,
                   "generation": len(events) + 1}
         try:
-            prepared = _prepare()
+            prepared = _prepare(ledger.local_directory("temp", create=True))
         except (Blocked, OSError, ValueError):
             receipt = native_probe_receipt(preflight=False, cli_started=None, cli_exit=None, streams_complete=False)
             ledger.append(len(events), tail, {**fields, "kind": "mxc_diagnostic_result",

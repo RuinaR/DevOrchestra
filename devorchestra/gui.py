@@ -2,7 +2,6 @@
 from datetime import datetime, timezone
 from concurrent.futures import Future
 import json
-import os
 from pathlib import Path
 import sqlite3
 from threading import Thread
@@ -580,7 +579,7 @@ class CommandCenter:
                 if len(raw) > 131_072:
                     raise ValueError("Configuration input too large")
                 data = {"project": json.loads(raw), "replica": replica.get(), "wait_seconds": int(wait.get())}
-                validate_setup(data, self.reader.ledger.path.parent)
+                validate_setup(data, self.reader.ledger.state_boundary)
                 if not self.reader.ledger.path.exists():
                     self.controller.command("init")
                 Catalog(self.reader.ledger).save_setup(data)
@@ -634,7 +633,7 @@ class CommandCenter:
                     except (Blocked, OSError):
                         state += "\n활성 지침 검증 실패 또는 승인 만료"
                 if not versions:
-                    status.set(state + "\n원본 미선택 · 백업 없음")
+                    status.set(state + "\n현재 .ai-local에 백업 없음 · 이전 데이터 자동 이전 없음")
                     return
                 version = selected.get()
                 if version not in versions:
@@ -798,12 +797,13 @@ class CommandCenter:
 
 
 def main():
-    if os.name != "nt" or not os.environ.get("LOCALAPPDATA"):
-        raise SystemExit("Windows LOCALAPPDATA required")
-    path = Path(os.environ["LOCALAPPDATA"]) / "DevOrchestra" / "p1.sqlite3"
+    try:
+        ledger = Ledger.for_project()
+    except (Blocked, OSError) as error:
+        raise SystemExit("DevOrchestra local storage unavailable") from error
     root = tk.Tk()
-    center = CommandCenter(root, ProjectionReader(Ledger(path)))
-    if not path.exists():
+    center = CommandCenter(root, ProjectionReader(ledger))
+    if not ledger.path.exists():
         root.after_idle(center.setup_wizard)
     root.mainloop()
 
