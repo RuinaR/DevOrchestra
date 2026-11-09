@@ -2,6 +2,8 @@
 from base64 import b64encode
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from pathlib import Path
 
 from .app_server import InspectionBlocked, NativeInspectionApproval, inspection_check
@@ -12,12 +14,55 @@ from .ledger import check_path, digest
 ALLOWED = b"DEVORCHESTRA_P243_ALLOWED"
 PROTECTED = b"DEVORCHESTRA_P243_PROTECTED"
 COMMAND_TIMEOUT_MS = 5000
+PROFILE_ID = "devorchestra-probe-read"
 
 
 @dataclass(frozen=True)
 class NativeAccessApproval:
     inspection: NativeInspectionApproval
     powershell_sha256: str
+
+
+@dataclass(frozen=True)
+class NativeBoundaryApproval:
+    inspection: NativeInspectionApproval
+    probe_sha256: str
+    config_sha256: str
+    request_sha256: str
+
+
+def native_boundary_contract(work):
+    """Build the exact staged config and request without launching anything."""
+    check_path(work)
+    if (not work.is_absolute() or len(work.drive) != 2 or work.drive[1] != ":"
+            or work.name != "work" or len(str(work)) > 240):
+        raise InspectionBlocked("COMMAND_POLICY", "RESTRICTED_WORK_PATH_INVALID")
+    quoted = json.dumps(str(work), ensure_ascii=False)
+    config = (f'default_permissions = "{PROFILE_ID}"\n'
+              'approval_policy = "never"\n\n'
+              '[windows]\nsandbox = "mxc"\n\n'
+              f'[permissions.{PROFILE_ID}.filesystem]\n{quoted} = "read"\n\n'
+              f'[permissions.{PROFILE_ID}.network]\nenabled = false\n').encode("utf-8")
+    return config, {
+        "command": [str(work / "mxc-probe.exe"), "--app-server-file-test"],
+        "cwd": str(work), "timeoutMs": COMMAND_TIMEOUT_MS, "permissionProfile": PROFILE_ID,
+    }
+
+
+def verify_native_boundary(work, approval, config, request):
+    with inspection_check("COMMAND_POLICY", "NATIVE_BOUNDARY_CONTRACT_MISMATCH"):
+        if sha256(config).hexdigest() != approval.config_sha256 or digest(request) != approval.request_sha256:
+            raise Blocked("Candidate config or request differs from approved hash")
+    with inspection_check("MARKERS", "MARKER_INVALID"):
+        allowed, protected = _targets(work)
+        check_path(protected.parent)
+        if ({path.name for path in protected.parent.iterdir()} != {"protected.txt"}
+                or not _matches(allowed, ALLOWED) or not _matches(protected, PROTECTED)):
+            raise Blocked("Synthetic probe markers changed")
+    from .mxc_launcher import _pin
+
+    with inspection_check("PROBE_IDENTITY", "NATIVE_PROBE_IDENTITY_INVALID"):
+        _pin(work / "mxc-probe.exe", approval.probe_sha256)
 
 
 def _targets(work):
@@ -123,14 +168,25 @@ def probe_receipt(result, work, command):
                 key, separator, status = line.partition("=")
                 if key == name and separator and status in ("OK", "DENIED_5"):
                     outcomes[name] = status
-    try:
-        unchanged = all(_matches(path, marker) for path, marker in zip(_targets(work), (ALLOWED, PROTECTED)))
-    except (Blocked, OSError):
-        unchanged = None
+    markers = {}
+    for path, marker in zip(_targets(work), (ALLOWED, PROTECTED)):
+        before = sha256(marker).hexdigest()
+        try:
+            check_path(path)
+            with path.open("rb") as stream:
+                data = stream.read(len(marker) + 1)
+            after = sha256(data).hexdigest() if len(data) <= len(marker) else None
+            same = data == marker
+        except (Blocked, OSError):
+            after = same = None
+        markers[path.name] = {"before": before, "after": after, "unchanged": same}
+    comparisons = [marker["unchanged"] for marker in markers.values()]
+    unchanged = False if False in comparisons else None if None in comparisons else True
     failed = (unchanged is False or outcomes["ALLOWED_READ"] == "DENIED_5"
               or any(outcomes[name] == "OK" for name in names[1:]))
     passed = unchanged is True and tuple(outcomes.values()) == ("OK", "DENIED_5", "DENIED_5")
     return {"status": "FAIL" if failed else "PASS" if passed else "NOT_VERIFIED",
             "outcomes": outcomes, "markers_unchanged": unchanged, "command_hash": digest(command),
+            "marker_hashes": markers,
             "exit_code": code if type(code) is int else None,
             "desktop_noninterference": "NOT_VERIFIED", "network": "NOT_VERIFIED"}

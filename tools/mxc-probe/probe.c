@@ -69,10 +69,10 @@ static const WCHAR *mode(void)
     return arg;
 }
 
-static BOOL locate_fixture(void)
+static BOOL locate_fixture(const WCHAR *prefix)
 {
-    static const WCHAR prefix[] = L"mxc-native-";
     DWORD length = GetModuleFileNameW(NULL, module, PATH_CAP);
+    DWORD prefix_length = (DWORD)lstrlenW(prefix);
     DWORD work_end, leaf, i;
     if (length >= PATH_CAP || length < 4 || module[1] != L':' || module[2] != L'\\')
         return FALSE;
@@ -92,11 +92,11 @@ static BOOL locate_fixture(void)
         return FALSE;
     leaf = root_length - 1;
     while (leaf && module[leaf - 1] != L'\\') --leaf;
-    if (root_length - 1 - leaf != ARRAYSIZE(prefix) - 1 + 32)
+    if (root_length - 1 - leaf != prefix_length + 32)
         return FALSE;
-    for (i = 0; i < ARRAYSIZE(prefix) - 1; ++i)
+    for (i = 0; i < prefix_length; ++i)
         if (module[leaf + i] != prefix[i]) return FALSE;
-    for (i = leaf + ARRAYSIZE(prefix) - 1; i < root_length - 1; ++i) {
+    for (i = leaf + prefix_length; i < root_length - 1; ++i) {
         WCHAR ch = module[i];
         if (!((ch >= L'0' && ch <= L'9') || (ch >= L'a' && ch <= L'f')))
             return FALSE;
@@ -147,19 +147,40 @@ static BOOL attempt(const Target *target, BOOL write, DWORD *code)
     return CloseHandle(file) && ok;
 }
 
+static BOOL emit_boundary_result(const Target *target, BOOL write)
+{
+    DWORD code;
+    if (!attempt(target, write, &code) || !emit(target->label) || !emit("="))
+        return FALSE;
+    if (code == ERROR_SUCCESS) return emit("OK\n");
+    if (code == ERROR_ACCESS_DENIED) return emit("DENIED_5\n");
+    return emit("ERROR_") && emit_error(code) && emit("\n");
+}
+
 void probe_entry(void)
 {
+    static const Target allowed_read = {"ALLOWED_READ", L"allowed.txt", L"work\\allowed.txt", FALSE};
+    static const Target allowed_write = {"ALLOWED_WRITE", L"allowed.txt", L"work\\allowed.txt", FALSE};
+    static const Target protected_read = {
+        "PROTECTED_READ", L"..\\protected\\protected.txt", L"protected\\protected.txt", FALSE
+    };
     const WCHAR *arg = mode();
+    BOOL boundary = same(arg, L"--app-server-file-test");
     unsigned i;
     output = GetStdHandle(STD_OUTPUT_HANDLE);
     if (same(arg, L"--self-test"))
         ExitProcess(emit("MXC_NATIVE_OK\n") ? 0 : 2);
-    if (!same(arg, L"--file-test") || !locate_fixture())
+    if ((!boundary && !same(arg, L"--file-test")) ||
+        !locate_fixture(boundary ? L"app-server-" : L"mxc-native-"))
         ExitProcess(2);
     expected[0] = L'\\';
     expected[1] = L'\\';
     expected[2] = L'?';
     expected[3] = L'\\';
+    if (boundary)
+        ExitProcess(emit_boundary_result(&allowed_read, FALSE) &&
+                    emit_boundary_result(&allowed_write, TRUE) &&
+                    emit_boundary_result(&protected_read, FALSE) ? 0 : 2);
     for (i = 0; i < ARRAYSIZE(targets); ++i) {
         DWORD read, write;
         if (!attempt(&targets[i], FALSE, &read) || !attempt(&targets[i], TRUE, &write) ||

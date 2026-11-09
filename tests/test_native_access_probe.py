@@ -1,5 +1,7 @@
 from base64 import b64decode
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -11,9 +13,10 @@ from unittest.mock import patch
 
 from devorchestra.app_server import NativeInspectionApproval, _owned_stdio
 from devorchestra.lease import Blocked
-from devorchestra.ledger import Ledger
+from devorchestra.ledger import Ledger, digest
 from devorchestra.native_access_probe import (
-    ALLOWED, PROTECTED, NativeAccessApproval, build_command, probe_receipt, validate_restricted_command,
+    ALLOWED, PROTECTED, PROFILE_ID, NativeAccessApproval, NativeBoundaryApproval, build_command,
+    native_boundary_contract, probe_receipt, validate_restricted_command,
 )
 from devorchestra.runtime import Runner
 
@@ -69,9 +72,48 @@ class NativeAccessProbeTests(unittest.TestCase):
         self.assertNotIn("Get-Process", script)
         self.assertNotIn("Invoke-WebRequest", script)
 
+    def test_native_profile_candidate_is_exact_and_cannot_launch(self):
+        lab = self.work.parent
+        (lab / "home").mkdir()
+        (lab / "tmp").mkdir()
+        for path in (lab / "home" / "AGENTS.md", self.work / "AGENTS.md"):
+            path.write_bytes(b"Synthetic instructions")
+        config, request = native_boundary_contract(self.work)
+        self.assertEqual({
+            "command": [str(self.work / "mxc-probe.exe"), "--app-server-file-test"],
+            "cwd": str(self.work), "timeoutMs": 5000, "permissionProfile": PROFILE_ID,
+        }, request)
+        self.assertIn((json.dumps(str(self.work), ensure_ascii=False) + ' = "read"').encode(), config)
+        self.assertIn(b'enabled = false', config)
+        for forbidden in (b"extends", b":minimal", b'"write"', b"workspace_roots"):
+            self.assertNotIn(forbidden, config)
+        config_path = lab / "home" / "config.toml"
+        config_path.write_bytes(config)
+        fixture = b"synthetic executable identity only"
+        (self.work / "mxc-probe.exe").write_bytes(fixture)
+        approval = NativeBoundaryApproval(
+            self.approval.inspection, sha256(fixture).hexdigest(), sha256(config).hexdigest(), digest(request),
+        )
+        with patch("devorchestra.app_server.open_app_server") as launch:
+            for candidate, code in (
+                (replace(approval, config_sha256="0" * 64), "NATIVE_BOUNDARY_CONTRACT_MISMATCH"),
+                (replace(approval, request_sha256="0" * 64), "NATIVE_BOUNDARY_CONTRACT_MISMATCH"),
+                (replace(approval, probe_sha256="0" * 64), "NATIVE_PROBE_IDENTITY_INVALID"),
+                (approval, "NATIVE_LOADER_SCOPE_UNVERIFIED"),
+            ):
+                with self.subTest(code=code), self.assertRaisesRegex(Blocked, code):
+                    self.runner.inspect_native(candidate)
+            config_path.write_bytes(config + b"\n")
+            with self.assertRaisesRegex(Blocked, "SYNTHETIC_LAB_INVALID"):
+                self.runner.inspect_native(approval)
+            launch.assert_not_called()
+        self.assertEqual([], self.ledger.read())
+
     def test_missing_results_and_denial_are_distinct(self):
         receipt = {"exitCode": 0, "stdout": OUTPUT, "stderr": ""}
-        self.assertEqual("PASS", probe_receipt(receipt, self.work, self.command)["status"])
+        result = probe_receipt(receipt, self.work, self.command)
+        self.assertEqual("PASS", result["status"])
+        self.assertEqual(sha256(ALLOWED).hexdigest(), result["marker_hashes"]["allowed.txt"]["after"])
         self.assertEqual("NOT_VERIFIED", probe_receipt(
             {**receipt, "stdout": OUTPUT.replace("PROTECTED_READ=DENIED_5", "PROTECTED_READ=ERROR")},
             self.work, self.command)["status"])

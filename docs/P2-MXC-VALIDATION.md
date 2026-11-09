@@ -1,5 +1,13 @@
 # P2.7 Windows 네이티브 MXC 검토
 
+## P2.51 네이티브 제한 읽기 후보
+
+Controller의 `NativeBoundaryApproval`은 독립 원장의 temp 아래 `app-server-<요청 ID>`만 받는다. 합성 홈의 config 전체 바이트, 승인된 요청의 정규 JSON, 작업 폴더에 배치한 EXE를 각각 SHA-256에 귀속한다. `devorchestra-probe-read`는 상속 없는 프로필이며, 절대 `work` 경로 한 개만 읽기로 선언한다. 쓰기 규칙과 플랫폼 기본 읽기는 없고, 네트워크 비활성, 승인 정책 `never`, Windows MXC를 명시한다. 고정 후보 요청은 `work/mxc-probe.exe --app-server-file-test`, cwd `work`, 5초, `permissionProfile`만 사용한다. 실제 연결에는 기존 서명·해시 고정 CLI, 실험적 기능을 명시하는 초기화 및 명령 cwd의 유효 정책 확인이 필요하다.
+
+MSVC 19.44.35228.0 및 Windows SDK 10.0.26100.0으로 기존 CRT 없는 소스에서 AMD64 PE32+ 콘솔 EXE를 빌드했다. 빌드 입력 `probe.c` SHA-256은 `bedc090824c659dd9a7a0cd84094cbcf27ec21b4740baac638f009073100150f`, EXE는 `6f3121bb3bd50b250479f994f0a890f3a53e1325f542b5a9397605987d97399e`다. 직접 import는 KERNEL32.dll만 있고 지연 import는 없다. Windows 시스템 로더·전이 DLL 접근은 별도 문제이며 범위는 미확인이다. 호스트 합성 자기 점검, 추가 인자·잘못된 cwd 거부, 양성 파일 대조 4건을 통과했다. 파일 대조에서 호스트 읽기·쓰기는 의도대로 성공했고 보호 표식은 불변이었다. EXE와 합성 결과는 로컬에만 보존한다.
+
+현재 연결 범위는 Controller 사전검사까지다. config, 요청, 바이너리 및 표식이 일치해도 `NATIVE_LOADER_SCOPE_UNVERIFIED`로 차단하며 App Server, 전송 의도, 프로브는 시작하지 않는다. 향후 입장은 정확한 로더 범위 및 유효 프로필 증거를 요구한다. 그 뒤 별도 승인된 1회 시험에 한해 기존 Job·파이프 및 원장 경계를 사용한다. 상한은 App Server 15초, 명령 5초, Job 512 MiB 및 소유 보조 프로세스 포함 8개다. 기대 결과는 허용 읽기 성공, 쓰기와 보호 읽기에서 Win32 5, 두 표식 해시 일치와 소유 자원 회수다. MXC 집행, 자식 권한 전파와 외부 앱 비간섭은 NOT_VERIFIED다. 이전 MXC EXE 실패는 유지한다. 새 후보는 App Server의 무상속 프로필과 별도 고정 인자를 사용하지만, 이미지·로더 실패를 해결했다는 증거는 없다.
+
 ## P2.50 Windows 제한 읽기 실행 계약
 
 고정 CLI `0.167.0-alpha.3.2`의 `command/exec`는 `readOnly.access.restricted`를 거부한다. 지원되는 설정 경로는 상속 없는 named profile의 명시적 파일 읽기 규칙과 비활성 네트워크다. `command/exec.permissionProfile`은 초기화 시 실험적 기능을 명시해야 하고 `sandboxPolicy`와 함께 보낼 수 없다. 서버는 명령 cwd를 기준으로 설정과 관리 제약을 다시 해석한다. `permissionProfile/list`의 `allowed`는 프로필 선택 가능 여부이며, `windowsSandbox/readiness`의 `ready`는 백엔드 준비 상태다. 둘 다 실제 적용 경로 목록이나 접근 거부 영수증을 제공하지 않는다. [고정 요청 스키마](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/app-server-protocol/src/protocol/v2/command_exec.rs) · [프로필 선택 코드](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/app-server/src/request_processors/command_exec_processor.rs#L212-L241) · [프로필 목록 스키마](https://github.com/openai/codex/blob/rust-v0.167.0-alpha.3.2/codex-rs/app-server-protocol/schema/json/v2/PermissionProfileListResponse.json)

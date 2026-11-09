@@ -297,9 +297,10 @@ class Runner:
     def inspect_native(self, approval):
         """Internal owner entry for a model-free handshake or fixed access probe."""
         from .app_server import InspectionBlocked, NativeInspectionApproval, save_preflight_diagnostic
-        from .native_access_probe import NativeAccessApproval
+        from .native_access_probe import NativeAccessApproval, NativeBoundaryApproval
 
-        inspection = approval.inspection if type(approval) is NativeAccessApproval else approval
+        inspection = (approval.inspection if type(approval) in (NativeAccessApproval, NativeBoundaryApproval)
+                      else approval)
         request_id = None
         if (type(inspection) is NativeInspectionApproval and isinstance(inspection.request_id, str)
                 and re.fullmatch(r"[0-9a-f]{32}", inspection.request_id)):
@@ -320,15 +321,22 @@ class Runner:
         from math import isfinite
         from .app_server import InspectionBlocked, inspection_check, open_app_server, prepare_inspection, save_inspection_diagnostic
         from .mxc_launcher import CLI_HASH, CLI_VERSION
-        from .native_access_probe import NativeAccessApproval, command_request, prepare_probe, probe_receipt
+        from .native_access_probe import (
+            NativeAccessApproval, NativeBoundaryApproval, command_request, native_boundary_contract,
+            prepare_probe, probe_receipt, verify_native_boundary,
+        )
 
         access = approval if type(approval) is NativeAccessApproval else None
-        if access:
-            approval = access.inspection
+        boundary = approval if type(approval) is NativeBoundaryApproval else None
+        if access or boundary:
+            approval = (access or boundary).inspection
         if (request_id is None or type(approval.expires_epoch) not in (int, float)
                 or (type(approval.expires_epoch) is float and not isfinite(approval.expires_epoch))
                 or (access and (not isinstance(access.powershell_sha256, str)
-                                or not re.fullmatch(r"[0-9a-f]{64}", access.powershell_sha256)))):
+                                or not re.fullmatch(r"[0-9a-f]{64}", access.powershell_sha256)))
+                or (boundary and any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+                                     for value in (boundary.probe_sha256, boundary.config_sha256,
+                                                   boundary.request_sha256)))):
             raise InspectionBlocked("APPROVAL", "APPROVAL_INVALID")
 
         def check_approval():
@@ -359,9 +367,21 @@ class Runner:
             if (run and run[-1]["state"] not in TERMINAL) or (development and not development["end"]):
                 raise InspectionBlocked("ADMISSION", "ACTIVE_DEVELOPMENT")
             with inspection_check("SYNTHETIC_LAB", "SYNTHETIC_LAB_INVALID"):
+                options = {}
+                lab_parent = self.ledger.local_directory("temp")
+                if boundary:
+                    if approval.lab_root != lab_parent / f"app-server-{request_id}":
+                        raise InspectionBlocked("SYNTHETIC_LAB", "SYNTHETIC_LAB_PARENT_MISMATCH")
+                    config, candidate = native_boundary_contract(approval.lab_root / "work")
+                    options["native_probe_config"] = config
                 work, environment, instructions = prepare_inspection(
-                    approval, self.ledger.local_directory("temp"), access_probe=bool(access),
+                    approval, lab_parent, access_probe=bool(access or boundary),
+                    **options,
                 )
+            if boundary:
+                verify_native_boundary(work, boundary, config, candidate)
+                # An approved draft and matching executable do not establish loader compatibility.
+                raise InspectionBlocked("COMMAND_POLICY", "NATIVE_LOADER_SCOPE_UNVERIFIED")
             fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",
                       "source": "WINDOWS_NATIVE_CODEX", "request_id": approval.request_id,
                       "instruction_sources": instructions}

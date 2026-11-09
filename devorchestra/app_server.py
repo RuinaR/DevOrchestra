@@ -83,7 +83,7 @@ def inspection_check(stage, code):
         raise InspectionBlocked(stage, "UNKNOWN_PREFLIGHT_FAILURE") from None
 
 
-def prepare_inspection(approval, lab_parent, *, access_probe=False):
+def prepare_inspection(approval, lab_parent, *, access_probe=False, native_probe_config=None):
     """Accept only an isolated, pre-staged lab with no credentials or plugins."""
     from .mxc_launcher import _known_folder
 
@@ -95,6 +95,8 @@ def prepare_inspection(approval, lab_parent, *, access_probe=False):
         check_path(path)
     root_entries = {"home", "work", "tmp"} | ({"protected"} if access_probe else set())
     work_entries = {"AGENTS.md"} | ({"allowed.txt"} if access_probe else set())
+    if native_probe_config is not None:
+        work_entries.add("mxc-probe.exe")
     if (not root.name.startswith("app-server-")
             or (access_probe and root.name != f"app-server-{approval.request_id}")
             or {p.name for p in root.iterdir()} != root_entries
@@ -104,8 +106,9 @@ def prepare_inspection(approval, lab_parent, *, access_probe=False):
         raise Blocked("App Server lab inventory rejected")
     config = home / "config.toml"
     check_path(config)
+    expected = (INSPECTION_CONFIG.encode("ascii") if native_probe_config is None else native_probe_config)
     with config.open("rb") as stream:
-        if stream.read(len(INSPECTION_CONFIG) + 1) != INSPECTION_CONFIG.encode("ascii"):
+        if stream.read(len(expected) + 1) != expected:
             raise Blocked("App Server lab configuration rejected")
     with inspection_check("INSTRUCTIONS", "INSTRUCTION_INVALID"):
         sources = instruction_sources(home, work)
