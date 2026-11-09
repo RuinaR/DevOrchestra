@@ -158,7 +158,7 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
     return (messages, env, sizing) if include_input_receipt else (messages, env)
 
 
-def _collect_plan(server, request, replica, messages, before_send):
+def _collect_plan(server, request, replica, messages, expected_sources, before_thread, before_send):
     inspect_manager_policy(server, replica)
     thread_notice = []
 
@@ -167,17 +167,27 @@ def _collect_plan(server, request, replica, messages, before_send):
             raise Blocked("Unexpected additional Manager thread notification")
         thread_notice.append(event)
 
+    before_thread()
     started = server.request(10, "thread/start", {
         "model": request.model, "cwd": str(replica), "approvalPolicy": "never",
+        "modelProvider": "openai", "config": {"model_reasoning_effort": request.reasoning},
         "sandbox": "read-only", "ephemeral": True,
     }, record_thread_notice, allowed_notifications=("thread/started",))
     if (started.get("sandbox") != {"type": "readOnly", "networkAccess": False}
             or started["sandbox"]["networkAccess"] is not False or started.get("approvalPolicy") != "never"
-            or started.get("cwd") != str(replica) or started.get("model") != request.model):
+            or started.get("cwd") != str(replica) or started.get("model") != request.model
+            or started.get("modelProvider") != "openai" or started.get("approvalsReviewer") != "user"
+            or started.get("reasoningEffort") != request.reasoning):
         raise Blocked("Manager thread policy is not the approved read-only configuration")
+    sources = started.get("instructionSources")
+    if (type(sources) is not list or len(sources) != len(expected_sources)
+            or any(type(path) is not str for path in sources)
+            or {Path(path) for path in sources} != set(expected_sources)):
+        raise Blocked("Manager loaded instruction sources are unverified")
     thread = started["thread"]
     thread_id = thread["id"]
-    if (not isinstance(thread_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread_id)
+    if (thread.get("ephemeral") is not True or not isinstance(thread_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread_id)
             or len(thread_notice) > 1
             or any(event.get("method") != "thread/started"
                    or event["params"]["thread"]["id"] != thread_id for event in thread_notice)):
@@ -226,15 +236,19 @@ def _collect_plan(server, request, replica, messages, before_send):
                 if reply is not None:
                     raise Blocked("Manager returned more than one plan")
                 reply = parse_role_output(ROLE, item["text"].encode("utf-8"))
+                if reply["disposition"] not in ("PROPOSED", "CLARIFICATION"):
+                    raise Blocked("Unexpected first Manager disposition")
         elif method not in ("item/agentMessage/delta", "thread/tokenUsage/updated"):
             raise Blocked("Unsupported Manager notification")
     raise Blocked("Manager event limit exceeded")
 
 
-def run_owned_manager(ledger, approval, request, before_send, cancelled, **context):
+def run_owned_manager(ledger, approval, request, before_thread, before_send, cancelled, **context):
     messages, env = prepare_manager(ledger, approval, request, **context)
     timeout = min(request.budget.seconds, request.deadline_utc_epoch - time())
     with open_app_server(approval.binary, approval.replica, env, timeout, cancelled,
                          explicit_mxc=True) as server:
-        proposal = _collect_plan(server, request, approval.replica, messages, before_send)
+        expected_sources = (approval.home / "AGENTS.md", selected_source(approval.replica)[0])
+        proposal = _collect_plan(server, request, approval.replica, messages, expected_sources,
+                                 before_thread, before_send)
     return proposal  # Context exit confirmed the owned Job and pipes drained.

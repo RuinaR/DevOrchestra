@@ -367,14 +367,14 @@ class Runner:
             count, head = self.ledger.append(len(events), tail, {
                 **fields, "kind": "native_manager_intent",
             }, admission=require_admission)
-            dispatched = False
+            dispatch_events = []
 
             def cancelled():
                 current, _ = self.ledger.snapshot()
                 return time() >= request.deadline_utc_epoch or shutdown_state(current)["state"] in HELD
 
-            def before_send():
-                nonlocal count, head, dispatched
+            def record_dispatch(kind, expected_count):
+                nonlocal count, head
                 if context and self.manager_context(
                     request.project_id, context["project_context"]["development_id"],
                 ) != context["project_context"]:
@@ -382,18 +382,22 @@ class Runner:
                 prepare_manager(self.ledger, approval, request, **context)
 
                 def admit(current):
-                    if (dispatched or time() >= request.deadline_utc_epoch
+                    if (len(dispatch_events) != expected_count or time() >= request.deadline_utc_epoch
                             or shutdown_state(current)["state"] in HELD or pending_budget_stop(current)):
                         raise Blocked("Manager dispatch admission closed")
 
-                count, head = self.ledger.append(count, head, {
-                    **fields, "kind": "native_manager_dispatch",
-                }, allow_shutdown=True, admission=admit)
-                dispatched = True
+                entry = {**fields, "kind": kind}
+                count, head = self.ledger.append(count, head, entry, allow_shutdown=True, admission=admit)
+                dispatch_events.append(entry)
 
             try:
-                proposal = run_owned_manager(self.ledger, approval, request, before_send, cancelled, **context)
-                if not dispatched:
+                proposal = run_owned_manager(
+                    self.ledger, approval, request,
+                    lambda: record_dispatch("native_manager_thread_dispatch", 0),
+                    lambda: record_dispatch("native_manager_dispatch", 1),
+                    cancelled, **context,
+                )
+                if len(dispatch_events) != 2:
                     raise Blocked("Manager dispatch receipt missing")
             except Exception:
                 # Keep intent unresolved, including when dispatch may have reached the server.
@@ -406,10 +410,7 @@ class Runner:
                 if current_head != head and (
                         not current[count:] or any(e["kind"] != "shutdown_scheduled" for e in current[count:])):
                     raise Blocked("Manager result fence changed")
-                if current[:count] != events + [
-                    {**fields, "kind": "native_manager_intent"},
-                    {**fields, "kind": "native_manager_dispatch"},
-                ]:
+                if current[:count] != events + [{**fields, "kind": "native_manager_intent"}, *dispatch_events]:
                     raise Blocked("Manager evidence prefix changed")
                 evidence = TransitionEvidence(
                     owned_tree_drained=True, scope_released=True, receipt_committed=True,

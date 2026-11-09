@@ -20,7 +20,7 @@ from devorchestra.runtime import Runner
 
 
 PEER = r"""
-import json, sys, time
+import json, os, sys, time
 mode = sys.argv[1]
 config = json.loads(sys.argv[2])
 cwd = None
@@ -39,13 +39,15 @@ for line in sys.stdin:
         assert mode != 'tools-enabled'
         assert msg['params']['sandbox'] == 'read-only'
         assert not msg['params'].get('dynamicTools')
+        assert msg['params']['modelProvider'] == 'openai'
+        assert msg['params']['config'] == {'model_reasoning_effort':'low'}
         cwd = msg['params']['cwd']
         notice('thread/started', thread={'id': 'thr-fixture'})
     if method == 'turn/start':
         p = msg['params']
         assert p['approvalPolicy'] == 'never' and p['effort'] == 'low'
         assert 'sandboxPolicy' not in p
-        assert mode not in ('unsafe-thread', 'network-thread')
+        assert mode not in ('unsafe-thread', 'network-thread', 'wrong-instructions')
         assert p['input'][0]['text'] == 'Common fixture'
         assert p['input'][1]['text'] == 'Manager fixture'
         assert 'Global fixture' not in str(p['input']) and 'Project fixture' not in str(p['input'])
@@ -60,7 +62,10 @@ for line in sys.stdin:
         'initialize': {'platformOs':'windows'},
         'config/read': {'config': config},
         'configRequirements/read': {'requirements':None},
-        'thread/start': {'thread': {'id':'thr-fixture'}, 'approvalPolicy':'never',
+        'thread/start': {'thread': {'id':'thr-fixture', 'ephemeral':True}, 'approvalPolicy':'never',
+                         'approvalsReviewer':'user', 'modelProvider':'openai', 'reasoningEffort':'low',
+                         'instructionSources': [] if mode == 'wrong-instructions' or not cwd else
+                             [os.path.join(os.environ['CODEX_HOME'], 'AGENTS.md'), os.path.join(cwd, 'AGENTS.md')],
                          'sandbox': {'type':'workspaceWrite' if mode == 'unsafe-thread' else 'readOnly',
                                      'networkAccess':mode == 'network-thread'},
                          'cwd':cwd, 'model':'fixture-model'},
@@ -131,7 +136,7 @@ class NativeManagerTests(unittest.TestCase):
             if mode == "tools-enabled":
                 config["features"]["computer_use"] = True
             with _owned_stdio(Path(sys.executable), ["-I", "-S", "-B", "-c", PEER, mode, json.dumps(config)], cwd,
-                              {"SystemRoot": os.environ["SystemRoot"]},
+                              {"SystemRoot": os.environ["SystemRoot"], "CODEX_HOME": str(self.approval.home)},
                               min(timeout, 0.4) if mode == "hang" else timeout, cancelled) as server:
                 yield server
 
@@ -186,7 +191,7 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual([], self.ledger.read())
 
     def test_effective_tool_or_thread_policy_mismatch_blocks_turn(self):
-        for mode in ("tools-enabled", "unsafe-thread", "network-thread"):
+        for mode in ("tools-enabled", "unsafe-thread", "network-thread", "wrong-instructions"):
             with self.subTest(mode=mode):
                 self.ledger = Ledger(self.ledger.path.with_name(f"{mode}.sqlite3"),
                                      local_root=self.ledger.local_root)
@@ -194,7 +199,10 @@ class NativeManagerTests(unittest.TestCase):
                 self.ledger.initialize()
                 with self.assertRaisesRegex(Blocked, "UNKNOWN"):
                     self.run_fixture(mode)
-                self.assertEqual(["native_manager_intent"], [event["kind"] for event in self.ledger.read()])
+                expected = ["native_manager_intent"]
+                if mode != "tools-enabled":
+                    expected.append("native_manager_thread_dispatch")
+                self.assertEqual(expected, [event["kind"] for event in self.ledger.read()])
 
     def test_clarification_is_durable_after_manager_drain_and_requires_fresh_approval(self):
         result, _ = self.run_fixture("clarification")
@@ -227,7 +235,8 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual("DRAINED", result["owned_tree"])
         self.assertEqual("BLOCKED", result["next_role_admission"])
         self.assertEqual("UNKNOWN", result["usage"])
-        self.assertEqual(["native_manager_intent", "native_manager_dispatch", "native_manager_result"],
+        self.assertEqual(["native_manager_intent", "native_manager_thread_dispatch",
+                          "native_manager_dispatch", "native_manager_result"],
                          [event["kind"] for event in self.ledger.read()])
         self.assertNotIn("Fixture goal", str(self.ledger.read()))
         with self.assertRaisesRegex(Blocked, "unused admission"):
@@ -270,7 +279,7 @@ class NativeManagerTests(unittest.TestCase):
         def fail_result(choose):
             nonlocal calls
             calls += 1
-            if calls == 3:
+            if calls == 4:
                 raise OSError("fixture settlement failure")
             return real_update(choose)
 
