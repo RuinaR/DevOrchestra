@@ -83,7 +83,8 @@ def inspection_check(stage, code):
         raise InspectionBlocked(stage, "UNKNOWN_PREFLIGHT_FAILURE") from None
 
 
-def prepare_inspection(approval, lab_parent, *, access_probe=False, native_probe_config=None):
+def prepare_inspection(approval, lab_parent, *, access_probe=False, native_probe_config=None,
+                       manager_config=None):
     """Accept only an isolated, pre-staged lab with no credentials or plugins."""
     from .mxc_launcher import _known_folder
 
@@ -98,7 +99,7 @@ def prepare_inspection(approval, lab_parent, *, access_probe=False, native_probe
     if native_probe_config is not None:
         work_entries.add("mxc-probe.exe")
     if (not root.name.startswith("app-server-")
-            or (access_probe and root.name != f"app-server-{approval.request_id}")
+            or ((access_probe or manager_config is not None) and root.name != f"app-server-{approval.request_id}")
             or {p.name for p in root.iterdir()} != root_entries
             or {p.name for p in home.iterdir()} - {"AGENTS.md"} != {"config.toml"}
             or {p.name for p in work.iterdir()} - {"AGENTS.md"} != work_entries - {"AGENTS.md"}
@@ -107,6 +108,8 @@ def prepare_inspection(approval, lab_parent, *, access_probe=False, native_probe
     config = home / "config.toml"
     check_path(config)
     expected = (INSPECTION_CONFIG.encode("ascii") if native_probe_config is None else native_probe_config)
+    if manager_config is not None:
+        expected = manager_config
     with config.open("rb") as stream:
         if stream.read(len(expected) + 1) != expected:
             raise Blocked("App Server lab configuration rejected")

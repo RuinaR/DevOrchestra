@@ -353,13 +353,14 @@ class Runner:
                 frozen_refs = [item["ref"] for item in context["project_context"]["requirements"]]
                 if frozen_refs != latest_requirements(catalog, request.project_id):
                     raise Blocked("Manager requires a current requirements baseline")
-            prepare_manager(self.ledger, approval, request, **context)
+            _, _, sizing = prepare_manager(self.ledger, approval, request, include_input_receipt=True, **context)
             fields = {key: getattr(request, key) for key in (
                 "project_id", "task_id", "run_id", "generation", "agent_run_id", "context_id", "role",
             )}
             fields.update(state="DIAGNOSTIC", source="WINDOWS_NATIVE_CODEX",
                           request_id=approval.request_id, request_hash=approval.request_hash,
                           model=request.model, reasoning=request.reasoning, budget=asdict(request.budget),
+                          input_sizing=sizing,
                           deadline=request.deadline_utc_epoch, instruction_layers=list(approval.layers))
             if context:
                 fields["question_development_id"] = context["project_context"]["development_id"]
@@ -452,8 +453,10 @@ class Runner:
         """Internal owner entry for a model-free handshake or fixed access probe."""
         from .app_server import InspectionBlocked, NativeInspectionApproval, save_preflight_diagnostic
         from .native_access_probe import NativeAccessApproval, NativeBoundaryApproval
+        from .native_manager import ManagerPolicyApproval
 
-        inspection = (approval.inspection if type(approval) in (NativeAccessApproval, NativeBoundaryApproval)
+        inspection = (approval.inspection if type(approval) in (NativeAccessApproval, NativeBoundaryApproval,
+                                                                ManagerPolicyApproval)
                       else approval)
         request_id = None
         if (type(inspection) is NativeInspectionApproval and isinstance(inspection.request_id, str)
@@ -478,6 +481,7 @@ class Runner:
             save_inspection_diagnostic, verify_app_server_binary,
         )
         from .mxc_launcher import CLI_HASH, CLI_VERSION
+        from .native_manager import MANAGER_CONFIG, ManagerPolicyApproval, inspect_manager_policy
         from .native_access_probe import (
             NativeAccessApproval, NativeBoundaryApproval, command_request, native_boundary_contract,
             prepare_probe, probe_receipt, verify_native_boundary,
@@ -485,8 +489,9 @@ class Runner:
 
         access = approval if type(approval) is NativeAccessApproval else None
         boundary = approval if type(approval) is NativeBoundaryApproval else None
-        if access or boundary:
-            approval = (access or boundary).inspection
+        manager_policy = type(approval) is ManagerPolicyApproval
+        if access or boundary or manager_policy:
+            approval = approval.inspection
         if (request_id is None or type(approval.expires_epoch) not in (int, float)
                 or (type(approval.expires_epoch) is float and not isfinite(approval.expires_epoch))
                 or (access and (not isinstance(access.powershell_sha256, str)
@@ -528,6 +533,8 @@ class Runner:
             with inspection_check("SYNTHETIC_LAB", "SYNTHETIC_LAB_INVALID"):
                 options = {}
                 lab_parent = self.ledger.local_directory("temp")
+                if manager_policy:
+                    options["manager_config"] = MANAGER_CONFIG.encode("ascii")
                 if boundary:
                     if approval.lab_root != lab_parent / f"app-server-{request_id}":
                         raise InspectionBlocked("SYNTHETIC_LAB", "SYNTHETIC_LAB_PARENT_MISMATCH")
@@ -545,6 +552,9 @@ class Runner:
             fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",
                       "source": "WINDOWS_NATIVE_CODEX", "request_id": approval.request_id,
                       "instruction_sources": instructions}
+            if manager_policy:
+                fields.update(probe_kind="MANAGER_CONFIG_ONLY", config_ref=digest(MANAGER_CONFIG),
+                              cli_sha256=CLI_HASH, cli_version=CLI_VERSION)
             if access:
                 argv, recheck_probe = resources.enter_context(prepare_probe(work, access.powershell_sha256))
                 command = command_request(work, argv)
@@ -567,9 +577,9 @@ class Runner:
                 check_approval()
                 if shutdown_state(current)["state"] in HELD:
                     raise InspectionBlocked("ADMISSION", "SHUTDOWN_ADMISSION_CLOSED")
-                options = {"explicit_mxc": True} if access else {}
+                options = {"explicit_mxc": True} if access or manager_policy else {}
                 with open_app_server(approval.binary, work, environment, 15, cancelled, **options) as server:
-                    policy = server.inspect_policy()
+                    policy = inspect_manager_policy(server, work) if manager_policy else server.inspect_policy()
                     if access:
                         if policy != {"sandbox": "read-only", "approval": "never",
                                       "managed_requirements_present": False}:
@@ -598,6 +608,9 @@ class Runner:
                 raise Blocked("App Server inspection or owned drain unverified") from None
             result = {**fields, "kind": "native_inspection_result", "policy": policy,
                       "instruction_loading": "NOT_VERIFIED", "owned_tree": "DRAINED"}
+            if manager_policy:
+                result.update(config_check="MATCHED", tool_exposure="NOT_VERIFIED",
+                              thread_policy="NOT_VERIFIED", model_dispatched=False)
             if access:
                 result["access"] = probe_receipt(wire_result, work, command)
             try:

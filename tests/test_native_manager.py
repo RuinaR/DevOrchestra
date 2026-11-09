@@ -11,10 +11,10 @@ import unittest
 from unittest.mock import patch
 
 from devorchestra.adapter import Budget, RoleRequest, Scope
-from devorchestra.app_server import _owned_stdio
+from devorchestra.app_server import NativeInspectionApproval, _owned_stdio
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
-from devorchestra.native_manager import DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval
+from devorchestra.native_manager import DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval, ManagerPolicyApproval
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
 
@@ -31,6 +31,8 @@ def notice(method, **params):
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg['method']
+    if mode == 'config-only':
+        assert method in ('initialize', 'initialized', 'config/read', 'configRequirements/read')
     if method == 'initialized':
         continue
     if method == 'thread/start':
@@ -80,6 +82,13 @@ for line in sys.stdin:
 
 
 class NativeManagerTests(unittest.TestCase):
+    @staticmethod
+    def effective_config():
+        return {"sandbox_mode": "read-only", "approval_policy": "never", "web_search": "disabled",
+                "cli_auth_credentials_store": "file",
+                "analytics": {"enabled": False}, "mcp_servers": {},
+                "features": {name: False for name in DISABLED_FEATURES}}
+
     def setUp(self):
         folder = TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -107,9 +116,9 @@ class NativeManagerTests(unittest.TestCase):
         self.request = RoleRequest("fixture-a", "task", "run", 1, "agent", "Manager",
                                    "fixture-model", "low", "context",
                                    Scope("replica", ("a" * 32,), readable=(str(self.replica),)),
-                                   Budget(10, 20, 0), (), "Fixture goal", now + 30)
+                                   Budget(10, 8192, 0), (), "Fixture goal", now + 30)
         self.approval = ManagerApproval("a" * 32, now + 40, root / "codex.exe", self.replica, home,
-                                        self.layers, bind_instructions(self.request, self.layers))
+                                        self.layers, bind_instructions(self.request, self.layers), 8192, 1024)
 
     def run_fixture(self, mode="normal", *, cancel=False):
         @contextmanager
@@ -118,8 +127,7 @@ class NativeManagerTests(unittest.TestCase):
             self.assertEqual("native_manager_intent", self.ledger.read()[-1]["kind"])
             if cancel:
                 self.runner.shutdown("request")
-            config = {"sandbox_mode": "read-only", "approval_policy": "never", "web_search": "disabled",
-                      "mcp_servers": {}, "features": {name: False for name in DISABLED_FEATURES}}
+            config = self.effective_config()
             if mode == "tools-enabled":
                 config["features"]["computer_use"] = True
             with _owned_stdio(Path(sys.executable), ["-I", "-S", "-B", "-c", PEER, mode, json.dumps(config)], cwd,
@@ -136,6 +144,45 @@ class NativeManagerTests(unittest.TestCase):
     def test_live_path_is_blocked_before_any_intent(self):
         with self.assertRaisesRegex(Blocked, "GENERAL_ADMISSION_UNVERIFIED"):
             self.runner.plan_native_manager(self.approval, self.request)
+        self.assertEqual([], self.ledger.read())
+
+    def test_config_only_inspection_drains_without_opening_thread_or_turn(self):
+        identity = "c" * 32
+        lab = self.ledger.local_directory("temp") / f"app-server-{identity}"
+        for name in ("home", "work", "tmp"):
+            (lab / name).mkdir(parents=True)
+        for name in ("home", "work"):
+            (lab / name / "AGENTS.md").write_bytes(b"Synthetic Manager inspection")
+        (lab / "home" / "config.toml").write_bytes(MANAGER_CONFIG.encode("ascii"))
+        approval = ManagerPolicyApproval(NativeInspectionApproval(identity, time() + 30, self.approval.binary, lab))
+
+        @contextmanager
+        def transport(_binary, cwd, _env, timeout, cancelled, *, explicit_mxc):
+            self.assertTrue(explicit_mxc)
+            with _owned_stdio(Path(sys.executable), ["-I", "-S", "-B", "-c", PEER, "config-only",
+                              json.dumps(self.effective_config())], cwd,
+                              {"SystemRoot": os.environ["SystemRoot"]}, timeout, cancelled) as server:
+                yield server
+
+        with patch("devorchestra.app_server.open_app_server", side_effect=transport) as launch:
+            result = self.runner.inspect_native(approval)
+            self.assertEqual("MATCHED", result["config_check"])
+            self.assertEqual("NOT_VERIFIED", result["thread_policy"])
+            self.assertEqual("NOT_VERIFIED", result["tool_exposure"])
+            self.assertEqual("DRAINED", result["owned_tree"])
+            self.assertIs(result["model_dispatched"], False)
+            with self.assertRaisesRegex(Blocked, "DUPLICATE_REQUEST"):
+                self.runner.inspect_native(approval)
+            launch.assert_called_once()
+
+    def test_input_limit_and_output_reserve_block_before_intent(self):
+        for changes in ({"context_limit_tokens": 1024}, {"output_reserve_tokens": 100}):
+            with self.subTest(changes=changes):
+                original = self.approval
+                self.approval = replace(original, **changes)
+                with self.assertRaisesRegex(Blocked, "output reserve"):
+                    self.run_fixture()
+                self.approval = original
         self.assertEqual([], self.ledger.read())
 
     def test_effective_tool_or_thread_policy_mismatch_blocks_turn(self):

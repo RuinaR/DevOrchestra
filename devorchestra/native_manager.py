@@ -1,10 +1,12 @@
 """One-turn, read-only Manager protocol. Live admission remains independently blocked."""
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 from pathlib import Path
+import re
 from time import time
 
-from .app_server import INSPECTION_CONFIG, open_app_server
+from .app_server import INSPECTION_CONFIG, MAX_FRAME, NativeInspectionApproval, open_app_server
 from .instructions import instruction_bytes, selected_source
 from .lease import Blocked
 from .ledger import canonical, check_path, digest
@@ -17,14 +19,17 @@ DISABLED_FEATURES = (
     "shell_tool", "computer_use", "apps", "plugins", "hooks", "multi_agent",
     "multi_agent_v2", "code_mode", "code_mode_host", "request_permissions_tool", "memories",
 )
-MANAGER_CONFIG = (INSPECTION_CONFIG + 'web_search = "disabled"\n\n'
-                  + '[mcp_servers]\n\n[features]\n'
+MANAGER_CONFIG = (INSPECTION_CONFIG + 'web_search = "disabled"\ncli_auth_credentials_store = "file"\n\n'
+                  + '[analytics]\nenabled = false\n\n[mcp_servers]\n\n[features]\n'
                   + "".join(f"{name} = false\n" for name in DISABLED_FEATURES))
 
 
 def _verify_manager_config(config):
     features = config.get("features")
+    analytics = config.get("analytics")
     if (not isinstance(features, dict) or any(features.get(name) is not False for name in DISABLED_FEATURES)
+            or not isinstance(analytics, dict) or analytics.get("enabled") is not False
+            or config.get("cli_auth_credentials_store") != "file"
             or config.get("web_search") != "disabled" or config.get("mcp_servers") != {}):
         raise Blocked("Manager effective tool restrictions unverified")
 
@@ -38,6 +43,40 @@ class ManagerApproval:
     home: Path
     layers: tuple[dict, ...]
     request_hash: str
+    context_limit_tokens: int = 0
+    output_reserve_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class ManagerPolicyApproval:
+    """Owner approval for configuration RPCs only, in a fresh synthetic lab."""
+    inspection: NativeInspectionApproval
+
+
+def inspect_manager_policy(server, replica):
+    policy = server.inspect_policy(cwd=replica, verify_config=_verify_manager_config)
+    if policy != {"sandbox": "read-only", "approval": "never", "managed_requirements_present": False}:
+        raise Blocked("Manager App Server policy is not the approved profile")
+    return policy
+
+
+def _input_receipt(approval, request, messages, discovered):
+    wire = json.dumps({"id": 11, "method": "turn/start", "params": {
+        "threadId": "x" * 128, "cwd": str(approval.replica), "model": request.model,
+        "effort": request.reasoning, "approvalPolicy": "never",
+        "input": messages, "outputSchema": OUTPUT_SCHEMAS[ROLE],
+    }}, ensure_ascii=True, allow_nan=False)
+    # ASCII JSON bounds the frame and provides a deliberately conservative local
+    # sizing allowance. It does not measure provider prompt or reasoning tokens.
+    frame_bytes = len(wire.encode("ascii")) + 1
+    input_allowance = frame_bytes + sum(len(data) for data in discovered)
+    limit, reserve = approval.context_limit_tokens, approval.output_reserve_tokens
+    if (frame_bytes > MAX_FRAME or type(limit) is not int or type(reserve) is not int
+            or reserve < 1024 or input_allowance + reserve > min(limit, request.budget.tokens)):
+        raise Blocked("Manager input or JSON output reserve exceeds the approved allowance")
+    return {"frame_bytes": frame_bytes, "input_sizing_allowance": input_allowance,
+            "context_limit_tokens": limit, "output_reserve_tokens": reserve,
+            "provider_token_enforcement": "NOT_VERIFIED"}
 
 
 def require_live_manager_admission():
@@ -45,7 +84,7 @@ def require_live_manager_admission():
     raise Blocked(live_preflight()["reason"])
 
 
-def prepare_manager(ledger, approval, request, *, project_context=None):
+def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False):
     from .mxc_launcher import _known_folder
 
     replica, home = approval.replica, approval.home
@@ -110,18 +149,17 @@ def prepare_manager(ledger, approval, request, *, project_context=None):
                               "acceptance_checks empty."),
         })},
     ]
+    sizing = _input_receipt(approval, request, messages, (global_data, project_data))
     windows, local = (_known_folder(number) for number in (0x24, 0x1C))
     env = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,
            "LOCALAPPDATA": str(local), "ProgramData": str(_known_folder(0x23)),
            "PATH": str(windows / "System32"), "CODEX_HOME": str(home),
            "TEMP": str(home), "TMP": str(home)}
-    return messages, env
+    return (messages, env, sizing) if include_input_receipt else (messages, env)
 
 
 def _collect_plan(server, request, replica, messages, before_send):
-    policy = server.inspect_policy(cwd=replica, verify_config=_verify_manager_config)
-    if policy != {"sandbox": "read-only", "approval": "never", "managed_requirements_present": False}:
-        raise Blocked("Manager App Server policy is not the approved profile")
+    inspect_manager_policy(server, replica)
     thread_notice = []
 
     def record_thread_notice(event):
@@ -139,7 +177,7 @@ def _collect_plan(server, request, replica, messages, before_send):
         raise Blocked("Manager thread policy is not the approved read-only configuration")
     thread = started["thread"]
     thread_id = thread["id"]
-    if (not isinstance(thread_id, str) or not thread_id
+    if (not isinstance(thread_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread_id)
             or len(thread_notice) > 1
             or any(event.get("method") != "thread/started"
                    or event["params"]["thread"]["id"] != thread_id for event in thread_notice)):
