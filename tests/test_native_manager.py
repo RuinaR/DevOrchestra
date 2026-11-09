@@ -34,6 +34,11 @@ for line in sys.stdin:
     method = msg['method']
     if mode == 'config-only':
         assert method in ('initialize', 'initialized', 'config/read', 'configRequirements/read')
+    if method == 'initialize':
+        if mode == 'config-only':
+            assert 'capabilities' not in msg['params']
+        else:
+            assert msg['params']['capabilities'] == {'experimentalApi': True}
     if method == 'initialized':
         continue
     if method == 'account/read':
@@ -50,6 +55,7 @@ for line in sys.stdin:
         p = msg['params']
         assert p['approvalPolicy'] == 'never' and p['effort'] == 'low'
         assert 'sandboxPolicy' not in p
+        assert p['environments'] == []
         assert mode not in ('unsafe-thread', 'network-thread', 'wrong-instructions')
         assert p['input'][0]['text'] == 'Common fixture'
         assert p['input'][1]['text'] == 'Manager fixture'
@@ -152,7 +158,9 @@ class NativeManagerTests(unittest.TestCase):
             return self.runner.plan_native_manager(self.approval, self.request)
 
     def test_live_path_is_blocked_before_any_intent(self):
-        with self.assertRaisesRegex(Blocked, "GENERAL_ADMISSION_UNVERIFIED"):
+        with self.assertRaisesRegex(
+            Blocked, "GENERAL_ADMISSION_UNVERIFIED: MANAGER_PRE_EXECUTION_BOUNDARY_UNVERIFIED",
+        ):
             self.runner.plan_native_manager(self.approval, self.request)
         self.assertEqual([], self.ledger.read())
 

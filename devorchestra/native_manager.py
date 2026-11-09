@@ -58,19 +58,29 @@ class ManagerPolicyApproval:
     inspection: NativeInspectionApproval
 
 
-def inspect_manager_policy(server, replica):
-    policy = server.inspect_policy(cwd=replica, verify_config=_verify_manager_config)
+def inspect_manager_policy(server, replica, *, experimental_api=False):
+    policy = server.inspect_policy(cwd=replica, verify_config=_verify_manager_config,
+                                   experimental_api=experimental_api)
     if policy != {"sandbox": "read-only", "approval": "never", "managed_requirements_present": False}:
         raise Blocked("Manager App Server policy is not the approved profile")
     return policy
 
 
-def _input_receipt(approval, request, messages, discovered):
-    wire = json.dumps({"id": 11, "method": "turn/start", "params": {
-        "threadId": "x" * 128, "cwd": str(approval.replica), "model": request.model,
+def _turn_params(request, replica, thread_id, messages):
+    return {
+        "threadId": thread_id, "cwd": str(replica), "model": request.model,
         "effort": request.reasoning, "approvalPolicy": "never",
+        # An omitted list inherits the thread executor. An empty list disables it
+        # before file-backed handlers run, while keeping thread instruction discovery.
+        "environments": [],
         "input": messages, "outputSchema": OUTPUT_SCHEMAS[ROLE],
-    }}, ensure_ascii=True, allow_nan=False)
+    }
+
+
+def _input_receipt(approval, request, messages, discovered):
+    wire = json.dumps({"id": 11, "method": "turn/start", "params":
+                       _turn_params(request, approval.replica, "x" * 128, messages)},
+                      ensure_ascii=True, allow_nan=False)
     # ASCII JSON bounds the frame and provides a deliberately conservative local
     # sizing allowance. It does not measure provider prompt or reasoning tokens.
     frame_bytes = len(wire.encode("ascii")) + 1
@@ -85,8 +95,9 @@ def _input_receipt(approval, request, messages, discovered):
 
 
 def require_live_manager_admission():
-    # A caller-supplied approval is never a substitute for verified OS evidence.
-    raise Blocked(live_preflight()["reason"])
+    # The empty turn environment covers executor-backed calls. It does not
+    # attest to startup isolation or the model-specific non-executor registry.
+    raise Blocked(f'{live_preflight()["reason"]}: MANAGER_PRE_EXECUTION_BOUNDARY_UNVERIFIED')
 
 
 def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False):
@@ -164,7 +175,7 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
 
 
 def _collect_plan(server, request, replica, messages, expected_sources, before_thread, before_send):
-    inspect_manager_policy(server, replica)
+    inspect_manager_policy(server, replica, experimental_api=True)
     identity = server.request(9, "account/read", {"refreshToken": False})
     account = identity.get("account")
     if type(account) is not dict or account.get("type") != "chatgpt":
@@ -209,14 +220,11 @@ def _collect_plan(server, request, replica, messages, expected_sources, before_t
         early.append(event)
 
     before_send()
-    turn = server.request(11, "turn/start", {
-        "threadId": thread_id, "cwd": str(replica), "model": request.model,
-        "effort": request.reasoning, "approvalPolicy": "never",
-        # Inherit the verified thread sandbox. This planning path is distinct from the file probe.
-        "input": messages, "outputSchema": OUTPUT_SCHEMAS[ROLE],
-    }, queue_event, allowed_notifications=("turn/started", "turn/completed", "item/started",
-                                            "item/completed", "item/agentMessage/delta",
-                                            "thread/tokenUsage/updated"))["turn"]
+    turn = server.request(
+        11, "turn/start", _turn_params(request, replica, thread_id, messages), queue_event,
+        allowed_notifications=("turn/started", "turn/completed", "item/started", "item/completed",
+                               "item/agentMessage/delta", "thread/tokenUsage/updated"),
+    )["turn"]
     turn_id = turn["id"]
     if not isinstance(turn_id, str) or not turn_id or turn["status"] != "inProgress":
         raise Blocked("Manager turn acknowledgement invalid")

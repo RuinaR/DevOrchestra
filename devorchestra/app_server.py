@@ -433,18 +433,21 @@ class AppServer:
                 self._fail("UNSUPPORTED_TRAILING_NOTIFICATION", method=message["method"], valid=True)
         self._fail("NOTIFICATION_LIMIT")
 
-    def initialize(self):
-        result = self.request(0, "initialize", {"clientInfo": {
+    def initialize(self, *, experimental_api=False):
+        params = {"clientInfo": {
             "name": "devorchestra", "title": "DevOrchestra", "version": "0.1.0",
-        }})
+        }}
+        if experimental_api:
+            params["capabilities"] = {"experimentalApi": True}
+        result = self.request(0, "initialize", params)
         if result.get("platformOs") != "windows":
             raise Blocked("Unexpected App Server platform")
         self.send({"method": "initialized"})
         return result
 
-    def inspect_policy(self, *, cwd=None, verify_config=None):
+    def inspect_policy(self, *, cwd=None, verify_config=None, experimental_api=False):
         """Read effective config and requirements without starting a thread."""
-        self.initialize()
+        self.initialize(experimental_api=experimental_api)
         params = {"includeLayers": False}
         if cwd is not None:
             params["cwd"] = str(cwd)
