@@ -152,10 +152,11 @@ class CommandCenter:
         label(header, "DevOrchestra  /  개발 운영실", 18, bg=BG, bold=True).pack(side="left")
         self.global_badge = label(header, fg=CYAN, bg=BG, bold=True)
         self.global_badge.pack(side="right")
-        self.observation = label(root, bg=BG, fg=MUTED)
+        body = self.scroll_workspace(root)
+        self.observation = label(body, bg=BG, fg=MUTED)
         self.observation.grid(row=4, column=0, sticky="ew", padx=16, pady=6)
 
-        command = tk.Frame(root, bg=BG)
+        command = tk.Frame(body, bg=BG)
         command.grid(row=1, column=0, sticky="ew", padx=16)
         command.columnconfigure(1, weight=2)
         command.columnconfigure(2, weight=1)
@@ -196,14 +197,14 @@ class CommandCenter:
                                           command=self.answer_question)
         self.question_button.pack(fill="x", pady=(4, 0))
 
-        briefing = section(root, "다음 행동과 안전 경계")
+        briefing = section(body, "다음 행동과 안전 경계")
         briefing.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 10))
         self.next_brief = label(briefing, size=12, bold=True, fg=CYAN, wraplength=690)
         self.next_brief.pack(fill="x")
         label(briefing, SAFETY_NOTE, fg=MUTED, wraplength=690).pack(fill="x", pady=(5, 0))
 
-        safety = section(command, "03  /  SAFETY & BUDGET")
-        safety.grid(row=0, column=2, sticky="nsew")
+        safety = section(body, "안전과 예산")
+        safety.grid(row=6, column=0, sticky="ew", padx=16, pady=8)
         self.safety = label(safety, fg=MUTED)
         self.safety.pack(fill="x", pady=(5, 0))
         self.resources = label(safety)
@@ -220,8 +221,8 @@ class CommandCenter:
             button.pack(side="left")
             self.shutdown_buttons[action] = button
 
-        operations = tk.Frame(root, bg=BG)
-        operations.grid(row=2, column=0, sticky="ew", padx=16, pady=8)
+        operations = tk.Frame(body, bg=BG)
+        operations.grid(row=7, column=0, sticky="ew", padx=16, pady=8)
         timeline = section(operations, "04  /  QUEST TIMELINE")
         timeline.pack(fill="x")
         lane = tk.Frame(timeline, bg=PANEL)
@@ -250,7 +251,7 @@ class CommandCenter:
             detail.pack(fill="x")
             self.cards[role] = (status, detail)
 
-        audit = self.build_audit(root)
+        audit = self.build_audit(body)
         details_visible = False
 
         def toggle_details():
@@ -265,7 +266,6 @@ class CommandCenter:
             else:
                 self.gates.pack_forget()
                 advanced.pack_forget()
-            root.grid_rowconfigure(3, weight=int(details_visible))
             if self.view:
                 self.render()
 
@@ -276,6 +276,42 @@ class CommandCenter:
         root.protocol("WM_DELETE_WINDOW", self.close_requested)
         self.refresh()
         root.after(POLL_MS, self.poll)
+
+    def scroll_workspace(self, root):
+        root.grid_rowconfigure(3, weight=0)
+        root.grid_rowconfigure(1, weight=1)
+        viewport = ttk.Frame(root)
+        viewport.grid(row=1, column=0, sticky="nsew")
+        canvas = tk.Canvas(viewport, bg=BG, highlightthickness=0, takefocus=True, yscrollincrement=20)
+        scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        content = tk.Frame(canvas, bg=BG)
+        content.grid_columnconfigure(0, weight=1)
+        embedded = canvas.create_window(0, 0, window=content, anchor="nw")
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(embedded, width=event.width))
+        content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def wheel(event):
+            widget = event.widget
+            # Keep the table, text editors and pop-up controls independently scrollable.
+            if widget is not canvas and not str(widget).startswith(str(content) + ".") and widget is not content:
+                return
+            if isinstance(widget, (tk.Text, tk.Listbox, ttk.Treeview, ttk.Combobox)):
+                return
+            if event.delta:
+                canvas.yview_scroll((-1 if event.delta > 0 else 1) * max(1, abs(event.delta) // 120), "units")
+                return "break"
+
+        root.bind("<MouseWheel>", wheel, add="+")
+        canvas.bind("<Button-1>", lambda _event: canvas.focus_set())
+        for key, step in (("Up", -1), ("Down", 1), ("Prior", -1), ("Next", 1)):
+            unit = "pages" if key in ("Prior", "Next") else "units"
+            canvas.bind(f"<{key}>", lambda _event, step=step, unit=unit: canvas.yview_scroll(step, unit))
+        canvas.bind("<Home>", lambda _event: canvas.yview_moveto(0))
+        canvas.bind("<End>", lambda _event: canvas.yview_moveto(1))
+        return content
 
     def theme(self):
         available = {family.casefold(): family for family in font.families(self.root)}
@@ -313,6 +349,9 @@ class CommandCenter:
         style.configure("Treeview", rowheight=24)
         style.map("Treeview", background=[("selected", "#315879")],
                   foreground=[("selected", INK)])
+        style.configure("Treeview.Heading", background="#1a2231", foreground=INK)
+        style.map("Treeview.Heading", background=[("pressed", "#0d121b"), ("active", "#263245")],
+                  foreground=[("pressed", INK), ("active", INK)])
 
     def confirm(self, title, text, *, parent):
         dialog = tk.Toplevel(parent, bg=BG, padx=18, pady=14)
@@ -355,7 +394,7 @@ class CommandCenter:
 
     def build_audit(self, root):
         audit = section(root, "06  /  EVENT STREAM & EVIDENCE")
-        audit.grid(row=3, column=0, sticky="nsew", padx=16)
+        audit.grid(row=8, column=0, sticky="ew", padx=16, pady=(0, 10))
         controls = tk.Frame(audit, bg=PANEL)
         controls.pack(fill="x", pady=4)
         label(controls, "Run").pack(side="left", padx=(0, 4))

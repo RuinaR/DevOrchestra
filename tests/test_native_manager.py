@@ -15,7 +15,10 @@ from devorchestra.app_server import NativeInspectionApproval, _owned_stdio
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
 from devorchestra.manager_api import ENDPOINT, build_manager_api_draft, parse_manager_api_result
-from devorchestra.native_manager import DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval, ManagerPolicyApproval
+from devorchestra.native_manager import (
+    DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval, ManagerPolicyApproval,
+    _start_read_only_thread, inspect_manager_policy,
+)
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
 
@@ -34,6 +37,8 @@ for line in sys.stdin:
     method = msg['method']
     if mode == 'config-only':
         assert method in ('initialize', 'initialized', 'config/read', 'configRequirements/read')
+    if mode == 'thread-only':
+        assert method in ('initialize', 'initialized', 'config/read', 'configRequirements/read', 'thread/start')
     if method == 'initialize':
         if mode == 'config-only':
             assert 'capabilities' not in msg['params']
@@ -163,6 +168,21 @@ class NativeManagerTests(unittest.TestCase):
                 patch("devorchestra.runtime.Catalog.read", return_value=catalog), \
                 patch("devorchestra.native_manager.open_app_server", side_effect=open_fixture):
             return self.runner.plan_native_manager(self.approval, self.request)
+
+    def test_read_only_thread_boundary_can_stop_before_any_account_or_turn_rpc(self):
+        config = self.effective_config()
+        home = self.approval.home
+        argv = ["-I", "-S", "-B", "-c", PEER, "thread-only", json.dumps(config)]
+        with _owned_stdio(Path(sys.executable), argv, self.replica,
+                          {"SystemRoot": os.environ["SystemRoot"], "CODEX_HOME": str(home)},
+                          10, lambda: False) as server:
+            inspect_manager_policy(server, self.replica, experimental_api=True)
+            sources = (home / "AGENTS.md", self.replica / "AGENTS.md")
+            self.assertEqual("thr-fixture", _start_read_only_thread(
+                server, self.request, self.replica, sources, lambda: None,
+            ))
+        self.assertEqual("DRAINED_NORMALLY", server.cleanup_receipt["job"])
+        self.assertEqual("CLOSED", server.cleanup_receipt["pipes"])
 
     def test_live_path_is_blocked_before_any_intent(self):
         with self.assertRaisesRegex(

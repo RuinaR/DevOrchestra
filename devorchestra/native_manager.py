@@ -179,12 +179,8 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
     return (messages, env, sizing) if include_input_receipt else (messages, env)
 
 
-def _collect_plan(server, request, replica, messages, expected_sources, before_thread, before_send):
-    inspect_manager_policy(server, replica, experimental_api=True)
-    identity = server.request(9, "account/read", {"refreshToken": False})
-    account = identity.get("account")
-    if type(account) is not dict or account.get("type") != "chatgpt":
-        raise Blocked("Manager requires an existing ChatGPT subscription sign-in")
+def _start_read_only_thread(server, request, replica, expected_sources, before_thread):
+    """Validate the thread boundary independently of any turn dispatch."""
     thread_notice = []
 
     def record_thread_notice(event):
@@ -209,14 +205,26 @@ def _collect_plan(server, request, replica, messages, expected_sources, before_t
             or any(type(path) is not str for path in sources)
             or {Path(path) for path in sources} != set(expected_sources)):
         raise Blocked("Manager loaded instruction sources are unverified")
-    thread = started["thread"]
-    thread_id = thread["id"]
+    thread = started.get("thread")
+    if not isinstance(thread, dict):
+        raise Blocked("Manager thread identity unverified")
+    thread_id = thread.get("id")
     if (thread.get("ephemeral") is not True or not isinstance(thread_id, str)
             or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread_id)
             or len(thread_notice) > 1
             or any(event.get("method") != "thread/started"
                    or event["params"]["thread"]["id"] != thread_id for event in thread_notice)):
         raise Blocked("Manager thread identity unverified")
+    return thread_id
+
+
+def _collect_plan(server, request, replica, messages, expected_sources, before_thread, before_send):
+    inspect_manager_policy(server, replica, experimental_api=True)
+    identity = server.request(9, "account/read", {"refreshToken": False})
+    account = identity.get("account")
+    if type(account) is not dict or account.get("type") != "chatgpt":
+        raise Blocked("Manager requires an existing ChatGPT subscription sign-in")
+    thread_id = _start_read_only_thread(server, request, replica, expected_sources, before_thread)
     early = []
 
     def queue_event(event):
