@@ -314,6 +314,31 @@ class Runner:
             ],
         }
 
+    def prepare_tool_free_manager(self, approval, request, *, development_id=None):
+        """Select the Responses Manager backend for preparation only. No transport or credential access."""
+        from pathlib import Path
+        from .native_manager import ManagerApproval, prepare_manager
+
+        if (type(approval) is not ManagerApproval or type(request) is not RoleRequest
+                or not re.fullmatch(r"[0-9a-f]{32}", approval.request_id)
+                or not time() < approval.expires_epoch):
+            raise Blocked("Current Manager owner approval required")
+        with execution_slot() as abandoned:
+            if abandoned:
+                raise Blocked("Manager draft requires a verified execution slot")
+            events, _ = self.ledger.snapshot()
+            require_admission(events)
+            catalog = Catalog(self.ledger).read()
+            setup = catalog["setups"].get(request.project_id)
+            if not setup or Path(setup["replica"]) != approval.replica:
+                raise Blocked("Manager replica does not match Controller registration")
+            context = None
+            if request.project_id in catalog.get("projects", {}):
+                context = self.manager_context(request.project_id, development_id)
+                if [item["ref"] for item in context["requirements"]] != latest_requirements(catalog, request.project_id):
+                    raise Blocked("Manager requires a current requirements baseline")
+            return prepare_manager(self.ledger, approval, request, project_context=context, responses_draft=True)
+
     def plan_native_manager(self, approval, request):
         """Internal one-shot planning entry; never grants another role."""
         from pathlib import Path

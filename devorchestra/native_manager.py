@@ -84,7 +84,8 @@ def require_live_manager_admission():
     raise Blocked(live_preflight()["reason"])
 
 
-def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False):
+def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False,
+                    responses_draft=False):
     from .mxc_launcher import _known_folder
 
     replica, home = approval.replica, approval.home
@@ -149,6 +150,13 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
                               "acceptance_checks empty."),
         })},
     ]
+    if responses_draft:
+        from .manager_api import build_manager_api_draft
+
+        return build_manager_api_draft(
+            request, [blob.decode("utf-8-sig") for blob in contents], messages[-1]["text"],
+            context_limit=approval.context_limit_tokens, output_limit=approval.output_reserve_tokens,
+        )
     sizing = _input_receipt(approval, request, messages, (global_data, project_data))
     windows, local = (_known_folder(number) for number in (0x24, 0x1C))
     env = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,

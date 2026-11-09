@@ -14,6 +14,7 @@ from devorchestra.adapter import Budget, RoleRequest, Scope
 from devorchestra.app_server import NativeInspectionApproval, _owned_stdio
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
+from devorchestra.manager_api import ENDPOINT, parse_manager_api_result
 from devorchestra.native_manager import DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval, ManagerPolicyApproval
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
@@ -150,6 +151,43 @@ class NativeManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "GENERAL_ADMISSION_UNVERIFIED"):
             self.runner.plan_native_manager(self.approval, self.request)
         self.assertEqual([], self.ledger.read())
+
+    def test_responses_draft_is_tool_free_and_rejects_unexpected_response_items(self):
+        request = replace(self.request, budget=replace(self.request.budget, cost_microunits=1))
+        approval = replace(self.approval, request_hash=bind_instructions(request, self.layers))
+        catalog = {"setups": {"fixture-a": {"replica": str(self.replica)}}}
+        with patch("devorchestra.runtime.Catalog.read", return_value=catalog):
+            draft = self.runner.prepare_tool_free_manager(approval, request)
+            with self.assertRaisesRegex(Blocked, "cost allowances"):
+                self.runner.prepare_tool_free_manager(self.approval, self.request)
+        body = json.loads(draft.body)
+        self.assertEqual(ENDPOINT, draft.endpoint)
+        self.assertEqual(sha256(draft.body).hexdigest(), draft.sha256)
+        self.assertEqual(([], "none", False, 1024),
+                         (body["tools"], body["tool_choice"], body["store"], body["max_output_tokens"]))
+        self.assertEqual(["Global fixture", "Common fixture", "Project fixture", "Manager fixture"],
+                         [item["content"] for item in body["input"][:-1]])
+        self.assertNotIn("Global fixture", repr(draft))
+        self.assertEqual([], self.ledger.read())
+        plan = {"disposition": "CLARIFICATION", "priority_reason": "Fixture",
+                "task_spec": "Which result?", "proposed_paths": [], "acceptance_checks": [],
+                "stop_conditions": []}
+        response = {"object": "response", "status": "completed", "model": request.model,
+                    "tools": [], "tool_choice": "none",
+                    "usage": {"input_tokens": 100, "output_tokens": 30, "total_tokens": 130},
+                    "output": [{"type": "message", "role": "assistant", "status": "completed",
+                                "content": [{"type": "output_text", "text": json.dumps(plan)}]}]}
+
+        def parse(value):
+            return parse_manager_api_result(json.dumps(value).encode(), model=request.model,
+                                            output_limit=1024, token_limit=request.budget.tokens)
+
+        self.assertEqual((plan, {"input_tokens": 100, "output_tokens": 30, "total_tokens": 130,
+                                "cost_microunits": "UNKNOWN"}), parse(response))
+        for invalid in ({"tool_choice": "auto"}, {"usage": None}, {"status": "incomplete"},
+                        {"output": [*response["output"], {"type": "function_call"}]}):
+            with self.subTest(invalid=invalid), self.assertRaises(Blocked):
+                parse({**response, **invalid})
 
     def test_config_only_inspection_drains_without_opening_thread_or_turn(self):
         identity = "c" * 32
