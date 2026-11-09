@@ -1262,6 +1262,9 @@ class CommandCenter:
                  "READY": "실행 전 검사 준비"}[decision["state"]]
         label(panel, state, size=13, bold=True, bg=BG).pack(fill="x")
         label(panel, decision["message"], bg=BG, wraplength=520).pack(fill="x", pady=8)
+        label(panel, "자동 개발 백엔드 · 별도 승인한 공식 Codex App Server 후보\n"
+              "사용자 지침은 승인된 파일과 해시를 실행 전에 확인합니다.",
+              bg=BG, fg=MUTED, wraplength=520).pack(fill="x", pady=(0, 8))
         if summary := decision["summary"]:
             budget = summary["budget_ceiling"]
             model = ("등록된 실제 모델 없음" if summary["model"] == "mock-v1" else summary["model"])

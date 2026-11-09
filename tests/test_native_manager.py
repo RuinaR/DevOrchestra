@@ -18,7 +18,7 @@ from devorchestra.ledger import Ledger, digest
 from devorchestra.manager_api import ENDPOINT, build_manager_api_draft, parse_manager_api_result
 from devorchestra.native_manager import (
     DISABLED_FEATURES, MANAGER_CONFIG, ManagerApproval, ManagerPolicyApproval,
-    inspect_manager_thread_only, manager_admission,
+    inspect_manager_thread_only, manager_admission, manager_request_hash,
 )
 from devorchestra.role_contract import bind_instructions
 from devorchestra.runtime import Runner
@@ -150,8 +150,9 @@ class NativeManagerTests(unittest.TestCase):
 
     def run_fixture(self, mode="normal", *, cancel=False, registered=False):
         @contextmanager
-        def open_fixture(_binary, cwd, _env, timeout, cancelled, *, explicit_mxc):
+        def open_fixture(_binary, cwd, _env, timeout, cancelled, *, explicit_mxc, **binary_options):
             self.assertTrue(explicit_mxc)
+            self.assertEqual(self.approval.binary_options(), binary_options)
             self.assertEqual("native_manager_intent", self.ledger.read()[-1]["kind"])
             if cancel:
                 self.runner.shutdown("request")
@@ -210,6 +211,17 @@ class NativeManagerTests(unittest.TestCase):
             verify.assert_called_once_with(self.approval.binary)
             verify.side_effect = Blocked("fixture invalid CLI")
             self.assertEqual("BINARY_IDENTITY_INVALID", manager_admission(self.approval)["reason"])
+
+    def test_explicit_candidate_uses_its_own_pin_and_never_falls_back(self):
+        pin = "d" * 64
+        self.approval = replace(self.approval, candidate_cli_sha256=pin,
+                                request_hash=manager_request_hash(self.request, self.layers, pin))
+        with patch("devorchestra.native_manager._verified_manager_boundaries", return_value=set()) as evidence:
+            self.assertEqual("BLOCKED", manager_admission(self.approval)["state"])
+            evidence.assert_called_once_with("APP_SERVER_EXPLICIT_CANDIDATE", pin)
+        result, _ = self.run_fixture()
+        self.assertEqual("APP_SERVER_EXPLICIT_CANDIDATE", result["manager_backend"])
+        self.assertEqual(pin, result["cli_sha256"])
 
     def test_responses_draft_is_tool_free_and_rejects_unexpected_response_items(self):
         request = replace(self.request, budget=replace(self.request.budget, cost_microunits=1))

@@ -7,7 +7,7 @@ import re
 from time import time
 
 from .app_server import INSPECTION_CONFIG, MAX_FRAME, NativeInspectionApproval, open_app_server, verify_app_server_binary
-from .instructions import instruction_bytes, selected_source
+from .instructions import InstructionStore, instruction_bytes, selected_source
 from .lease import Blocked
 from .ledger import canonical, check_path, digest
 from .policy import live_preflight
@@ -58,12 +58,33 @@ class ManagerApproval:
     request_hash: str
     context_limit_tokens: int = 0
     output_reserve_tokens: int = 0
+    candidate_cli_sha256: str | None = None
+
+    @property
+    def backend(self):
+        return "APP_SERVER_EXPLICIT_CANDIDATE" if self.candidate_cli_sha256 is not None else "APP_SERVER_FIXED"
+
+    def binary_options(self):
+        return ({"approved_sha256": self.candidate_cli_sha256}
+                if self.candidate_cli_sha256 is not None else {})
+
+    @property
+    def cli_sha256(self):
+        from .mxc_launcher import CLI_HASH
+        return CLI_HASH if self.candidate_cli_sha256 is None else self.candidate_cli_sha256
 
 
 @dataclass(frozen=True)
 class ManagerPolicyApproval:
     """Owner approval for configuration RPCs only, in a fresh synthetic lab."""
     inspection: NativeInspectionApproval
+
+
+def manager_request_hash(request, layers, candidate_cli_sha256=None):
+    binding = bind_instructions(request, layers)
+    if candidate_cli_sha256 is None:
+        return binding
+    return digest(["APP_SERVER_EXPLICIT_CANDIDATE", candidate_cli_sha256, binding])
 
 
 def inspect_manager_policy(server, replica, *, experimental_api=False):
@@ -104,15 +125,23 @@ def _input_receipt(approval, request, messages, discovered):
             "provider_token_enforcement": "NOT_VERIFIED"}
 
 
-def _verified_manager_boundaries():
-    # The fixed backend currently has no trusted issuer for either boundary.
+def _verified_manager_boundaries(backend, cli_sha256):
+    # Neither backend currently has a trusted issuer for either boundary.
+    # Any future evidence must be specific to this backend and CLI hash.
     # Sandbox settings, synthetic peers, user approval and prior offline tests
     # cannot attest to App Server egress or server-side tool enforcement.
     return frozenset()
 
 
 def manager_admission(approval=None):
-    verified = _verified_manager_boundaries()
+    from .mxc_launcher import CLI_HASH
+
+    backend = approval.backend if type(approval) is ManagerApproval else "APP_SERVER_FIXED"
+    cli_sha256 = approval.cli_sha256 if type(approval) is ManagerApproval else CLI_HASH
+    if type(cli_sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", cli_sha256):
+        return {"state": "BLOCKED", "reason": "BINARY_IDENTITY_INVALID",
+                "message": "후보 Codex CLI에 별도로 승인된 SHA-256이 필요합니다."}
+    verified = _verified_manager_boundaries(backend, cli_sha256)
     for code, message in REQUIRED_BOUNDARIES:
         if code not in verified:
             return {"state": "BLOCKED", "reason": code, "message": message}
@@ -122,7 +151,7 @@ def manager_admission(approval=None):
         return {"state": "NEEDS_OWNER_APPROVAL", "reason": "OWNER_APPROVAL_REQUIRED",
                 "message": "이 요청의 읽기 전용 Manager 턴 1회에 대한 사용자 승인이 필요합니다."}
     try:
-        verify_app_server_binary(approval.binary)
+        verify_app_server_binary(approval.binary, **approval.binary_options())
     except (Blocked, OSError, ValueError, AttributeError):
         return {"state": "BLOCKED", "reason": "BINARY_IDENTITY_INVALID",
                 "message": "승인된 Codex CLI의 서명과 해시를 확인할 수 없습니다."}
@@ -175,11 +204,22 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
             raise Blocked("Manager home configuration changed")
     directory = ledger.local_directory("instructions")
     common = instruction_bytes(directory / "common" / "orchestration-rules.md")
-    role = instruction_bytes(directory / "roles" / "manager-planning.md")
+    role_path = directory / "roles" / "manager-planning.md"
+    store = InstructionStore(ledger)
+    defaults = store.active_defaults()
+    if pin := store.active(request.project_id):
+        if store.verify(pin, replica) != global_data:
+            raise Blocked("Staged Manager global instructions differ from approved project instructions")
+    elif defaults and sha256(global_data).hexdigest() != defaults["global"]["sha256"]:
+        raise Blocked("Staged Manager global instructions differ from approved defaults")
+    drafts = store.active_role_drafts(request.project_id)
+    if ROLE not in drafts and ROLE in defaults:
+        role_path = Path(store.default_pin()["manifest"]).parent / defaults[ROLE]["path"]
+    role = instruction_bytes(role_path)
     contents = (global_data, common, project_data, role)
     if len(approval.layers) != len(contents) or any(not blob.strip() for blob in contents):
         raise Blocked("Manager instruction layers are incomplete")
-    binding = bind_instructions(request, approval.layers)
+    binding = manager_request_hash(request, approval.layers, approval.candidate_cli_sha256)
     if (binding != approval.request_hash
             or any(sha256(blob).hexdigest() != ref["sha256"]
                    for blob, ref in zip(contents, approval.layers))):
@@ -330,7 +370,7 @@ def run_owned_manager(ledger, approval, request, before_thread, before_send, can
     messages, env = prepare_manager(ledger, approval, request, **context)
     timeout = min(request.budget.seconds, request.deadline_utc_epoch - time())
     with open_app_server(approval.binary, approval.replica, env, timeout, cancelled,
-                         explicit_mxc=True) as server:
+                         explicit_mxc=True, **approval.binary_options()) as server:
         expected_sources = (approval.home / "AGENTS.md", selected_source(approval.replica)[0])
         proposal = _collect_plan(server, request, approval.replica, messages, expected_sources,
                                  before_thread, before_send)

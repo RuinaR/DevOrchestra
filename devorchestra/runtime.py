@@ -410,6 +410,7 @@ class Runner:
                 "project_id", "task_id", "run_id", "generation", "agent_run_id", "context_id", "role",
             )}
             fields.update(state="DIAGNOSTIC", source="WINDOWS_NATIVE_CODEX",
+                          manager_backend=approval.backend, cli_sha256=approval.cli_sha256,
                           request_id=approval.request_id, request_hash=approval.request_hash,
                           model=request.model, reasoning=request.reasoning, budget=asdict(request.budget),
                           input_sizing=sizing,

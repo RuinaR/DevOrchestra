@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from queue import Empty, Full, Queue
+import re
 import sqlite3
 from threading import Event, Thread
 from time import monotonic
@@ -594,26 +595,30 @@ def _owned_stdio(executable, argv, cwd, environment, timeout, cancelled):
                     connection.check_trailing_messages()
 
 
-def verify_app_server_binary(binary: Path):
+def verify_app_server_binary(binary: Path, *, approved_sha256=None):
     """Check the pinned CLI without launching it or fetching trust material."""
     from .mxc_launcher import CLI_HASH, _pin, _signed_offline
 
     with inspection_check("CLI_IDENTITY", "BINARY_IDENTITY_INVALID"):
         if binary.name.casefold() != "codex.exe":
             raise Blocked("App Server binary path rejected")
-        _pin(binary, CLI_HASH)
+        if approved_sha256 is not None and (type(approved_sha256) is not str
+                                             or not re.fullmatch(r"[0-9a-f]{64}", approved_sha256)):
+            raise Blocked("App Server binary SHA-256 approval is invalid")
+        _pin(binary, CLI_HASH if approved_sha256 is None else approved_sha256)
         if not _signed_offline(binary):
             raise Blocked("App Server signature unverified")
 
 
 @contextmanager
-def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled, *, explicit_mxc=False):
+def open_app_server(binary: Path, cwd: Path, environment, timeout, cancelled, *, explicit_mxc=False,
+                    approved_sha256=None):
     """Pinned App Server entry for a future approved Controller admission."""
     with inspection_check("SYNTHETIC_LAB", "SYNTHETIC_LAB_INVALID"):
         check_path(cwd)
         if not cwd.is_dir() or not 0 < timeout <= 60:
             raise Blocked("App Server path or working directory rejected")
-    verify_app_server_binary(binary)
+    verify_app_server_binary(binary, approved_sha256=approved_sha256)
     argv = ["-c", "windows.sandbox=mxc", "app-server"] if explicit_mxc else ["app-server"]
     with _owned_stdio(binary, argv, cwd, environment, timeout, cancelled) as connection:
         yield connection
