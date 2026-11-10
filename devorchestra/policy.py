@@ -1,4 +1,4 @@
-"""Exact-match simulated permissions. This module opens no project resources."""
+"""Capability classification and exact-match simulated grants."""
 from dataclasses import dataclass
 from enum import Enum
 
@@ -33,13 +33,15 @@ FORBIDDEN_LIVE_CAPABILITIES = (
     "external-process-access", "global-input", "screen-capture", "external-window-control",
     "outside-workspace-files", "privilege-escalation", "system-settings-change",
 )
+OWNED_GUI_CAPABILITIES = ("owned-app-run", "owned-window-input", "owned-window-capture")
 
 
 def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND, mode=DevelopmentMode.GENERAL):
     """Assess declared requirements without opening files or authorizing execution.
 
     A declaration is not evidence about what generated code actually does.
-    This release has no verified live admission path, even for an empty plan.
+    This checks automatic model admission. The deterministic GUI broker uses
+    its own owner grant and validates window and process identity per operation.
     """
     try:
         selected = ExecutionBackend(backend)
@@ -51,7 +53,7 @@ def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND, mode=De
         selected_mode = None
     required = tuple(required_capabilities)
     forbidden = tuple(name for name in FORBIDDEN_LIVE_CAPABILITIES if name in required)
-    known = (*FORBIDDEN_LIVE_CAPABILITIES, *(item.value for item in Capability))
+    known = (*FORBIDDEN_LIVE_CAPABILITIES, *OWNED_GUI_CAPABILITIES, *(item.value for item in Capability))
     unknown = any(name not in known for name in required)
     if forbidden:
         reason = "FORBIDDEN_CAPABILITY"

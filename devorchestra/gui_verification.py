@@ -17,6 +17,7 @@ from .job_probe import (
 from .lease import Blocked
 from .ledger import check_path, digest
 from .mxc_launcher import _known_folder
+from .policy import OWNED_GUI_CAPABILITIES
 from .system_powershell import _api as signature, _open_locked, _system_path
 
 SCENARIO = "winforms-details-v1"
@@ -64,7 +65,7 @@ def scope(project_id, revision, timeout_seconds, role="Verifier", descriptor=Non
             "exe_sha256": exe_hash, "fixture_sha256": FIXTURE_SHA256,
             "timeout_seconds": timeout_seconds,
             "data": "FIXTURE_ONLY" if descriptor is None else "SYNTHETIC_PROJECT_FORM",
-            "capture": "OWNED_WINDOW_RENDER"}
+            "capture": "OWNED_WINDOW_RENDER", "capabilities": list(OWNED_GUI_CAPABILITIES)}
 
 
 def _small_file(path, limit):
@@ -241,6 +242,7 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
     expected_source = SOURCE_SHA256 if executable_fixture else FIXTURE_SHA256
     if ((approved["tool"], approved["scenario"]) != expected
             or approved["tool"] not in ROLES.get(approved["role"], ())
+            or approved.get("capabilities") != list(OWNED_GUI_CAPABILITIES)
             or approved["fixture_sha256"] != expected_source
             or (form is not None and approved.get("form_sha256") != digest(form))
             or not 1 <= approved["timeout_seconds"] <= 20):

@@ -1383,7 +1383,7 @@ class CommandCenter:
                                 f"호스트 스크립트 SHA-256 {scope['fixture_sha256']}\n"
                                 f"{descriptor}"
                                 f"소유 창 조작 및 비공개 캡처 · 회당 최대 {scope['timeout_seconds']}초 실행"
-                                + ("\n이 범위로 5분 동안 최대 3회 허용" if registered else ""),
+                                + ("\n이 범위로 5분 동안 최대 3회 허용 · 실행 취소 시 승인 종료" if registered else ""),
                                 parent=panel):
                 return
             if registered and session is None:

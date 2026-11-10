@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from devorchestra.__main__ import main
 from devorchestra.adapter import RoleRequest, WindowsNativeCodexAdapter
 from devorchestra.lease import Blocked
-from devorchestra.policy import FORBIDDEN_LIVE_CAPABILITIES, live_preflight
+from devorchestra.policy import FORBIDDEN_LIVE_CAPABILITIES, OWNED_GUI_CAPABILITIES, live_preflight
 
 
 class LivePreflightTests(unittest.TestCase):
@@ -45,7 +45,7 @@ class LivePreflightTests(unittest.TestCase):
 
     def test_unknown_and_clean_declarations_cannot_unlock_execution(self):
         self.assertEqual("UNKNOWN_CAPABILITY", live_preflight(("unrecognized",))["reason"])
-        for required in ((), ("project-read", "build", "test")):
+        for required in ((), ("project-read", "build", "test"), OWNED_GUI_CAPABILITIES):
             decision = live_preflight(required)
             self.assertEqual("BLOCKED", decision["status"])
             self.assertEqual("GENERAL_ADMISSION_UNVERIFIED", decision["reason"])

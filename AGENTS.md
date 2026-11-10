@@ -27,7 +27,7 @@
 ## Scope / external actions
 - Default mode: READ_ONLY + DRY_RUN + NETWORK_OFF + LIVE_OFF + GIT_PUSH_OFF + AUTO_START_OFF. A bounded owner-approved development session may grant multiple exact local operations or repeat one operation within its expiry and limits. Each dispatch revalidates its role, operation and target. Elevation, security changes, data destruction, external account changes, paid services, transactions and publication require separate approval.
 - Project registration is NOT blanket permission to run tests, migrate a DB, login to a service, perform financial transactions, create a scheduled trigger or deploy.
-- Real-money or account-changing operations (AITraderGuard/KIS orders, Steam sale/cancel/reprice, purchases, Discord live send, mail send, production API mutations) are excluded from development authorization. They must be individually reviewed and require explicit owner approval with exact target/account/action, limits and time scope; default LIVE_BLOCKED regardless of model recommendation.
+- Real-money transactions, credential access, external account changes, outbound publication and production deployment are excluded from ordinary development authorization. They require individual review and explicit owner approval for the exact target, action, limits and expiry. A model recommendation grants no authority.
 - Never transfer credentials, raw personal conversations, operational databases or private user assets between registered projects or send them to third-party providers without explicit consent. Network allowlist and credential separation must be enforced by the runner, not by prompts.
 
 ## Role-specific immutable privileges

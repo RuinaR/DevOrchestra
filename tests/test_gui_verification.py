@@ -232,6 +232,17 @@ class GuiVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "exhausted"):
             self.runner.verify_gui_fixture("inventory", None, gui_session_id=session, **options)
         self.assertFalse(native_unresolved(self.ledger.read()))
+        cancelled_session = self.runner.approve_gui_session(scope, None, int(time()) + 300)
+
+        def cancel_after_launch():
+            return any(self.ledger.local_directory("temp").glob("gui-verification-*/windows.json"))
+
+        stopped = self.runner.verify_gui_fixture(
+            "inventory", None, cancel_after_launch, gui_session_id=cancelled_session, **options,
+        )
+        self.assertEqual(("CANCELLED", 0), (stopped["reason"], stopped["job_active"]))
+        with self.assertRaisesRegex(Blocked, "session cancelled"):
+            self.runner.verify_gui_fixture("inventory", None, gui_session_id=cancelled_session, **options)
         self.assertEqual(original, descriptor.read_bytes())
         self.assertEqual([descriptor], list(descriptor.parent.iterdir()))
         self.assertFalse(list(self.ledger.local_directory("temp").iterdir()))

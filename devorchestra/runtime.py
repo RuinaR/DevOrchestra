@@ -465,6 +465,9 @@ class Runner:
                 or session["scope_sha256"] != self._gui_session_scope(scope)):
             raise Blocked("GUI session expired or scope changed")
         subsequent = events[session["generation"]:]
+        if any(event["kind"] == "gui_validation_result" and event.get("gui_session_id") == session_id
+               and event.get("reason") == "CANCELLED" for event in subsequent):
+            raise Blocked("GUI session cancelled; review it again")
         uses = sum(event["kind"] == "gui_validation_intent" and event.get("gui_session_id") == session_id
                    for event in subsequent)
         if uses >= session["max_runs"] or any(event["kind"].startswith("shutdown_") for event in subsequent):
