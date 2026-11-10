@@ -754,7 +754,7 @@ class Runner:
             save_inspection_diagnostic, verify_app_server_binary,
         )
         from .mxc_launcher import CLI_HASH, CLI_VERSION
-        from .native_manager import MANAGER_CONFIG, ManagerPolicyApproval, inspect_manager_policy
+        from .native_manager import MANAGER_CONFIG, MANAGER_POLICY_METHODS, ManagerPolicyApproval, inspect_manager_policy
         from .native_access_probe import (
             NativeAccessApproval, NativeBoundaryApproval, command_request, native_boundary_contract,
             prepare_probe, probe_receipt, verify_native_boundary,
@@ -852,6 +852,8 @@ class Runner:
                     raise InspectionBlocked("ADMISSION", "SHUTDOWN_ADMISSION_CLOSED")
                 options = {"explicit_mxc": True} if access or manager_policy else {}
                 with open_app_server(approval.binary, work, environment, 15, cancelled, **options) as server:
+                    if manager_policy:
+                        server.restrict_outbound(MANAGER_POLICY_METHODS)
                     policy = inspect_manager_policy(server, work) if manager_policy else server.inspect_policy()
                     if access:
                         if policy != {"sandbox": "read-only", "approval": "never",

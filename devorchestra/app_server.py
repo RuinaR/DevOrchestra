@@ -137,6 +137,8 @@ class AppServer:
         self.request_id = None
         self.request_ids = set()
         self.completed_ids = set()
+        self._outbound_methods = None
+        self._outbound_started = False
         self.received = 0
         self.failure_code = None
         self.diagnostics = deque(maxlen=32)
@@ -200,7 +202,9 @@ class AppServer:
             self._fail("TIMEOUT")
 
     def send(self, message):
+        self._check_outbound_method(message.get("method"))
         self._check()
+        self._outbound_started = True
         frame = (json.dumps(message, ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
         if len(frame) > MAX_FRAME:
             self._fail("REQUEST_FRAME_LIMIT", size=len(frame))
@@ -221,6 +225,18 @@ class AppServer:
             self._check()
         if failed.is_set():
             self._fail("WRITE_FAILED")
+
+    def restrict_outbound(self, methods):
+        """Freeze a Controller-to-server method allowlist before the first write."""
+        if (self._outbound_started or self._outbound_methods is not None
+                or type(methods) is not frozenset or not methods or not methods <= SAFE_METHODS):
+            raise Blocked("App Server outbound scope cannot be changed")
+        self._outbound_methods = methods
+
+    def _check_outbound_method(self, method):
+        if self._outbound_methods is not None and (
+                type(method) is not str or method not in self._outbound_methods):
+            raise Blocked("App Server outbound RPC denied before write")
 
     @staticmethod
     def _unique_pairs(pairs):
@@ -396,6 +412,7 @@ class AppServer:
         self._fail("CONFIG_WARNING_REQUIRES_REVIEW", method=method, valid=True)
 
     def request(self, request_id, method, params, on_notification=None, *, allowed_notifications=()):
+        self._check_outbound_method(method)
         if type(request_id) is not int or request_id in self.request_ids or self.request_method is not None:
             self._fail("INVALID_REQUEST_ID")
         self.request_ids.add(request_id)

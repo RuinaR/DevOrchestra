@@ -15,6 +15,9 @@ from .role_contract import OUTPUT_SCHEMAS, bind_instructions, parse_role_output
 
 
 ROLE = "manager-planning"
+MANAGER_POLICY_METHODS = frozenset(("initialize", "initialized", "config/read", "configRequirements/read"))
+MANAGER_THREAD_METHODS = MANAGER_POLICY_METHODS | {"thread/start"}
+MANAGER_TURN_METHODS = MANAGER_THREAD_METHODS | {"account/read", "turn/start"}
 REQUIRED_BOUNDARIES = (
     ("SIDE_EFFECTING_TOOLS_UNVERIFIED", "파일 수정·명령 실행·다른 앱 접근을 호출 전에 막는 경계가 확인되지 않았습니다."),
     ("PROVIDER_EGRESS_UNVERIFIED", "App Server가 승인된 공식 제공자에만 연결되는지 확인되지 않았습니다."),
@@ -364,6 +367,7 @@ def _start_read_only_thread(server, request, replica, expected_sources, before_t
 
 def inspect_manager_thread_only(server, request, replica, expected_sources, before_thread):
     """Protocol stage only. Caller must independently enforce host egress and own the Job."""
+    server.restrict_outbound(MANAGER_THREAD_METHODS)
     inspect_manager_policy(server, replica, experimental_api=True)
     _start_read_only_thread(server, request, replica, expected_sources, before_thread)
     return {"thread_policy": "CONFIRMED", "instruction_sources": "CONFIRMED",
@@ -456,6 +460,7 @@ def run_owned_manager(ledger, approval, request, before_thread, before_send, can
     try:
         with open_app_server(approval.binary, approval.replica, env, timeout, cancelled,
                              explicit_mxc=True, **approval.binary_options()) as server:
+            server.restrict_outbound(MANAGER_TURN_METHODS)
             expected_sources = (approval.home / "AGENTS.md", selected_source(approval.replica)[0])
             proposal, receipt = _collect_plan(server, request, approval.replica, messages, expected_sources,
                                               before_thread, before_send)
@@ -470,4 +475,4 @@ def run_owned_manager(ledger, approval, request, before_thread, before_send, can
     cleanup = dict(server.cleanup_receipt)
     if cleanup != {"job": "DRAINED_NORMALLY", "pipes": "CLOSED"}:
         raise Blocked("Manager cleanup receipt is incomplete")
-    return proposal, {**receipt, "cleanup": cleanup}
+    return proposal, {**receipt, "cleanup": cleanup, "controller_outbound_methods": sorted(MANAGER_TURN_METHODS)}

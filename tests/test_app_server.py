@@ -80,6 +80,25 @@ class AppServerTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "UNEXPECTED_RESPONSE_ID"):
             connection.initialize()
 
+    def test_outbound_scope_denies_rpc_before_write_and_cannot_widen(self):
+        from devorchestra.native_manager import MANAGER_TURN_METHODS
+
+        output = BytesIO()
+        connection = AppServer(BytesIO(b'{"id":0,"result":{"platformOs":"windows"}}\n'),
+                               output, 1, lambda: False)
+        connection.restrict_outbound(MANAGER_TURN_METHODS)
+        with self.assertRaisesRegex(Blocked, "outbound RPC denied before write"):
+            connection.request(10, "command/exec", {})
+        with self.assertRaisesRegex(Blocked, "outbound RPC denied before write"):
+            connection.send({"id": 11, "method": "fs/writeFile", "params": {}})
+        with self.assertRaisesRegex(Blocked, "outbound scope cannot be changed"):
+            connection.restrict_outbound(MANAGER_TURN_METHODS | {"command/exec"})
+        self.assertEqual(b"", output.getvalue())
+        self.assertFalse(connection.request_ids)
+        connection.initialize()
+        self.assertEqual(["initialize", "initialized"],
+                         [json.loads(line)["method"] for line in output.getvalue().splitlines()])
+
     def test_server_approval_request_is_never_answered(self):
         output = BytesIO()
         request = (b'{"id":"server-9","method":"item/commandExecution/requestApproval","params":{},'
