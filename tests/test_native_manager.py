@@ -423,6 +423,46 @@ class NativeManagerTests(unittest.TestCase):
                 self.runner.run_reviewed_native_manager(*fields, digest(review))
         self.assertEqual([], self.ledger.read())
 
+    def test_subscription_manager_binds_review_and_records_only_validated_output(self):
+        from devorchestra import subscription_manager
+
+        self.register_manager_project()
+        proposal = {"disposition": "PROPOSED", "priority_reason": "Fixture", "task_spec": "Adjust fixture",
+                    "proposed_paths": ["fixture.txt"], "acceptance_checks": ["Check fixture"],
+                    "stop_conditions": [], "work_kind": "PRODUCT", "product_outcome": "Fixture",
+                    "validation_reason": "Check fixture", "approach": "Change the fixture"}
+        completed = {"status": "completed", "output": [
+            {"type": "message", "role": "assistant", "status": "completed",
+             "content": [{"type": "output_text", "text": json.dumps(proposal)}]},
+        ]}
+        fields = self.runner, "sample", "fixture-account", self.request.model, int(time()) + 120
+
+        def deliver(_token, body, check, before_send, _deadline):
+            self.assertEqual((False, True, []), (body["store"], body["stream"], body["tools"]))
+            check()
+            before_send()
+            return completed
+
+        with patch.object(subscription_manager, "AccountStore") as accounts, \
+                patch.object(subscription_manager, "list_models", return_value=[{"model": self.request.model}]), \
+                patch.object(subscription_manager, "complete", side_effect=deliver) as send:
+            accounts.return_value.accounts.return_value = [
+                {"account": "fixture-account", "subscription_granted": True},
+            ]
+            accounts.return_value.access.return_value = "fixture-token"
+            approval, _, _ = subscription_manager.review(*fields)
+            with self.assertRaisesRegex(Blocked, "approval changed"):
+                subscription_manager.run(*fields, "wrong")
+            send.assert_not_called()
+            result, normalized = subscription_manager.run(*fields, digest(approval))
+        self.assertEqual(proposal, normalized)
+        self.assertEqual(("COMPLETED", "UNKNOWN", "BLOCKED"),
+                         (result["outcome"], result["usage"], result["next_role_admission"]))
+        self.assertEqual(result, self.ledger.read()[-1])
+        self.assertNotIn("fixture-token", str(self.ledger.read()))
+        self.assertTrue((self.ledger.local_directory("recovery") / result["protected_plan_ref"]).is_file())
+        self.assertEqual(proposal, subscription_manager.read_plan(self.ledger, "sample", result["run_id"]))
+
     def test_unadmitted_backend_cannot_fall_back_to_app_server(self):
         from devorchestra.adapter import ModelBackend
 

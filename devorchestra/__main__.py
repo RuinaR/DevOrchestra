@@ -1,6 +1,7 @@
 """Local owner console for scoped Controller operations."""
 import argparse
 import json
+import os
 import sqlite3
 from time import sleep
 import sys
@@ -23,14 +24,19 @@ def main():
     manager_check = commands.add_parser("manager-preflight", help="Inspect Manager backend admission without starting Codex")
     manager_check.add_argument("--project", required=True)
     manager_turn = commands.add_parser("manager-turn", help="Review or approve one registered Manager turn")
-    for option in ("project", "binary", "cli-sha256", "home"):
-        manager_turn.add_argument("--" + option, required=True)
+    manager_turn.add_argument("--project", required=True)
+    for option in ("binary", "cli-sha256", "home", "account", "model"):
+        manager_turn.add_argument("--" + option)
     manager_turn.add_argument("--expires", type=int, required=True, help="Review expiry as Unix seconds")
     manager_turn.add_argument("--approve", metavar="REVIEW_SHA256")
     for command in (manager_check, manager_turn):
         command.add_argument("--backend", type=ModelBackend, choices=list(ModelBackend),
                              default=ModelBackend.APP_SERVER, metavar="BACKEND",
                              help=", ".join(item.value for item in ModelBackend))
+    commands.add_parser("chatgpt-accounts", help="List local DevOrchestra account labels")
+    commands.add_parser("chatgpt-login", help="Open official browser consent").add_argument("--account")
+    for action in ("chatgpt-models", "chatgpt-logout"):
+        commands.add_parser(action).add_argument("--account", required=True)
     mxc_host = commands.add_parser("manager-mxc-offline", help="Measure MXC files and App Server stdio without login")
     for option in ("launcher", "launcher-sha256", "candidate", "candidate-sha256", "powershell-sha256"):
         mxc_host.add_argument("--" + option, required=True)
@@ -94,6 +100,29 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action.startswith("chatgpt-"):
+            from .chatgpt_subscription import AccountStore, SubscriptionError, list_models
+            from .lease import execution_slot
+
+            store = AccountStore(ledger)
+            if args.action == "chatgpt-accounts":
+                print(canonical(store.accounts()))
+                return
+            with execution_slot() as abandoned:
+                Runner(ledger)._idle_diagnostic(abandoned)
+                if args.action == "chatgpt-login":
+                    result = store.login(os.startfile, args.account)
+                elif args.action == "chatgpt-logout":
+                    result = store.logout(args.account)
+                else:
+                    try:
+                        result = list_models(store.access(args.account))
+                    except SubscriptionError as error:
+                        if error.status == 401:
+                            store.invalidate(args.account)
+                        raise
+                print(canonical(result))
+            return
         if args.action == "manager-mxc-offline":
             from .mxc_host_probe import run_host_probe
 
@@ -109,6 +138,21 @@ def main():
             return 2 if decision["state"] == "BLOCKED" else 0
         if args.action == "manager-turn":
             runner = Runner(ledger)
+            if args.backend is ModelBackend.CHATGPT_TEXT:
+                from . import subscription_manager
+
+                if not args.account or not args.model or any((args.binary, args.cli_sha256, args.home)):
+                    raise Blocked("Subscription Manager requires --account and --model")
+                fields = (runner, args.project, args.account, args.model, args.expires)
+                if args.approve is None:
+                    review, _, _ = subscription_manager.review(*fields)
+                    print(canonical({"review": review, "review_sha256": digest(review)}))
+                    return
+                receipt, _ = subscription_manager.run(*fields, args.approve)
+                print(canonical(receipt))
+                return 0 if receipt["outcome"] == "COMPLETED" else 2
+            if not all((args.binary, args.cli_sha256, args.home)) or args.account or args.model:
+                raise Blocked("App Server Manager requires --binary, --cli-sha256 and --home")
             fields = (args.project, args.binary, args.cli_sha256, args.home, args.expires)
             if args.approve is None:
                 review = runner.review_native_manager(*fields, backend=args.backend)

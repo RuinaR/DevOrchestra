@@ -8,7 +8,7 @@ Controller는 고정 테스트 앱과 등록 프로젝트의 선언형 WinForms 
 
 프로젝트와 요구사항을 등록하면 Controller가 계획 → 구현 → 검토 → 검증 → 최종 판정을 한 작업씩 조율하는 Windows 프로그램입니다. 검증된 결과를 사용자가 직접 테스트하고 개선 문서를 등록하면 다음 개발 주기로 이어집니다. Command Center에서 다음 단계와 합성 결과, 실제 실행 기록을 구분해 확인할 수 있습니다. 현재 실제 자동 개발과 사용자 테스트 인계는 차단되어 있습니다.
 
-기존 ChatGPT/Codex 구독 인증만 사용합니다. Responses API, API 키, 별도 과금 계정 및 자동 폴백은 비활성입니다. [제품 완성 우선 원칙](docs/PROJECT-DEFINITION.md#제품-완성-우선-원칙)
+기존 ChatGPT/Codex 구독 인증만 사용합니다. DevOrchestra 전용 Sign in with ChatGPT 연결은 공식 구독 텍스트 엔드포인트를 사용합니다. API 키, 별도 과금 계정 및 자동 폴백은 비활성입니다. [구독 Manager 실행](docs/ARCHITECTURE-ROADMAP.md#구독-manager-실행)
 
 ### 감독형 Codex로 시작하기
 

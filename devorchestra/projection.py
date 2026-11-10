@@ -112,6 +112,9 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "native_manager_dispatch": "TURN_UNRESOLVED",
         "native_manager_result": "RESULT_RECORDED",
     }.get(manager_event["kind"] if manager_event else None, "NO_RECORDED_ATTEMPT")
+    if manager_event and manager_event["kind"] == "native_manager_result":
+        manager_status = {"COMPLETED": "SUBSCRIPTION_COMPLETED", "FAILED": "SUBSCRIPTION_FAILED",
+                          "UNKNOWN": "SUBSCRIPTION_UNKNOWN"}.get(manager_event.get("outcome"), manager_status)
     if selected_question:
         next_action = "ANSWER_QUESTION"
     elif not registration:

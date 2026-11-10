@@ -9,9 +9,15 @@ Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택�
 | Codex SDK | Node 기반 로컬 코딩·스트림·재개. Windows에서 0.167.0이 설치 CLI를 실행하는 것을 확인했다. 작업 폴더, 읽기/쓰기 및 승인 정책은 하위 CLI에 전달된다. 실제 구독 응답과 취소·사용량 회계는 미검증이다. |
 | App Server | 기존 Controller 소유 Job·stdio·승인·이벤트·정리 어댑터를 보존한다. 온라인 호스트 송신과 서버 내부 도구 사전 차단은 미입증이다. |
 | `codex exec` | 설치 Windows CLI의 JSONL·스키마·재개 옵션을 확인했다. 로컬 코딩은 CLI의 샌드박스·승인 정책을 사용한다. 독립 온라인 입장·회계·종료 어댑터는 준비되지 않았다. |
-| Sign in with ChatGPT 직접 호출 | 별도 앱 OAuth 동의가 필요한 구독 텍스트 후보. 도구 없는 Manager 입력과 스트림을 구성할 수 있다. 로컬 파일·빌드·GUI 도구는 제공하지 않는다. |
+| Sign in with ChatGPT 직접 호출 | 도구 없는 Manager 전용. 별도 앱 OAuth 동의, 공식 모델 조회 및 시험 프로젝트의 실제 계획 완료를 확인했다. 로컬 파일·빌드·GUI 도구는 제공하지 않는다. |
 
 자동 기본 백엔드는 미선정이다. 기존 App Server 검토 명령은 호환성을 위해 남기며 다른 후보로 자동 폴백하지 않는다. VM은 선택적 강화 격리다.
+
+### 구독 Manager 실행
+
+초기화된 로컬 저장소에서 Command Center의 **Continue with ChatGPT** 또는 `python -m devorchestra chatgpt-login`을 사용하고 브라우저에서 DevOrchestra 전용 OAuth 동의를 검토한다. `chatgpt-accounts`는 로컬 계정 식별자와 연결 상태를 표시하고, `chatgpt-models --account <ID>`는 해당 계정의 공식 모델 목록을 표시한다. `chatgpt-logout --account <ID>`는 서버 갱신 토큰 철회를 시도하고 로컬 토큰을 제거한다. 원격 철회가 확인되지 않으면 ChatGPT 설정에서 연결을 해제할 수 있다.
+
+등록 Manager 모델과 예산을 설정한 후 Command Center의 **구독 Manager 계획 승인**에서 요청을 검토한다. CLI는 `manager-turn --backend chatgpt-subscription-text --project <ID> --account <ID> --model <MODEL> --expires <UNIX_SECONDS>`로 검토하고 같은 인수에 `--approve <REVIEW_SHA256>`를 추가해 실행한다. 요구사항 원문과 공개 지침을 전송하고 도구를 제공하지 않는다. 토큰과 구조 검증을 통과한 계획은 Windows 사용자 DPAPI로 로컬 보호하며 원장에는 결과와 참조를 기록한다. 공식 미리보기의 제공자 출력 토큰 상한은 사용할 수 없다. 요청 크기·실행 시간·응답 크기를 로컬에서 제한하고, 보고된 사용량이 예산을 초과하면 계획을 승인 후보로 기록하지 않는다.
 
 ## 개발 노트북 GUI 도구 입장 조건
 

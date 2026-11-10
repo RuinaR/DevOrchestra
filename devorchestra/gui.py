@@ -550,6 +550,9 @@ class CommandCenter:
             "THREAD_UNRESOLVED": "스레드 요청 결과 미확정",
             "TURN_UNRESOLVED": "모델 턴 요청 결과 미확정",
             "RESULT_RECORDED": "Manager 결과 기록됨",
+            "SUBSCRIPTION_COMPLETED": "구독 Manager 완료 · 계획 기록됨",
+            "SUBSCRIPTION_FAILED": "구독 Manager 실패",
+            "SUBSCRIPTION_UNKNOWN": "구독 Manager 결과 미확정 · 자동 재시도 없음",
         }[workflow["manager_status"]]
         cycle_status = workflow["latest_cycle_state"]
         cycle_label = (f"\n최근 작업 · {cycle_status} ({workflow['latest_cycle_evidence']})"
@@ -1484,6 +1487,182 @@ class CommandCenter:
 
         ttk.Button(panel, text="감독형 Codex 작업으로 계속", command=supervised).pack(anchor="e")
         ttk.Button(panel, text="GUI 검증 및 보고서", command=self.gui_verification_report).pack(anchor="e")
+        ttk.Button(panel, text="구독 Manager 계획 승인", command=lambda: self.subscription_manager(project_id)).pack(anchor="e")
+
+    def subscription_manager(self, project_id):
+        from .chatgpt_subscription import AccountStore
+        from . import subscription_manager
+
+        panel = self.panel()
+        panel.title("ChatGPT 구독 · Manager 계획")
+        status = tk.StringVar()
+        ttk.Label(panel, textvariable=status, wraplength=480).pack(fill="x", pady=8)
+
+        def show_plan(run_id):
+            try:
+                plan = subscription_manager.read_plan(self.reader.ledger, project_id, run_id)
+            except (Blocked, OSError, ValueError):
+                status.set("보호된 Manager 계획을 확인할 수 없습니다.")
+                return
+            viewer = self.panel()
+            viewer.title("검증된 Manager 계획 · 로컬")
+            output = self.editor_box(viewer, height=18)
+            output.insert("1.0", json.dumps(plan, ensure_ascii=False, indent=2))
+            output.configure(state="disabled")
+
+        try:
+            latest = next((event for event in reversed(self.reader.ledger.read())
+                           if event["project_id"] == project_id and event["kind"] == "native_manager_result"
+                           and event.get("manager_backend") == subscription_manager.BACKEND
+                           and event.get("outcome") == "COMPLETED"), None)
+        except (Blocked, OSError, sqlite3.Error, ValueError):
+            status.set("로컬 원장을 확인할 수 없습니다.")
+            return
+        if latest:
+            ttk.Button(panel, text="기록된 계획 보기",
+                       command=lambda: show_plan(latest["run_id"])).pack(anchor="w")
+        try:
+            store = AccountStore(self.reader.ledger)
+            registrations = store.accounts()
+            accounts = [item["account"] for item in registrations if item["subscription_granted"]]
+        except (Blocked, OSError, sqlite3.Error, ValueError):
+            status.set("등록 요구사항과 로컬 ChatGPT 계정 상태를 확인하세요.")
+            return
+        if not accounts:
+            self.subscription_sign_in(panel, project_id, status, store, registrations)
+            return
+        try:
+            baseline = self.controller.native_manager_context(project_id)
+        except (Blocked, OSError, sqlite3.Error, ValueError):
+            status.set("이 프로젝트의 등록 요구사항을 확인하세요.")
+            return
+        picker = ttk.Combobox(panel, values=accounts, state="readonly")
+        picker.current(0)
+        picker.pack(fill="x")
+        model = baseline["model"]
+        status.set(f"{project_id} · {model} · 등록 요구사항 {len(baseline['requirements'])}개")
+        cancellation = Event()
+        running = False
+
+        def close():
+            if running:
+                cancellation.set()
+                status.set("취소 요청됨 · 연결 정리 대기")
+            else:
+                panel.destroy()
+
+        def start():
+            nonlocal running
+            account, expires = picker.get(), int(time()) + 300
+            fields = (self.controller, project_id, account, model, expires)
+            try:
+                approval, _, _ = subscription_manager.review(*fields)
+            except (Blocked, OSError, ValueError) as error:
+                status.set(str(error))
+                return
+            checksum = digest(approval)
+            if not self.confirm("ChatGPT 구독 Manager 승인",
+                                f"{project_id} · {model} · 계정 {account}\n"
+                                "등록된 요구사항 원문, 목표, 완료 기준과 공개 지침을 OpenAI에 전송합니다.\n"
+                                "파일 변경·셸·GUI 권한 없음.\n"
+                                f"요청 SHA-256 {approval['request_sha256']}", parent=panel):
+                return
+            running = True
+            button.configure(state="disabled")
+            status.set("구독 Manager 실행 중")
+            future = Future()
+
+            def work():
+                try:
+                    future.set_result(subscription_manager.run(*fields, checksum, cancellation.is_set)[0])
+                except Exception as error:
+                    future.set_exception(error)
+
+            def poll():
+                nonlocal running
+                if not future.done():
+                    panel.after(100, poll)
+                    return
+                running = False
+                button.configure(state="normal")
+                if future.exception() is not None:
+                    status.set(str(future.exception()) if isinstance(future.exception(), Blocked)
+                               else "Manager 실행을 확인할 수 없습니다.")
+                    return
+                receipt = future.result()
+                status.set(f"{receipt['outcome']} · {receipt['run_id']}\n{receipt.get('reason', '')}")
+                if receipt["outcome"] == "COMPLETED":
+                    ttk.Button(panel, text="완료된 계획 보기",
+                               command=lambda: show_plan(receipt["run_id"])).pack(anchor="w")
+
+            cancellation.clear()
+            Thread(target=work, daemon=False).start()
+            panel.after(100, poll)
+
+        button = ttk.Button(panel, text="요청 검토 및 실행", command=start)
+        button.pack(side="left", pady=6)
+        ttk.Button(panel, text="닫기 / 취소", command=close).pack(side="right", pady=6)
+        panel.protocol("WM_DELETE_WINDOW", close)
+        panel.bind("<Escape>", lambda _event: close())
+
+    def subscription_sign_in(self, panel, project_id, status, store, registrations):
+        import os
+        from .lease import execution_slot
+
+        status.set("DevOrchestra 전용 브라우저 동의가 필요합니다.")
+        accounts = ["새 계정", *(item["account"] for item in registrations)]
+        picker = ttk.Combobox(panel, values=accounts, state="readonly")
+        picker.current(1 if registrations else 0)
+        picker.pack(fill="x", pady=4)
+        cancelled = Event()
+        pending = None
+
+        def close():
+            if pending is not None and not pending.done():
+                cancelled.set()
+                status.set("브라우저 연결 취소 중")
+            else:
+                panel.destroy()
+
+        def login():
+            nonlocal pending
+            alias = picker.get() if picker.current() > 0 else None
+            pending = Future()
+            cancelled.clear()
+            button.configure(state="disabled")
+            status.set("OpenAI 브라우저 동의 대기 중")
+
+            def worker():
+                try:
+                    with execution_slot() as abandoned:
+                        self.controller._idle_diagnostic(abandoned)
+                        result = store.login(os.startfile, alias, cancelled.is_set)
+                    pending.set_result(result)
+                except Exception as error:
+                    pending.set_exception(error)
+
+            def poll():
+                if not pending.done():
+                    panel.after(100, poll)
+                    return
+                button.configure(state="normal")
+                if pending.exception() is not None:
+                    status.set(str(pending.exception()) if isinstance(pending.exception(), Blocked)
+                               else "ChatGPT 로그인을 완료할 수 없습니다.")
+                elif pending.result()["subscription_granted"]:
+                    panel.destroy()
+                    self.subscription_manager(project_id)
+                else:
+                    status.set("이 등록에는 ChatGPT 구독 사용 권한이 부여되지 않았습니다.")
+
+            Thread(target=worker, daemon=False).start()
+            panel.after(100, poll)
+
+        button = ttk.Button(panel, text="Continue with ChatGPT", command=login)
+        button.pack(side="left", pady=6)
+        ttk.Button(panel, text="닫기 / 취소", command=close).pack(side="right", pady=6)
+        panel.protocol("WM_DELETE_WINDOW", close)
+        panel.bind("<Escape>", lambda _event: close())
 
     def supervised_work(self):
         if not self.view or not self.view["registration"]:
