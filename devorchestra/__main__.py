@@ -19,8 +19,11 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("init")
     commands.add_parser("local-status", help="Inspect project-local storage without creating it")
-    gui_verify = commands.add_parser("gui-verify", help="Review or run the fixed Windows GUI fixture")
+    gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
+    gui_verify.add_argument("--registered", action="store_true")
+    gui_verify.add_argument("--role", choices=("Manager", "Developer", "Reviewer", "Verifier"), default="Verifier")
+    gui_verify.add_argument("--receipt", action="store_true")
     gui_verify.add_argument("--approve", metavar="SCOPE_SHA256")
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
@@ -71,11 +74,17 @@ def main():
         ledger = Ledger.for_project()
         if args.action == "gui-verify":
             runner = Runner(ledger)
+            options = {"registered": args.registered, "role": args.role}
+            if args.receipt:
+                if args.approve is not None:
+                    raise Blocked("Receipt lookup cannot approve an execution")
+                print(canonical(runner.gui_verification_receipt(args.project, role=args.role)))
+                return
             if args.approve is None:
-                scope = runner.gui_verification_scope(args.project)
+                scope = runner.gui_verification_scope(args.project, **options)
                 print(canonical({"scope": scope, "scope_sha256": digest(scope)}))
                 return
-            receipt = runner.verify_gui_fixture(args.project, args.approve)
+            receipt = runner.verify_gui_fixture(args.project, args.approve, **options)
             print(canonical(receipt))
             return 0 if receipt["result"] == "PASS" else 2
         if args.action == "local-status":

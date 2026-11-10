@@ -5,7 +5,7 @@ from time import sleep
 import unittest
 from unittest.mock import patch
 
-from devorchestra.catalog import Catalog, DEFAULT_BUDGET
+from devorchestra.catalog import Catalog, DEFAULT_BUDGET, new_project
 from devorchestra.gui_verification import verified_image
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
@@ -20,6 +20,34 @@ class GuiVerificationTests(unittest.TestCase):
         self.runner = Runner(self.ledger)
         self.runner.command("init")
 
+    def register_form(self):
+        root = self.ledger.state_boundary.parent
+        original, replica = root / "original", root / "replica"
+        original.mkdir()
+        replica.mkdir()
+        descriptor = replica / "gui-test.json"
+        example = Path(__file__).resolve().parents[1] / "examples" / "native-form" / descriptor.name
+        descriptor.write_bytes(example.read_bytes())
+        Catalog(self.ledger).save_setup({
+            "project": {**new_project("inventory", "Inventory", "Select an item"), "local_path": str(original)},
+            "replica": str(replica), "wait_seconds": 20,
+        })
+        return descriptor
+
+    def test_registered_scope_denies_manager_stale_descriptor_and_unsupported_exe(self):
+        descriptor = self.register_form()
+        with self.assertRaisesRegex(Blocked, "denied for this role"):
+            self.runner.gui_verification_scope("inventory", registered=True, role="Manager")
+        scope = self.runner.gui_verification_scope("inventory", registered=True)
+        original = descriptor.read_bytes()
+        descriptor.write_bytes(original + b" ")
+        with self.assertRaisesRegex(Blocked, "scope changed"):
+            self.runner.verify_gui_fixture("inventory", digest(scope), registered=True)
+        descriptor.write_text('{"format":"existing-exe","exe":"app.exe"}', encoding="utf-8")
+        with self.assertRaisesRegex(Blocked, "NOT_VERIFIED"):
+            self.runner.gui_verification_scope("inventory", registered=True)
+        self.assertEqual([], self.ledger.read())
+
     def test_wrong_approval_and_unresolved_job_block_admission(self):
         with self.assertRaisesRegex(Blocked, "scope changed"):
             self.runner.verify_gui_fixture("fixture-a", "invalid")
@@ -31,6 +59,26 @@ class GuiVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "ownership requires recovery"):
             self.runner.verify_gui_fixture("fixture-a", approval)
         self.assertTrue(native_unresolved(self.ledger.read()))
+
+    @unittest.skipUnless(os.environ.get("DEVORCHESTRA_GUI_E2E") == "1", "Interactive Windows GUI opt-in")
+    def test_registered_project_runs_independent_role_scopes(self):
+        descriptor = self.register_form()
+        original = descriptor.read_bytes()
+        for role in ("Developer", "Reviewer", "Verifier"):
+            with self.subTest(role=role):
+                options = {"registered": True, "role": role}
+                scope = self.runner.gui_verification_scope("inventory", **options)
+                receipt = self.runner.verify_gui_fixture("inventory", digest(scope), **options)
+                self.assertEqual("PASS", receipt["result"], receipt["reason"])
+                self.assertEqual("Selected: QA-024", receipt["observed"]["Selection confirmed"])
+                self.assertEqual((24, 0, role), (receipt["observed"]["list_top_index"],
+                                                  receipt["job_active"], receipt["role"]))
+                self.assertEqual(3, len(receipt["scenes"]))
+                self.assertEqual(receipt, self.runner.gui_verification_receipt("inventory", role="Manager"))
+                self.assertFalse(native_unresolved(self.ledger.read()))
+        self.assertEqual(original, descriptor.read_bytes())
+        self.assertEqual([descriptor], list(descriptor.parent.iterdir()))
+        self.assertFalse(list(self.ledger.local_directory("temp").iterdir()))
 
     @unittest.skipUnless(os.environ.get("DEVORCHESTRA_GUI_E2E") == "1", "Interactive Windows GUI opt-in")
     def test_actual_gui_receipt_and_cancellation(self):

@@ -301,9 +301,14 @@ class Runner:
     def supervised_handoff(self, action, project_id, **arguments):
         return handoff(self, action, project_id, **arguments)
 
-    def gui_verification_scope(self, project_id):
-        from .gui_verification import scope
+    def gui_verification_scope(self, project_id, *, registered=False, role="Verifier"):
+        return self._gui_verification_scope(project_id, registered, role)[0]
 
+    def _gui_verification_scope(self, project_id, registered, role):
+        from .gui_verification import scenario_tool, scope
+        from .gui_project import load
+
+        scenario_tool(registered, role)
         catalog = Catalog(self.ledger).read()
         record = catalog["projects"].get(project_id)
         if not record and project_id not in PROJECTS:
@@ -311,11 +316,24 @@ class Runner:
         seconds = min(20, catalog["global_budget"]["seconds"])
         if record:
             data = record["data"]
-            seconds = min(seconds, data["budget"]["seconds"], data["roles"]["Verifier"]["budget"]["seconds"])
-        return scope(project_id, record["revision"] if record else None, seconds)
+            if role not in data["roles"]:
+                raise Blocked("Unknown GUI role")
+            seconds = min(seconds, data["budget"]["seconds"], data["roles"][role]["budget"]["seconds"])
+        form, descriptor = load(catalog, project_id, self.ledger.state_boundary) if registered else (None, None)
+        return scope(project_id, record["revision"] if record else None, seconds, role, descriptor), form
 
-    def verify_gui_fixture(self, project_id, approved_scope, cancelled=lambda: False):
-        """Run the fixed Verifier scenario under a fresh owner authorization."""
+    def gui_verification_receipt(self, project_id, *, role="Manager"):
+        from .gui_verification import ROLES
+
+        if "read-receipt" not in ROLES.get(role, ()):
+            raise Blocked("GUI evidence access denied for this role")
+        return next((event for event in reversed(self.ledger.read())
+                     if event["project_id"] == project_id and event["kind"] in
+                     ("gui_validation_intent", "gui_validation_result")), None)
+
+    def verify_gui_fixture(self, project_id, approved_scope, cancelled=lambda: False, *,
+                           registered=False, role="Verifier"):
+        """Run the approved deterministic GUI scenario in an owner-driven slot."""
         from contextlib import ExitStack
         from pathlib import Path
         from tempfile import TemporaryDirectory
@@ -331,15 +349,16 @@ class Runner:
             if (abandoned or (run and State(run[-1]["state"]) not in TERMINAL)
                     or (development and not development["end"]) or cancelled()):
                 raise Blocked("GUI verification requires an idle Controller")
-            scope = self.gui_verification_scope(project_id)
+            scope, form = self._gui_verification_scope(project_id, registered, role)
             if digest(scope) != approved_scope:
                 raise Blocked("GUI verification scope changed; review it again")
             executable = resources.enter_context(hold_system_powershell(scope["exe_sha256"]))
             identifier = uuid4().hex
             binding = {"project_id": project_id, "run_id": identifier, "task_id": identifier,
                        "agent_run_id": identifier, "approval_id": uuid4().hex,
-                       "generation": len(events) + 1, "role": "Verifier", "state": "DIAGNOSTIC",
-                       "source": "WINDOWS_OWNED_GUI_FIXTURE", "scope": scope,
+                       "generation": len(events) + 1, "role": scope["role"], "state": "DIAGNOSTIC",
+                       "source": ("WINDOWS_OWNED_PROJECT_FORM" if registered else "WINDOWS_OWNED_GUI_FIXTURE"),
+                       "scope": scope,
                        "scope_sha256": approved_scope}
             count, fence = self.ledger.append(len(events), tail, {
                 **binding, "kind": "gui_validation_intent", "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -352,7 +371,7 @@ class Runner:
 
             temp = self.ledger.local_directory("temp", create=True)
             with TemporaryDirectory(prefix="gui-verification-", dir=temp) as staging:
-                receipt = run_fixture(scope, Path(staging), cancelled, check, executable)
+                receipt = run_fixture(scope, Path(staging), cancelled, check, executable, form)
                 if receipt["scenes"]:
                     artifacts = self.ledger.local_directory("logs", create=True) / f"gui-{identifier}"
                     check_path(artifacts)

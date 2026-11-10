@@ -1,4 +1,4 @@
-"""Controller-owned, fixed WinForms fixture. No project code is loaded."""
+"""Controller-owned WinForms host for the fixed and data-only project scenarios."""
 
 SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
@@ -6,8 +6,18 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 
+$config = @{
+    title = 'DevOrchestra GUI verification fixture'; initial = 'Ready'; opened = 'Details opened'
+    prefix = 'Applied:'; open_button = 'Open details'; apply_button = 'Apply input'; row_label = 'Fixture row'
+    controls = @{status = 'status'; open = 'open'; apply = 'apply'; entry = 'entry'; list = 'list'}
+    scenes = @(@{title = 'Launch'}, @{title = 'Details opened'}, @{title = 'Input applied and list scrolled'})
+}
+$descriptor = [IO.Path]::GetFullPath('approved-form.json')
+if ([IO.File]::Exists($descriptor)) {
+    $config = [IO.File]::ReadAllText($descriptor) | ConvertFrom-Json
+}
 $form = [Windows.Forms.Form]::new()
-$form.Text = 'DevOrchestra GUI verification fixture'
+$form.Text = $config.title
 $form.ClientSize = [Drawing.Size]::new(580, 390)
 $form.StartPosition = 'CenterScreen'
 $form.BackColor = [Drawing.Color]::AliceBlue
@@ -25,22 +35,22 @@ function Add-Button($text, $x) {
     Add-Control $button $text $x 105 144 34
 }
 
-$heading = Add-Control ([Windows.Forms.Label]::new()) 'GUI verification fixture' 20 17 440 32
-$status = Add-Control ([Windows.Forms.TextBox]::new()) 'Ready' 20 58 530 30
+$heading = Add-Control ([Windows.Forms.Label]::new()) $config.title 20 17 530 32
+$status = Add-Control ([Windows.Forms.TextBox]::new()) $config.initial 20 58 530 30
 $status.ReadOnly = $true
-$open = Add-Button 'Open details' 20
-$apply = Add-Button 'Apply input' 174
+$open = Add-Button $config.open_button 20
+$apply = Add-Button $config.apply_button 174
 $capture = Add-Button 'Capture' 328
 $entry = Add-Control ([Windows.Forms.TextBox]::new()) '' 20 153 530 30
 $list = Add-Control ([Windows.Forms.ListBox]::new()) '' 20 195 530 170
 $list.IntegralHeight = $false
-foreach ($index in 0..59) { [void]$list.Items.Add(('Fixture row {0:00}' -f $index)) }
+foreach ($index in 0..59) { [void]$list.Items.Add(('{0} {1:00}' -f $config.row_label, $index)) }
 $entry.Visible = $list.Visible = $apply.Enabled = $false
 $open.Add_Click({
-    $status.Text = 'Details opened'
+    $status.Text = $config.opened
     $entry.Visible = $list.Visible = $apply.Enabled = $true
 })
-$apply.Add_Click({ $status.Text = "Applied: $($entry.Text)" })
+$apply.Add_Click({ $status.Text = "$($config.prefix) $($entry.Text)" })
 
 $script:captures = 0
 $script:failed = $false
@@ -61,7 +71,7 @@ $capture.Add_Click({
                 $draw = [Drawing.Graphics]::FromImage($report)
                 try {
                     $draw.Clear([Drawing.Color]::White)
-                    $draw.DrawString(@('Launch', 'Details opened', 'Input applied and list scrolled')[$number - 1],
+                    $draw.DrawString($config.scenes[$number - 1].title,
                         $form.Font, [Drawing.Brushes]::MidnightBlue, 16, 12)
                     $draw.DrawImage($bitmap, [Drawing.Rectangle]::new(17, 44, 846, 549),
                         $crop, [Drawing.GraphicsUnit]::Pixel)
@@ -79,8 +89,8 @@ $capture.Add_Click({
                         $draw = [Drawing.Graphics]::FromImage($comparison)
                         try {
                             $draw.Clear([Drawing.Color]::White)
-                            $draw.DrawString('Before interaction', $form.Font, [Drawing.Brushes]::MidnightBlue, 20, 16)
-                            $draw.DrawString('After input, scroll and resize', $form.Font, [Drawing.Brushes]::MidnightBlue, 620, 16)
+                            $draw.DrawString($config.scenes[0].title, $form.Font, [Drawing.Brushes]::MidnightBlue, 20, 16)
+                            $draw.DrawString($config.scenes[2].title, $form.Font, [Drawing.Brushes]::MidnightBlue, 620, 16)
                             $draw.DrawImage($first, 20, 52, 560, [int](560 * $first.Height / $first.Width))
                             $draw.DrawImage($bitmap, 620, 52, 560, [int](560 * $bitmap.Height / $bitmap.Width))
                         } finally { $draw.Dispose() }
@@ -98,13 +108,13 @@ $capture.Add_Click({
 })
 
 $form.Add_Shown({
-    $manifest = @{
-        root = $form.Handle.ToInt64(); status = $status.Handle.ToInt64()
-        open = $open.Handle.ToInt64(); apply = $apply.Handle.ToInt64()
-        capture = $capture.Handle.ToInt64()
-        entry = $entry.Handle.ToInt64(); list = $list.Handle.ToInt64()
-    } | ConvertTo-Json -Compress
-    [IO.File]::WriteAllText([IO.Path]::GetFullPath('windows.tmp'), $manifest)
+    $manifest = @{root = $form.Handle.ToInt64(); capture = $capture.Handle.ToInt64()}
+    $manifest[$config.controls.status] = $status.Handle.ToInt64()
+    $manifest[$config.controls.open] = $open.Handle.ToInt64()
+    $manifest[$config.controls.apply] = $apply.Handle.ToInt64()
+    $manifest[$config.controls.entry] = $entry.Handle.ToInt64()
+    $manifest[$config.controls.list] = $list.Handle.ToInt64()
+    [IO.File]::WriteAllText([IO.Path]::GetFullPath('windows.tmp'), ($manifest | ConvertTo-Json -Compress))
     [IO.File]::Move([IO.Path]::GetFullPath('windows.tmp'), [IO.Path]::GetFullPath('windows.json'))
 })
 try {

@@ -1273,10 +1273,15 @@ class CommandCenter:
         panel.title("DevOrchestra · GUI 검증 보고서")
         panel.geometry("860x445")
         panel.minsize(775, 415)
-        status = tk.StringVar(value="고정 Windows 테스트 앱 · Verifier")
+        registered = project_id not in PROJECTS
+        status = tk.StringVar(value="등록 프로젝트 GUI 시나리오" if registered else "고정 Windows 테스트 앱 · Verifier")
         ttk.Label(panel, textvariable=status, wraplength=810).pack(fill="x", pady=(0, 8))
         controls = ttk.Frame(panel)
         controls.pack(fill="x")
+        role = tk.StringVar(value="Verifier")
+        if registered:
+            ttk.Combobox(controls, textvariable=role, values=("Verifier", "Developer", "Reviewer"),
+                         state="readonly", width=12).pack(side="left", padx=(0, 5))
         gallery = ttk.Frame(panel)
         gallery.pack(fill="both", expand=True)
         thumbnails = []
@@ -1313,7 +1318,7 @@ class CommandCenter:
                 status.set("이 프로젝트의 GUI 검증 영수증이 없습니다.")
                 return
             result = receipt.get("result", "NOT_VERIFIED")
-            status.set(f"{result} · Verifier · 영수증 {receipt['run_id']}\n"
+            status.set(f"{result} · {receipt['role']} · 영수증 {receipt['run_id']}\n"
                        f"종료 코드 {receipt.get('exit_code')} · Job 활성 {receipt.get('job_active')}"
                        + (f"\n{receipt['reason']}" if receipt.get("reason") else ""))
             try:
@@ -1350,14 +1355,22 @@ class CommandCenter:
                 status.set("다른 GUI 검증이 진행 중입니다.")
                 return
             try:
-                scope = self.controller.gui_verification_scope(project_id)
-            except (Blocked, OSError, sqlite3.Error, ValueError):
+                selected_role = role.get()
+                scope = self.controller.gui_verification_scope(project_id, registered=registered, role=selected_role)
+            except Blocked as error:
+                status.set(str(error))
+                return
+            except (OSError, sqlite3.Error, ValueError):
                 status.set("검증 범위를 확인할 수 없습니다.")
                 return
-            if not self.confirm("고정 GUI 검증 승인",
-                                f"{project_id} · Verifier · {scope['scenario']}\n"
+            descriptor = (f"\n복제본: {scope['replica']}\n"
+                          f"{scope['descriptor']} · SHA-256 {scope['descriptor_sha256']}\n"
+                          if registered else "")
+            if not self.confirm("GUI 검증 승인",
+                                f"{project_id} · {selected_role} · {scope['scenario']}\n"
                                 f"대상: {scope['exe']}\nSHA-256 {scope['exe_sha256']}\n"
-                                f"시나리오 SHA-256 {scope['fixture_sha256']}\n"
+                                f"호스트 스크립트 SHA-256 {scope['fixture_sha256']}\n"
+                                f"{descriptor}"
                                 f"소유 창 조작 및 비공개 캡처 · 최대 {scope['timeout_seconds']}초 실행",
                                 parent=panel):
                 return
@@ -1369,7 +1382,9 @@ class CommandCenter:
 
             def work():
                 try:
-                    future.set_result(self.controller.verify_gui_fixture(project_id, digest(scope), cancellation.is_set))
+                    future.set_result(self.controller.verify_gui_fixture(
+                        project_id, digest(scope), cancellation.is_set, registered=registered, role=selected_role,
+                    ))
                 except Exception as error:
                     future.set_exception(error)
 
@@ -1388,15 +1403,13 @@ class CommandCenter:
             panel.after(80, poll)
 
         future = None
-        run = ttk.Button(controls, text="고정 GUI 검증 실행", command=start)
+        run = ttk.Button(controls, text="GUI 검증 실행", command=start)
         run.pack(side="left")
         ttk.Button(controls, text="닫기 / 실행 취소", command=close).pack(side="right")
         panel.protocol("WM_DELETE_WINDOW", close)
         panel.bind("<Escape>", lambda _event: close())
         try:
-            render(next((event for event in reversed(self.reader.ledger.read())
-                         if event["project_id"] == project_id and event["kind"] in
-                         ("gui_validation_intent", "gui_validation_result")), None))
+            render(self.controller.gui_verification_receipt(project_id))
         except (Blocked, OSError, sqlite3.Error, ValueError):
             status.set("원장이 준비되지 않았습니다.")
 
@@ -1431,7 +1444,7 @@ class CommandCenter:
             self.supervised_work()
 
         ttk.Button(panel, text="감독형 Codex 작업으로 계속", command=supervised).pack(anchor="e")
-        ttk.Button(panel, text="고정 GUI 검증 및 보고서", command=self.gui_verification_report).pack(anchor="e")
+        ttk.Button(panel, text="GUI 검증 및 보고서", command=self.gui_verification_report).pack(anchor="e")
 
     def supervised_work(self):
         if not self.view or not self.view["registration"]:

@@ -1,0 +1,60 @@
+{
+  "format": "native-form-v1",
+  "data": "SYNTHETIC_ONLY",
+  "title": "Inventory review",
+  "initial": "No item selected",
+  "opened": "Inventory browser open",
+  "prefix": "Selected:",
+  "open_button": "Browse stock",
+  "apply_button": "Select item",
+  "row_label": "Stock item",
+  "controls": {
+    "status": "inventory-state",
+    "open": "browse",
+    "apply": "select-item",
+    "entry": "item-code",
+    "list": "stock-list"
+  },
+  "scenes": [
+    {
+      "title": "Inventory launch",
+      "expected": "No item selected",
+      "steps": []
+    },
+    {
+      "title": "Stock browser",
+      "expected": "Inventory browser open",
+      "steps": [
+        {
+          "op": "click",
+          "target": "browse"
+        }
+      ]
+    },
+    {
+      "title": "Selection confirmed",
+      "expected": "Selected: QA-024",
+      "steps": [
+        {
+          "op": "text",
+          "target": "item-code",
+          "value": "QA-024"
+        },
+        {
+          "op": "click",
+          "target": "select-item"
+        },
+        {
+          "op": "scroll",
+          "target": "stock-list",
+          "value": 24
+        },
+        {
+          "op": "resize",
+          "width": 760,
+          "height": 525
+        }
+      ]
+    }
+  ]
+}

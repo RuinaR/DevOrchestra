@@ -1,4 +1,4 @@
-"""Scoped Windows GUI checks for the Controller's fixed, synthetic-data fixture."""
+"""Scoped Windows GUI checks for the Controller's trusted WinForms host."""
 from base64 import b64encode
 import ctypes as c
 from ctypes import wintypes as w
@@ -15,27 +15,42 @@ from .job_probe import (
     KILL_EXIT,
 )
 from .lease import Blocked
-from .ledger import check_path
+from .ledger import check_path, digest
 from .mxc_launcher import _known_folder
 from .system_powershell import _api as signature, _open_locked, _system_path
 
 SCENARIO = "winforms-details-v1"
+PROJECT_SCENARIO = "registered-native-form-v1"
 FIXTURE_SHA256 = sha256(SCRIPT.encode()).hexdigest()
 ROLES = {
     "Manager": ("read-receipt",),
-    "Developer": ("read-receipt",),
-    "Reviewer": ("read-receipt",),
-    "Verifier": ("read-receipt", "fixed-gui-scenario"),
+    "Developer": ("read-receipt", "registered-gui-scenario"),
+    "Reviewer": ("read-receipt", "registered-gui-scenario"),
+    "Verifier": ("read-receipt", "fixed-gui-scenario", "registered-gui-scenario"),
 }
-SCENES = (
-    ("Launch", "Start owned fixture", "Ready"),
-    ("Details", "Click Open details", "Details opened"),
-    ("Completed", "Set text, click Apply, scroll and resize", "Applied: Controller QA"),
-)
-CONTROLS = {"root", "status", "open", "apply", "capture", "entry", "list"}
+DEFAULT_FORM = {
+    "controls": {name: name for name in ("status", "open", "apply", "entry", "list")},
+    "scenes": [
+        {"title": "Launch", "expected": "Ready", "steps": []},
+        {"title": "Details", "expected": "Details opened", "steps": [{"op": "click", "target": "open"}]},
+        {"title": "Completed", "expected": "Applied: Controller QA", "steps": [
+            {"op": "text", "target": "entry", "value": "Controller QA"},
+            {"op": "click", "target": "apply"}, {"op": "scroll", "target": "list", "value": 30},
+            {"op": "resize", "width": 730, "height": 505},
+        ]},
+    ],
+}
 
 
-def scope(project_id, revision, timeout_seconds):
+def scenario_tool(registered, role):
+    tool = "registered-gui-scenario" if registered else "fixed-gui-scenario"
+    if tool not in ROLES.get(role, ()):
+        raise Blocked("GUI tool denied for this role")
+    return tool
+
+
+def scope(project_id, revision, timeout_seconds, role="Verifier", descriptor=None):
+    tool = scenario_tool(descriptor is not None, role)
     executable = _system_path()
     check_path(executable.parent)
     with _open_locked(executable) as (stream, _handle):
@@ -43,10 +58,12 @@ def scope(project_id, revision, timeout_seconds):
     if not data or len(data) > 8 * 1024 * 1024:
         raise Blocked("GUI fixture executable size invalid")
     exe_hash = sha256(data).hexdigest()
-    return {"project_id": project_id, "project_revision": revision, "role": "Verifier",
-            "tool": "fixed-gui-scenario", "scenario": SCENARIO, "exe": str(executable),
+    return {"project_id": project_id, "project_revision": revision, "role": role,
+            "tool": tool, "scenario": SCENARIO if descriptor is None else PROJECT_SCENARIO,
+            "exe": str(executable), **(descriptor or {}),
             "exe_sha256": exe_hash, "fixture_sha256": FIXTURE_SHA256,
-            "timeout_seconds": timeout_seconds, "data": "FIXTURE_ONLY",
+            "timeout_seconds": timeout_seconds,
+            "data": "FIXTURE_ONLY" if descriptor is None else "SYNTHETIC_PROJECT_FORM",
             "capture": "OWNED_WINDOW_RENDER"}
 
 
@@ -73,8 +90,8 @@ def verified_image(path, expected=None):
 
 
 class _Window:
-    def __init__(self, handles, pid, check, alive):
-        if (set(handles) != CONTROLS or len(set(handles.values())) != len(CONTROLS)
+    def __init__(self, handles, names, pid, check, alive):
+        if (set(handles) != names or len(set(handles.values())) != len(names)
                 or any(type(value) is not int or value <= 0 for value in handles.values())):
             raise Blocked("Owned control manifest invalid")
         user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
@@ -127,17 +144,18 @@ class _Window:
         _require(self.size(self.owned("root"), c.byref(rect)))
         return rect.right - rect.left, rect.bottom - rect.top
 
-    def resize(self):
+    def resize(self, width, height):
         self.check()
         # Preserve location and z-order. Do not activate the window.
-        _require(self.place(self.owned("root"), None, 0, 0, 730, 505, 0x4016))
+        _require(self.place(self.owned("root"), None, 0, 0, width, height, 0x4016))
 
 
-def _exercise(window, directory, wait_for, observed, scenes):
-    def capture(number):
-        title, action, expected = SCENES[number - 1]
-        status = window.text("status")
-        if status != expected:
+def _exercise(window, directory, wait_for, observed, scenes, form):
+    for number, scene in enumerate(form["scenes"], 1):
+        actions = [_perform(window, step, wait_for, observed) for step in scene["steps"]]
+        title = scene["title"]
+        status = window.text(form["controls"]["status"])
+        if status != scene["expected"]:
             raise Blocked("Observed GUI status did not match the scenario")
         window.click("capture")
         original = directory / f"scene-{number}.png"
@@ -145,39 +163,51 @@ def _exercise(window, directory, wait_for, observed, scenes):
         wait_for(annotated.exists)
         source = verified_image(original)[1]
         processed = verified_image(annotated)[1]
-        scenes.append({"title": title, "input": action, "observed": status,
+        scenes.append({"title": title, "input": ", ".join(actions) or "Start owned app", "observed": status,
                        "captured_at": datetime.now(timezone.utc).isoformat(),
                        "original": source, "processed": processed})
         observed[title] = status
 
-    capture(1)
-    window.click("open")
-    capture(2)
-    content = c.create_unicode_buffer("Controller QA")
-    window.message("entry", 0x000C, second=c.addressof(content))  # WM_SETTEXT
-    if window.text("entry") != content.value:
-        raise Blocked("GUI text input was not observed")
-    window.click("apply")
-    window.message("list", 0x0197, 30)  # LB_SETTOPINDEX
-    if window.message("list", 0x018E) != 30:
-        raise Blocked("GUI list did not scroll")
-    observed["list_top_index"] = 30
-    before = window.dimensions()
-    window.resize()
-    wait_for(lambda: window.dimensions() == (730, 505))
-    if before == window.dimensions():
-        raise Blocked("GUI did not resize")
-    observed["window_size_before"] = list(before)
-    observed["window_size_after"] = list(window.dimensions())
-    capture(3)
     if len({scene["original"]["sha256"] for scene in scenes}) != len(scenes):
         raise Blocked("GUI representative scenes were duplicates")
 
 
-def run_fixture(approved, directory, cancelled, admission, locked_executable):
+def _perform(window, step, wait_for, observed):
+    operation = step["op"]
+    if operation == "resize":
+        dimensions = (step["width"], step["height"])
+        before = window.dimensions()
+        if before == dimensions:
+            raise Blocked("GUI did not resize")
+        window.resize(*dimensions)
+        wait_for(lambda: window.dimensions() == dimensions)
+        observed.update(window_size_before=list(before), window_size_after=list(dimensions))
+        return f"Resize {dimensions[0]}×{dimensions[1]}"
+    target = step["target"]
+    if operation == "click":
+        window.click(target)
+    elif operation == "text":
+        content = c.create_unicode_buffer(step["value"])
+        window.message(target, 0x000C, second=c.addressof(content))
+        if window.text(target) != content.value:
+            raise Blocked("GUI text input was not observed")
+    elif operation == "scroll":
+        window.message(target, 0x0197, step["value"])
+        if window.message(target, 0x018E) != step["value"]:
+            raise Blocked("GUI list did not scroll")
+        observed["list_top_index"] = step["value"]
+    else:
+        raise Blocked("GUI operation not admitted")
+    return f"{operation.capitalize()} {target}"
+
+
+def run_fixture(approved, directory, cancelled, admission, locked_executable, form=None):
     """Return observations only after the Job, handles and app have been accounted for."""
-    if (approved["tool"] != "fixed-gui-scenario" or approved["tool"] not in ROLES.get(approved["role"], ())
-            or approved["scenario"] != SCENARIO or approved["fixture_sha256"] != FIXTURE_SHA256
+    expected = ("fixed-gui-scenario", SCENARIO) if form is None else ("registered-gui-scenario", PROJECT_SCENARIO)
+    if ((approved["tool"], approved["scenario"]) != expected
+            or approved["tool"] not in ROLES.get(approved["role"], ())
+            or approved["fixture_sha256"] != FIXTURE_SHA256
+            or (form is not None and approved.get("form_sha256") != digest(form))
             or not 1 <= approved["timeout_seconds"] <= 20):
         raise Blocked("GUI role or scenario outside the approved scope")
     api = _api()
@@ -216,9 +246,10 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable):
         return api.WaitForSingleObject(info.process, 0) == 258
 
     manifest = directory / "windows.json"
+    names = {"root", "capture", *(form or DEFAULT_FORM)["controls"].values()}
 
     def resolve_window():
-        return _Window(json.loads(_small_file(manifest, 4096)), info.pid, check, alive)
+        return _Window(json.loads(_small_file(manifest, 4096)), names, info.pid, check, alive)
 
     job = _require(api.CreateJobObjectW(None, None))
     try:
@@ -229,6 +260,9 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable):
         limits.job_memory = 256 * 1024 * 1024
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
         check()
+        if form is not None:
+            with (directory / "approved-form.json").open("x", encoding="utf-8") as stream:
+                json.dump(form, stream, ensure_ascii=True)
         recheck()
         argv = ["-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand",
                 b64encode(SCRIPT.encode("utf-16-le")).decode("ascii")]
@@ -239,7 +273,7 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable):
             raise Blocked("Owned GUI process admission unverified")
         wait_for(manifest.exists)
         window = resolve_window()
-        _exercise(window, directory, wait_for, observed, scenes)
+        _exercise(window, directory, wait_for, observed, scenes, form or DEFAULT_FORM)
         comparison_path = directory / "comparison.png"
         wait_for(comparison_path.exists)
         comparison = verified_image(comparison_path)[1]
