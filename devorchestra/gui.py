@@ -176,6 +176,7 @@ class CommandCenter:
         ttk.Button(projects, text="작업 지침", command=self.instruction_settings).pack(fill="x")
         ttk.Button(projects, text="GUI 검증 보고서", command=self.gui_verification_report).pack(fill="x")
         ttk.Button(projects, text="AI 사용량", command=self.ai_usage_panel).pack(fill="x")
+        ttk.Button(projects, text="기존 Git 문맥", command=self.onboarding_panel).pack(fill="x")
         advanced = tk.Frame(projects, bg=PANEL)
         for mode, title in (("edit", "프로젝트 설정"), ("limits", "공용 예산"), ("reserve", "토큰 예비량")):
             ttk.Button(advanced, text=title, command=lambda mode=mode: self.edit_settings(mode)).pack(fill="x")
@@ -1006,6 +1007,7 @@ class CommandCenter:
             values["goal"] = goal.get("1.0", "end-1c").strip()
             acceptance = [line.strip() for line in criteria.get("1.0", "end-1c").splitlines() if line.strip()]
             copying = mode.current() == 2
+            defer_git = False
             if mode.current() == 0:
                 values["replica"] = ""
             try:
@@ -1030,14 +1032,18 @@ class CommandCenter:
                 if values["replica"]:
                     setup = {"project": data, "replica": str(Path(values["replica"])), "wait_seconds": 10}
                     validate_setup(setup, self.reader.ledger.state_boundary, allow_file_proposals=bool(revision))
-                    if copying:
+                    if copying and (Path(values["original"]) / ".git").exists():
+                        catalog.save_project(data, revision)
+                        defer_git = True
+                    elif copying:
                         if not self.confirm("개발용 작업 사본 만들기",
                                                    "표시된 원본 파일을 지정한 새 폴더에 복사하시겠습니까? "
                                                    "복사 전에 프로젝트에 비공개 파일이 포함됐는지 확인하세요.",
                                                    parent=panel):
                             return
                         create_work_copy(Path(values["original"]), Path(values["replica"]))
-                    catalog.save_setup(setup, revision)
+                    if not defer_git:
+                        catalog.save_setup(setup, revision)
                 else:
                     catalog.save_project(data, revision)
             except (Blocked, OSError, ValueError, sqlite3.Error) as error:
@@ -1050,10 +1056,17 @@ class CommandCenter:
             if identity in self.project_ids:
                 self.project.current(self.project_ids.index(identity))
                 self.select_project(None)
-                if open_docs:
+                if defer_git:
+                    self.onboarding_panel(values["replica"])
+                elif open_docs:
                     self.requirement_settings()
 
         ttk.Button(panel, text="저장" if edit else "프로젝트 등록", command=save).pack(anchor="e")
+
+    def onboarding_panel(self, initial=""):
+        from .gui_onboarding import show_panel
+
+        show_panel(self, initial)
 
     def instruction_settings(self):
         panel = self.panel()

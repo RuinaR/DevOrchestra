@@ -7,17 +7,7 @@ from .ledger import digest
 from .replica_evidence import snapshot
 
 
-def review(ledger, project_id):
-    from .dotnet_install import registered
-    from .mxc_dotnet import _toolchain
-
-    catalog = Catalog(ledger).read()
-    setup = catalog["setups"].get(project_id)
-    if not setup:
-        raise Blocked("Environment review requires a registered replica")
-    replica = Path(setup["replica"])
-    image = snapshot(replica)
-    files = image["files"]
+def detect(files):
     markers = {
         ".NET": ("global.json", ".csproj", ".sln", ".cs", "packages.lock.json"),
         "Python": (".py", "pyproject.toml", "requirements.txt", "uv.lock", ".python-version"),
@@ -33,6 +23,20 @@ def review(ledger, project_id):
         if matches:
             detected[name] = {"evidence": {path: files[path]["sha256"] for path in sorted(matches)},
                               "status": "DETECTED"}
+    return detected
+
+
+def review(ledger, project_id):
+    from .dotnet_install import registered
+    from .mxc_dotnet import _toolchain
+
+    catalog = Catalog(ledger).read()
+    setup = catalog["setups"].get(project_id)
+    if not setup:
+        raise Blocked("Environment review requires a registered replica")
+    replica = Path(setup["replica"])
+    image = snapshot(replica)
+    detected = detect(image["files"])
     if ".NET" in detected:
         try:
             local = registered(ledger, project_id, replica) if ledger.path.exists() else None

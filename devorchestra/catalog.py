@@ -236,12 +236,12 @@ class Catalog:
         validate_reserve(data)
         return self._save("token_reserve_saved", data, revision)
 
-    def save_setup(self, data, revision=0):
+    def save_setup(self, data, revision=0, *, held=False):
         from .setup import environment_status, validate_setup
         if not environment_status()["windows_x64"]:
             raise Blocked("Setup requires Windows x64")
         validate_setup(data, self.ledger.state_boundary, allow_file_proposals=revision != 0)
-        return self._save("setup_saved", data, revision)
+        return self._save("setup_saved", data, revision, held=held)
 
     def register_requirement(self, project_id, relative, role, *, related=None):
         """Owner-selected read of one document. Store references and hashes only."""
@@ -298,8 +298,10 @@ class Catalog:
             stream.write(data)
         return self.register_requirement(project_id, relative, role, related=related)
 
-    def _save(self, kind, data, revision):
-        with execution_slot() as abandoned:
+    def _save(self, kind, data, revision, *, held=False):
+        from .lease import held_execution_slot
+
+        with (held_execution_slot() if held else execution_slot()) as abandoned:
             if abandoned:
                 raise Blocked("Abandoned slot requires inspection")
             snapshot = self._snapshot()

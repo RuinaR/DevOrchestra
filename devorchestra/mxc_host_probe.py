@@ -70,7 +70,7 @@ def _args(child, *arguments):
 
 
 def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=512 * 1024 * 1024,
-             check=None, output_limit=256):
+             check=None, output_limit=256, encoding="ascii"):
     import msvcrt
 
     api = _api()
@@ -117,7 +117,7 @@ def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=5
         output = stream.read(output_limit + 1)
     if check is not None and len(output) > output_limit:
         raise Blocked("MXC output exceeds the approved limit")
-    return {"exitCode": code.value, "stdout": output.decode("ascii", errors="replace"),
+    return {"exitCode": code.value, "stdout": output.decode(encoding, errors="strict" if encoding == "utf-8" else "replace"),
             "job_active": counts.active, "job_total": counts.total,
             "stderr": "" if stderr.stat().st_size == 0 else "REDACTED"}
 

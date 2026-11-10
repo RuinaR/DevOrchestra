@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.103은 등록부의 원본을 기준으로 `onboard-git --project <ID> --destination <NEW_PATH>`를 검토하고 동일 인자에 `--approve <SHA256>`를 추가해 새 복제본을 만든다. 필요한 비식별 로컬 예제는 정확한 `--include` 경로로 선택한다. 등록·문맥·복제본 상태와 환경·개발 입장을 구분한다. 기존 개인 지침 승인 중 다른 복제본에 묶인 것은 자동 승계하지 않는다. 중단된 온보딩의 원장과 소유 스테이징을 보존하고 자동 재시도하지 않는다.
+
 P2.102의 `sdk-install`은 루트 `global.json`의 정확한 안정 버전과 `rollForward: disable`을 요구한다. Microsoft HTTPS 메타데이터 및 ZIP만 읽고 설치 스크립트 없이 풀며 MXC에서 `dotnet --info`를 확인한다. 성공 영수증에 있는 프로젝트 SDK만 이후 검토에서 재사용한다. 구독 C# 세션은 `mxc-dotnet-arithmetic-v1`과 두 기존 산술 파일에 한정하며, 변경된 소스와 DLL 해시를 같은 Verifier 영수증에 기록한다.
 
 P2.101의 `environment-review`는 설치나 실행을 시작하지 않는다. .NET의 경우 로컬 SDK 선택 근거와 해시를 확인한 뒤 기존 `build-verify`를 검토·승인한다. `global.json`의 `disable`, `patch`, `latestPatch`, `latestFeature`, `latestMinor`, `latestMajor`를 지원한다. 자동 설치를 연결하려면 승인된 공식 다운로드 목적지, 아카이브 무결성, 프로젝트 전용 설치 경계, 설치 취소·회수 검증이 필요하다. 모델 변경 소스 실행의 경계는 기존 검토된 두 파일 경로와 별개다.

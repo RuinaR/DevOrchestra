@@ -105,6 +105,11 @@ def main():
         install_sdk.add_argument("--" + name, required=True)
     install_sdk.add_argument("--expires", required=True, type=int)
     install_sdk.add_argument("--approve")
+    onboarding = commands.add_parser("onboard-git", help="Review or create an isolated existing Git baseline")
+    onboarding.add_argument("--project", required=True)
+    onboarding.add_argument("--destination")
+    onboarding.add_argument("--include", action="append", default=[])
+    onboarding.add_argument("--approve")
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -152,6 +157,18 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "onboard-git":
+            from . import project_onboarding
+
+            if args.destination is None:
+                print(canonical(project_onboarding.status(ledger, args.project)))
+            elif args.approve is None:
+                scope = project_onboarding.review(Runner(ledger), args.project, args.destination, args.include)
+                print(canonical({"review": scope, "review_sha256": digest(scope)}))
+            else:
+                print(canonical(project_onboarding.create(Runner(ledger), args.project, args.destination,
+                                                         args.include, args.approve)))
+            return
         if args.action == "sdk-install":
             runner = Runner(ledger)
             fields = (args.project, args.launcher, args.expires)

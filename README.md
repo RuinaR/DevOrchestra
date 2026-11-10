@@ -34,6 +34,8 @@ CLI에서는 `python -B -m devorchestra gui-verify --project fixture-a`로 범�
 
 ### 개발 환경과 산출물 점검
 
+**기존 Git 문맥**에서 등록 원본을 검토하고 승인한 파일만 새 작업 복제본에 담을 수 있습니다. 원본 Git 상태와 문서 근거를 로컬 원장에 동결하며, 승인된 파일 바이트로 별도 Git 기준을 생성합니다. 추가 로컬 자료는 민감정보가 없는 정확한 JSON 예제 경로만 허용합니다. 복제본 준비 상태와 개발 실행 권한은 별개입니다.
+
 Command Center의 **AI 사용량**은 직접 OAuth 모델 목록 연결, 프로젝트·세션의 제공자 보고 토큰, Codex 계정 한도를 구분합니다. Codex App Server의 `account/rateLimits/read` 결과 JSON을 가져올 수 있으며, `{"limits": ..., "activity": ...}` 형식에 `account/usage/read` 결과도 포함할 수 있습니다. 앱 자체의 Codex 실시간 조회가 연결되기 전에는 **ChatGPT 사용량 설정**에서 계정 수치를 확인하세요.
 
 등록 프로젝트의 개발 도구 요구사항은 `python -B -m devorchestra environment-review --project <ID>`로 확인합니다. .NET 콘솔 Verifier는 루트 `global.json`의 정책과 SDK 신원을 승인에 묶습니다. 정확한 안정 버전이 필요한 프로젝트는 `sdk-install --project <ID> --launcher <CODEX_EXE> --expires <UNIX_SECONDS>`로 Microsoft ZIP 설치 범위를 검토하고, 동일한 인자에 `--approve <SHA256>`를 추가해 설치할 수 있습니다. 설치 스크립트와 일반 MSBuild는 이 범위 밖입니다.
