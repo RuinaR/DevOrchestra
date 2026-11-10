@@ -34,6 +34,8 @@ CLI에서는 `python -B -m devorchestra gui-verify --project fixture-a`로 범�
 
 ### 개발 환경과 산출물 점검
 
+Command Center의 **AI 사용량**은 직접 OAuth 모델 목록 연결, 프로젝트·세션의 제공자 보고 토큰, Codex 계정 한도를 구분합니다. Codex App Server의 `account/rateLimits/read` 결과 JSON을 가져올 수 있으며, `{"limits": ..., "activity": ...}` 형식에 `account/usage/read` 결과도 포함할 수 있습니다. 앱 자체의 Codex 실시간 조회가 연결되기 전에는 **ChatGPT 사용량 설정**에서 계정 수치를 확인하세요.
+
 등록 프로젝트의 개발 도구 요구사항은 `python -B -m devorchestra environment-review --project <ID>`로 확인합니다. .NET 콘솔 Verifier는 루트 `global.json`의 정책과 SDK 신원을 승인에 묶습니다. 정확한 안정 버전이 필요한 프로젝트는 `sdk-install --project <ID> --launcher <CODEX_EXE> --expires <UNIX_SECONDS>`로 Microsoft ZIP 설치 범위를 검토하고, 동일한 인자에 `--approve <SHA256>`를 추가해 설치할 수 있습니다. 설치 스크립트와 일반 MSBuild는 이 범위 밖입니다.
 
 `python -B -m devorchestra artifact-review --retain 2`는 최근 로컬 릴리스와 기존 임시 자료를 분류합니다. 빌드 Verifier는 작업 전용 임시 폴더를 원장에 기록하고 소유 Job을 회수한 후 정리합니다.

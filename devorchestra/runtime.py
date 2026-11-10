@@ -103,7 +103,7 @@ def last_run(events):
                                                  "native_inspection_", "native_manager_", "supervised_",
                                                  "gui_validation_", "gui_build_", "gui_session_", "build_verifier_", "sdk_install_",
                                                  "subscription_developer_", "subscription_cycle_",
-                                                 "subscription_session_"))]
+                                                 "subscription_session_", "subscription_usage_"))]
     return []
 
 

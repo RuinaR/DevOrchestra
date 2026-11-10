@@ -175,6 +175,7 @@ class CommandCenter:
         ttk.Button(projects, text="초기 설정", command=self.setup_wizard).pack(fill="x")
         ttk.Button(projects, text="작업 지침", command=self.instruction_settings).pack(fill="x")
         ttk.Button(projects, text="GUI 검증 보고서", command=self.gui_verification_report).pack(fill="x")
+        ttk.Button(projects, text="AI 사용량", command=self.ai_usage_panel).pack(fill="x")
         advanced = tk.Frame(projects, bg=PANEL)
         for mode, title in (("edit", "프로젝트 설정"), ("limits", "공용 예산"), ("reserve", "토큰 예비량")):
             ttk.Button(advanced, text=title, command=lambda mode=mode: self.edit_settings(mode)).pack(fill="x")
@@ -1274,6 +1275,11 @@ class CommandCenter:
         category.bind("<<ComboboxSelected>>", show_applied)
         refresh()
         show_applied()
+
+    def ai_usage_panel(self):
+        from .gui_usage import show_panel
+
+        show_panel(self)
 
     def gui_verification_report(self):
         from .gui_verification import verified_image

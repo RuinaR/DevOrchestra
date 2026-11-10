@@ -118,6 +118,9 @@ def run(runner, project, account, model, expires, approved, cancelled=lambda: Fa
         if approval["ledger_head"] != head or digest(approval) != approved:
             raise Blocked("Subscription Manager approval changed")
         deadline = monotonic() + min(approval["budget"]["seconds"], expires - time())
+        from .ai_usage import check_account, provider_status, response_usage
+
+        check_account(runner.ledger, account)
         store = AccountStore(runner.ledger)
         token = store.access(account)
         try:
@@ -134,7 +137,7 @@ def run(runner, project, account, model, expires, approved, cancelled=lambda: Fa
                   "manager_backend": BACKEND, "model": model, "generation": approval["generation"],
                   "owner_review_sha256": approved, "request_hash": approval["request_sha256"],
                   "instruction_layers": approval["instruction_layers"], "budget": approval["budget"],
-                  "authentication": "CHATGPT_OAUTH_SUBSCRIPTION"}
+                  "authentication": "CHATGPT_OAUTH_SUBSCRIPTION", "usage_account": digest(account)}
         if session:
             fields.update(session.binding())
         count, fence = len(events), head
@@ -165,6 +168,7 @@ def run(runner, project, account, model, expires, approved, cancelled=lambda: Fa
         try:
             completed = complete(token, body, check, before_send, deadline)
             result["response_completed"] = True
+            result["usage_details"] = response_usage(completed)
             usage = completed.get("usage")
             if isinstance(usage, dict) and type(usage.get("total_tokens")) is int and usage["total_tokens"] >= 0:
                 result["usage"] = usage["total_tokens"]
@@ -193,6 +197,7 @@ def run(runner, project, account, model, expires, approved, cancelled=lambda: Fa
                 raise
             proposal = None
             reason = str(error) if isinstance(error, Blocked) else "CANCELLED"
+            result["provider_usage_status"] = provider_status(error)
             result.update(outcome=("FAILED" if isinstance(error, SubscriptionError) or result["response_completed"]
                                    or reason.startswith("ChatGPT terminal event") else "UNKNOWN"),
                           reason=reason)

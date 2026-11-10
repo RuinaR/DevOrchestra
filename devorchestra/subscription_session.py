@@ -159,6 +159,8 @@ class _Session:
             self.usage_complete = False
         if (receipt["outcome"] != "COMPLETED" or receipt.get("owned_tree") != "DRAINED"
                 or any(receipt.get(key) != value for key, value in self.binding().items())):
+            if receipt.get("provider_usage_status") == "LIMIT_REACHED":
+                raise Blocked("ChatGPT usage limit paused requests. Review Settings → Usage and explicitly resume.")
             if receipt.get("reason") == "Developer proposed no file change":
                 raise Blocked("NO_PROGRESS")
             raise Blocked("Session role did not settle successfully; no automatic retry")

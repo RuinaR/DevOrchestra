@@ -2,6 +2,8 @@
 
 Start with the user's requirements and the project's instructions. Inspect the current source and preserve unrelated changes and operating data. Work within the authorized files, tools and test environment.
 
+For an existing project, recover its approved instructions, handoff, Git baseline, tooling and dependency locks before editing. Keep original source, uncommitted work, models, databases, credentials and local settings protected. Validate real changes in the approved replica and apply only verified changes against a fresh original baseline. Treat live trading, payments, external account changes and deployment as separate approvals. Use simulation with live order submission disabled for trading validation.
+
 Use the approved official coding-agent backend when one is available. Treat backend selection as part of the approval and use only the capabilities it exposes.
 
 Discover tools from project requirements and lockfiles. Reuse compatible installations and pin the tool identity and dependencies for the approved run. When a dependency is missing, request an approved project-local installation with verified provenance and an explicit network and execution scope.

@@ -442,7 +442,10 @@ def complete(token, body, check, before_send, deadline):
             if kind in {"response.failed", "response.incomplete", "error"}:
                 detail = event.get("response", {})
                 error = detail.get("error") if isinstance(detail, dict) else None
-                raise Blocked(f"ChatGPT terminal event {kind}: {_error_code(error or event)}")
+                code = _error_code(error or event)
+                if code == "subscription_sharing_usage_limit_exceeded":
+                    raise SubscriptionError(response.status, code)
+                raise Blocked(f"ChatGPT terminal event {kind}: {code}")
             if kind == "response.completed":
                 check()
                 result = event.get("response")

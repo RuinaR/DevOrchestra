@@ -302,11 +302,16 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                                   vectors_sha256=scope["vectors_sha256"])
                 result["artifact_sha256"] = digest(result["observations"])
             else:
+                from .ai_usage import check_account, response_usage
+
+                check_account(runner.ledger, account)
+                result["usage_account"] = digest(account)
                 token = AccountStore(runner.ledger).access(account)
                 if model not in {item["model"] for item in list_models(token)}:
                     raise Blocked("Cycle model is unavailable for this subscription account")
                 response = complete(token, body, check, before_send, deadline)
                 result["response_completed"] = True
+                result["usage_details"] = response_usage(response)
                 usage = response.get("usage")
                 if isinstance(usage, dict) and type(usage.get("total_tokens")) is int and usage["total_tokens"] >= 0:
                     result["usage"] = usage["total_tokens"]
@@ -337,7 +342,11 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
             if (not started or (phase == "verifier" and scope.get("gui_contract") and "provenance" not in result)
                     or (phase == "verifier" and scope.get("runtime") and "runtime_manifest_sha256" not in result)):
                 raise
-            result.update(outcome="FAILED" if result["response_completed"] else "UNKNOWN",
+            from .ai_usage import provider_status
+
+            status = provider_status(error) if phase != "verifier" else None
+            result.update(outcome="FAILED" if result["response_completed"] or status == "LIMIT_REACHED" else "UNKNOWN",
+                          provider_usage_status=status,
                           reason=str(error) if isinstance(error, Blocked) else "CANCELLED")
         runner.ledger.append(count, fence, result, allow_shutdown=True)
         return result

@@ -253,6 +253,10 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                                                  admission=require_admission)
             started = True
 
+        from .ai_usage import check_account, provider_status, response_usage
+
+        check_account(runner.ledger, account)
+        result["usage_account"] = digest(account)
         store = AccountStore(runner.ledger)
         token = store.access(account)
         if model not in {item["model"] for item in list_models(token)}:
@@ -260,6 +264,7 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
         try:
             completed = complete(token, body, check, before_send, deadline)
             result["response_completed"] = True
+            result["usage_details"] = response_usage(completed)
             usage = completed.get("usage")
             if isinstance(usage, dict) and type(usage.get("total_tokens")) is int and usage["total_tokens"] >= 0:
                 result["usage"] = usage["total_tokens"]
@@ -331,6 +336,7 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
             if not started:
                 raise
             known_rejection = not applied and (result["response_completed"] or isinstance(error, SubscriptionError))
+            result["provider_usage_status"] = provider_status(error)
             result.update(outcome="FAILED" if known_rejection else "UNKNOWN",
                           reason=str(error) if isinstance(error, Blocked) else "CANCELLED")
         result["file_applied"] = applied
