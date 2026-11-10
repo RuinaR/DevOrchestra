@@ -30,8 +30,9 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
     gui = isinstance(vectors, dict) and "gui" in vectors
     batch = isinstance(vectors, dict) and "files" in vectors
     runtime_kind = vectors["runtime"].get("kind") if batch and isinstance(vectors.get("runtime"), dict) else None
-    sdk_project = runtime_kind == mxc_sdk_project.KIND
-    csharp = runtime_kind in {csharp_sources.KIND, mxc_sdk_project.KIND}
+    winforms = runtime_kind == mxc_sdk_project.GUI_KIND
+    sdk_project = runtime_kind in {mxc_sdk_project.KIND, mxc_sdk_project.GUI_KIND}
+    csharp = sdk_project or runtime_kind == csharp_sources.KIND
     if not gui and not batch:
         validate_vectors(vectors, baseline["acceptance"])
     catalog = Catalog(runner.ledger).read()
@@ -48,7 +49,7 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
             raise Blocked("Batch Verifier requires vectors for every approved file")
         check_names(files, vectors["create"], "cs" if csharp else "py")
         if sdk_project:
-            if (set(vectors["runtime"]) != {"kind", "launcher", "project", "tests"}
+            if (set(vectors["runtime"]) != {"kind", "launcher", "project", "scenario" if winforms else "tests"}
                     or type(vectors["runtime"]["launcher"]) is not str
                     or any(item != baseline["acceptance"] for item in vectors["files"].values())):
                 raise Blocked("SDK projects require a fixed test entry and frozen acceptance")
@@ -102,15 +103,33 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
 
             replica = Path(scope["replica"])
             spec = vectors["runtime"]
-            build = mxc_sdk_project.review(replica, spec["launcher"], [spec["project"]], spec["tests"],
-                                           min(seconds, 90), registered(runner.ledger, project, replica))
+            build = mxc_sdk_project.review(replica, spec["launcher"], [spec["project"]],
+                                           spec["scenario" if winforms else "tests"], min(seconds, 90),
+                                           registered(runner.ledger, project, replica), winforms=winforms)
             test_root = Path(build["entry"]).parent
             library_roots = [Path(name).parent for name in build["graph"] if name != build["entry"]]
-            if any(Path(name).is_relative_to(test_root) or
-                   not any(Path(name).is_relative_to(root) for root in library_roots) for name in files):
+            if winforms:
+                library_roots.append(test_root)
+            if any(not any(Path(name).is_relative_to(root) for root in library_roots) for name in files):
                 raise Blocked("Developer SDK scope must be inside a library project and outside frozen tests")
-            scope["runtime"] = {"kind": mxc_sdk_project.KIND, "build": build}
-            scope["tools"] = ["controller-replace-batch", mxc_sdk_project.KIND]
+            scope["runtime"] = {"kind": runtime_kind, "build": build}
+            if winforms:
+                from .mxc_owned_gui import verify_images
+
+                baseline_gui = next((event for event in reversed(events)
+                                     if event["kind"] == "build_verifier_result"
+                                     and event["project_id"] == project and event.get("sdk_gui")
+                                     and event.get("job_active") == 0
+                                     and event.get("cleanup", {}).get("status") == "REMOVED"
+                                     and all(event["scope"].get(key) == build[key] for key in (
+                                         "kind", "replica_sha256", "entry", "gui_scenario", "toolchain_sha256",
+                                     ))), None)
+                if baseline_gui:
+                    evidence = verify_images(runner.ledger, baseline_gui["sdk_gui"], baseline_gui["run_id"],
+                                             build["gui_scenario"], require_pass=False)
+                    scope["runtime"]["baseline_gui"] = {"run_id": baseline_gui["run_id"],
+                                                       "receipt_sha256": digest(baseline_gui), "evidence": evidence}
+            scope["tools"] = ["controller-replace-batch", runtime_kind]
         elif csharp:
             from . import mxc_dotnet
             from .dotnet_install import registered
@@ -243,7 +262,7 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                     failure, feedback = reviewed, cycle._model_output(runner.ledger, reviewed, "reviewer")["findings"]
                 elif reviewed["decision"] == "ACCEPT_FOR_VERIFICATION":
                     verified = execute("verifier", cycle, *prefix, "verifier", None, None, expires, vectors)
-                    if scope.get("gui_contract"):
+                    if scope.get("gui_contract") or verified.get("sdk_gui"):
                         gui_receipt = verified
                     if verified["verdict"] == "PASS":
                         final = execute("manager-final", cycle, *prefix, "manager-final", account,
@@ -259,6 +278,8 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                     elif scope.get("runtime"):
                         feedback = {"observations": feedback, "exit_code": verified["exit_code"],
                                     "source_sha256": verified["source_sha256"], "receipt_sha256": digest(verified)}
+                        if gui_failure := verified.get("sdk_gui"):
+                            feedback["screenshots"] = [scene["original"]["sha256"] for scene in gui_failure["scenes"]]
                 else:
                     raise Blocked("Reviewer blocked the change")
                 fingerprint = digest([failure["phase"], [
@@ -281,8 +302,11 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                   "roles": roles, "reworks": attempts, "remaining_reported_tokens": session.remaining,
                   "used_reported_tokens": session.reported, "usage_complete": session.usage_complete,
                   "owned_tree": "UNRESOLVED" if native_unresolved(current) else "DRAINED",
-                  "gui": (gui_receipt.get("gui", "NOT_VERIFIED") if gui_receipt else
-                          "NOT_VERIFIED" if scope.get("gui_contract") else "NOT_LINKED"),
+                  "gui": (("GUI_PASS" if gui_receipt["verdict"] == "PASS" else gui_receipt["verdict"])
+                          if gui_receipt and gui_receipt.get("sdk_gui") else
+                          gui_receipt.get("gui", "NOT_VERIFIED") if gui_receipt else
+                          "NOT_VERIFIED" if scope.get("gui_contract")
+                          or scope.get("runtime", {}).get("kind") == mxc_sdk_project.GUI_KIND else "NOT_LINKED"),
                   "gui_receipt_sha256": digest(gui_receipt) if gui_receipt else None,
                   "provider_token_limit": "UNAVAILABLE_PREVIEW"}
         runner.ledger.append(len(current), tail, result, allow_shutdown=True)

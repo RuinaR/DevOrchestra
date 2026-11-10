@@ -1,5 +1,9 @@
 # 개발 인수인계
 
+P2.109의 `mxc-dotnet-winforms-project-v1`은 패키지 없는 WinForms SDK 프로젝트를 MXC 안에서 빌드·실행한다. 기존 SDK 경로의 `runtime.tests` 대신 `runtime.scenario`에 소유 컨트롤 매핑과 2~3개의 기대 장면을 지정한다. 앱의 동결된 시작 코드에서 `DEVORCHESTRA_GUI_MANIFEST`에 현재 PID와 `root` 및 컨트롤 HWND를 JSON으로 게시해야 한다. Controller는 현재 Job 소속, 프로세스 핸들, 창 계층을 확인한 뒤 승인된 메시지만 보낸다. 같은 복제본·시나리오·툴체인의 사전 빌드 영수증이 있으면 구독 승인에 변경 전 캡처를 연결한다. WinForms SDK 모드는 검증 센터에서 검토할 수 있으며 결과 이미지는 GUI 검증 보고서에서 확인한다.
+
+검증 범위는 클릭·입력·리스트 스크롤·선택 확인·크기 변경·상태와 창 제목 확인이다. SDK 프로젝트에는 제한된 로컬 참조와 명시적 텍스트 내장 리소스를 허용한다. WPF, 임의 창 자동 탐색, 체크박스·모달·포커스 시나리오, 외부 패키지 및 모델의 프로젝트 구성·리소스 편집은 지원 대상에 포함되지 않는다.
+
 P2.108의 오프라인 SDK 어댑터는 **검증 센터 → 복제본 빌드·테스트 → SDK 프로젝트**에서 검토한다. 테스트 진입점에 `tests/Checks.csproj`, 기대 이름에 `["case-name"]` 형식의 배열을 입력한다. 해당 프로젝트는 종료 코드 0과 이름별 `PASS case-name` 출력이 필요한 콘솔 테스트 실행 파일이다. CLI는 `build-verify --kind mxc-dotnet-sdk-project-v1 --source tests/Checks.csproj --vectors '["case-name"]'`와 기존 프로젝트·실행기·예산·승인 옵션을 사용한다. 승인된 소스만 격리 스테이징에 복사하고 실제 SDK 복원·Release 빌드·테스트를 순서대로 실행한다. 패키지 소스는 비어 있으며 사용자 설정과 별도의 임시 프로필을 사용한다.
 
 구독 세션의 배치 검증 명세에서 `runtime`은 `{"kind":"mxc-dotnet-sdk-project-v1","launcher":"<절대 Codex 경로>","project":"tests/Checks.csproj","tests":["case-name"]}` 형식이다. `files`는 승인된 라이브러리 C# 경로별로 기존 완료 기준 배열을 지정하고 `create`에는 별도 승인된 새 파일만 지정한다. 테스트와 프로젝트 구성은 모델 수정 범위 밖에 고정한다. P2.107의 격리 Verifier 영수증과 원본 승인 절차를 재사용한다. 패키지 의존성, 사용자 타깃·import, 기존 테스트 프레임워크 어댑터, 새 디렉터리, 파일 삭제·이동은 별도 작업이다.

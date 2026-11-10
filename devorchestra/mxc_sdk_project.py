@@ -18,11 +18,12 @@ from .project_onboarding import _protected, _relative
 from .replica_evidence import fingerprint, snapshot
 
 KIND = "mxc-dotnet-sdk-project-v1"
+GUI_KIND = "mxc-dotnet-winforms-project-v1"
 PROPERTIES = {"OutputType": {"Exe", "Library"}, "ImplicitUsings": {"enable", "disable"},
               "Nullable": {"enable", "disable"}, "TreatWarningsAsErrors": {"true", "false"}}
 
 
-def _project(data, name, target):
+def _project(data, name, target, *, winforms=False):
     if b"<!" in data or b"<?" in data:
         raise Blocked("DTD, XML directives and custom project constructs are not supported")
     try:
@@ -31,7 +32,7 @@ def _project(data, name, target):
         raise Blocked("Invalid SDK project XML") from error
     if root.tag != "Project" or root.attrib != {"Sdk": "Microsoft.NET.Sdk"}:
         raise Blocked("Only the Microsoft.NET.Sdk project root is supported")
-    properties, refs = {}, []
+    properties, refs, resources = {}, [], []
     for group in root:
         if group.attrib or group.tag not in {"PropertyGroup", "ItemGroup"} or (group.text or "").strip():
             raise Blocked("Custom imports, conditions, targets and tasks are blocked")
@@ -40,7 +41,9 @@ def _project(data, name, target):
                 raise Blocked("Nested project metadata is blocked")
             if group.tag == "PropertyGroup":
                 value = (item.text or "").strip()
-                allowed = {target} if item.tag == "TargetFramework" else PROPERTIES.get(item.tag, ())
+                allowed = ({target} if item.tag == "TargetFramework" else
+                           {"true"} if winforms and item.tag == "UseWindowsForms" else
+                           {"WinExe"} if winforms and item.tag == "OutputType" else PROPERTIES.get(item.tag, ()))
                 if item.attrib or item.tag in properties or value not in allowed:
                     raise Blocked("Unapproved SDK property or target framework")
                 properties[item.tag] = value
@@ -48,6 +51,13 @@ def _project(data, name, target):
                 if item.tag in {"PackageReference", "PackageDownload"}:
                     raise Blocked("Package restore requires a separate verified offline package contract")
                 include = item.attrib.get("Include", "")
+                if (winforms and item.tag == "EmbeddedResource" and set(item.attrib) == {"Include"}
+                        and not (item.text or "").strip()
+                        and re.fullmatch(r"(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.txt", include)):
+                    resource = posixpath.join(posixpath.dirname(name), include)
+                    _relative(resource)
+                    resources.append(resource)
+                    continue
                 if (item.tag != "ProjectReference" or set(item.attrib) != {"Include"}
                         or (item.text or "").strip()
                         or not re.fullmatch(r"[A-Za-z0-9_./\\-]+\.csproj", include)):
@@ -55,12 +65,20 @@ def _project(data, name, target):
                 reference = posixpath.normpath(posixpath.join(posixpath.dirname(name), include.replace("\\", "/")))
                 _relative(reference)
                 refs.append(reference)
-    if "TargetFramework" not in properties or len(set(refs)) != len(refs):
+    if ("TargetFramework" not in properties or len(set(refs)) != len(refs) or len(set(resources)) != len(resources)
+            or (winforms and properties.get("UseWindowsForms") != "true")):
         raise Blocked("Target framework or project references are incomplete")
-    return {"output": properties.get("OutputType", "Library"), "references": sorted(refs)}
+    return {"output": properties.get("OutputType", "Library"), "references": sorted(refs),
+            **({"resources": sorted(resources)} if resources else {})}
 
 
-def review(replica, launcher, projects, tests, seconds, tool_root=None):
+def review(replica, launcher, projects, tests, seconds, tool_root=None, *, winforms=False):
+    scenario = None
+    if winforms:
+        from .mxc_owned_gui import validate
+
+        scenario = validate(tests)
+        tests = [str(index) for index, _ in enumerate(scenario["scenes"], 1)]
     if (type(projects) is not list or len(projects) != 1 or type(projects[0]) is not str
             or type(tests) is not list or not 1 <= len(tests) <= 16
             or any(type(name) is not str or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name) for name in tests)
@@ -76,8 +94,20 @@ def review(replica, launcher, projects, tests, seconds, tool_root=None):
         raise Blocked("MXC requires the approved absolute launcher path")
     verify_app_server_binary(launcher, approved_sha256=LAUNCHER_PIN)
     sdk = root / "sdk" / selected["sdk"]
+    target = selected["target"]
+    desktop = []
+    if winforms:
+        from .dotnet_environment import _versions
+
+        major_minor = tuple(map(int, target[3:].split(".")))
+        for folder in (root / "packs" / "Microsoft.WindowsDesktop.App.Ref",
+                       root / "shared" / "Microsoft.WindowsDesktop.App"):
+            match = next((path for version, path in _versions(folder) if version[:2] == major_minor), None)
+            if not match:
+                raise Blocked("Compatible WindowsDesktop reference pack or runtime is missing")
+            desktop.append(match)
     # Recheck the complete selected SDK and framework trees, including implicit SDK targets.
-    for tree in (sdk, selected["ref_pack"], selected["runtime"], selected["host"]):
+    for tree in (sdk, selected["ref_pack"], selected["runtime"], selected["host"], *desktop):
         check_path(tree)
         for directory, folders, files in os.walk(tree):
             for name in [*folders, *files]:
@@ -104,8 +134,16 @@ def review(replica, launcher, projects, tests, seconds, tool_root=None):
             data = (replica / name).read_bytes()
             if sha256(data).hexdigest() != info["sha256"]:
                 raise Blocked("Project XML changed during review")
-            graph[name] = _project(data, name, selected["target"])
-    if entry not in graph or graph[entry]["output"] != "Exe" or not 1 <= len(graph) <= 8:
+            gui_entry = winforms and name == entry
+            graph[name] = _project(data, name, target + "-windows" if gui_entry else target,
+                                   winforms=gui_entry)
+    for project in graph.values():
+        for name in project.get("resources", []):
+            info = image["files"].get(name)
+            if not info or info["bytes"] > 65536 or _protected(name):
+                raise Blocked("WinForms text resource is missing, protected, or too large")
+            inputs[name] = info
+    if entry not in graph or graph[entry]["output"] != ("WinExe" if winforms else "Exe") or not 1 <= len(graph) <= 8:
         raise Blocked("A bounded graph with an executable test project is required")
     roots = {name: PurePosixPath(name).parent for name in graph}
     if any(left == right or left in right.parents for first, left in roots.items()
@@ -129,18 +167,21 @@ def review(replica, launcher, projects, tests, seconds, tool_root=None):
             or any(not any(root_path in PurePosixPath(name).parents for root_path in roots.values()) for name in inputs)
             or len(inputs) > 128 or sum(item["bytes"] for item in inputs.values()) > 2 * 1024 * 1024):
         raise Blocked("Build inputs must belong to the reachable bounded project graph")
-    return {"kind": KIND, "replica": str(replica), "replica_sha256": digest(image), "sources": inputs,
-            "graph": graph, "entry": entry, "tests": tests, "sdk": selected["sdk"], "target": selected["target"],
+    return {"kind": GUI_KIND if winforms else KIND, "replica": str(replica), "replica_sha256": digest(image),
+            "sources": inputs, "graph": graph, "entry": entry, "tests": tests, "sdk": selected["sdk"],
+            "target": target + "-windows" if winforms else target,
             "runtime": selected["runtime"].name, "tool_root_read_only": str(root), "tool": str(tool),
             "toolchain_sha256": digest(identity), "launcher": str(launcher), "launcher_sha256": LAUNCHER_PIN,
             "configuration": "Release", "package_mode": "EMPTY_OFFLINE_FEED",
-            "limits": {**limits(seconds), "output_limit": 131072, "encoding": "utf-8"}}
+            "limits": {**limits(seconds), "output_limit": 131072, "encoding": "utf-8"},
+            **({"gui_scenario": scenario} if scenario else {})}
 
 
 def run(ledger, scope, check, workspace):
     replica = Path(scope["replica"])
-    current = review(replica, scope["launcher"], [scope["entry"]], scope["tests"],
-                     scope["limits"]["max_seconds"], Path(scope["tool_root_read_only"]))
+    current = review(replica, scope["launcher"], [scope["entry"]], scope.get("gui_scenario", scope["tests"]),
+                     scope["limits"]["max_seconds"], Path(scope["tool_root_read_only"]),
+                     winforms=scope["kind"] == GUI_KIND)
     if any(scope.get(key) != value for key, value in current.items()):
         raise Blocked("SDK project verification scope changed")
     home, output, work = (workspace / name for name in ("home", "output", "work"))
@@ -214,13 +255,36 @@ def run(ledger, scope, check, workspace):
     if any(fingerprint(work / name) != info for name, info in scope["sources"].items()):
         raise Blocked("SDK build changed frozen source inputs")
     profile(False)
-    report = step("test", ["exec", "--fx-version", scope["runtime"], str(dll)])
+    scenario = scope.get("gui_scenario")
+    if scenario:
+        from .mxc_owned_gui import execute
+
+        report = execute(execution, dll, output, scenario, scope["runtime"])
+        steps["test"] = report.pop("receipt")
+    else:
+        report = step("test", ["exec", "--fx-version", scope["runtime"], str(dll)])
     expected = sorted("PASS " + name for name in scope["tests"])
     observed = sorted(report["stdout"].splitlines())
     if (any(fingerprint(work / name) != info for name, info in artifacts.items())
             or digest(snapshot(replica)) != scope["replica_sha256"]):
         raise Blocked("SDK build evidence or replica changed")
-    passed = report["exitCode"] == 0 and not report["stderr"] and observed == expected
+    gui = report.get("gui")
+    passed = report["exitCode"] == 0 and not report["stderr"] and (gui["passed"] if gui else observed == expected)
+    if gui and gui["scenes"]:
+        if not re.fullmatch(r"build-verifier-[0-9a-f]{32}", workspace.name):
+            raise Blocked("SDK GUI artifact owner is not an admitted build")
+        retained = ledger.local_directory("logs", create=True) / workspace.name.replace("build-verifier-", "gui-", 1)
+        check_path(retained)
+        retained.mkdir()
+        from .gui_verification import verified_image
+
+        for scene in gui["scenes"]:
+            image = scene["original"]
+            target = output / image["file"]
+            verified_image(target, image["sha256"])
+            target.rename(retained / target.name)
+        gui.update(artifact_dir=retained.name, replica_sha256=scope["replica_sha256"],
+                   scenario_sha256=digest(scenario), dll_sha256=artifacts[dll.relative_to(work).as_posix()]["sha256"])
     artifact_dir = None
     if passed:
         try:
@@ -245,8 +309,10 @@ def run(ledger, scope, check, workspace):
             if fingerprint(destination) != info:
                 raise Blocked("Retained SDK artifact hash did not match")
         artifact_dir = retained.name
-    return {**result, "result": "PASS" if passed else "FAIL", "reason": None if passed else "SDK_TEST_FAILED",
-            "artifacts": artifacts, "artifact_dir": artifact_dir, "tests": observed, "source_files_sha256": {
+    return {**result, "result": "PASS" if passed else "FAIL",
+            "reason": None if passed else "SDK_GUI_FAILED" if gui else "SDK_TEST_FAILED",
+            "artifacts": artifacts, "artifact_dir": artifact_dir, "tests": observed, "sdk_gui": gui,
+            "source_files_sha256": {
                 name: info["sha256"] for name, info in scope["sources"].items()}}
 
 
@@ -254,8 +320,9 @@ def run_session(ledger, manifest, replica, sources, run_id, check):
     from .owned_artifacts import cleanup, workspace
 
     frozen = manifest["build"]
-    current = review(replica, frozen["launcher"], [frozen["entry"]], frozen["tests"],
-                     frozen["limits"]["max_seconds"], Path(frozen["tool_root_read_only"]))
+    current = review(replica, frozen["launcher"], [frozen["entry"]], frozen.get("gui_scenario", frozen["tests"]),
+                     frozen["limits"]["max_seconds"], Path(frozen["tool_root_read_only"]),
+                     winforms=manifest["kind"] == GUI_KIND)
     if (any(current[key] != value for key, value in frozen.items() if key not in {"sources", "replica_sha256"})
             or {key: value for key, value in current["sources"].items() if key not in sources}
             != {key: value for key, value in frozen["sources"].items() if key not in sources}
@@ -275,12 +342,23 @@ def run_session(ledger, manifest, replica, sources, run_id, check):
     steps = evidence.get("steps", {})
     build_ok = steps.get("build", {}).get("exitCode") == 0
     observations = [{"file": frozen["entry"], "input": "BUILD", "expected": True, "actual": build_ok}]
-    observations.extend({"file": frozen["entry"], "input": name, "expected": True,
-                         "actual": "PASS " + name in evidence.get("tests", [])} for name in frozen["tests"])
+    gui = evidence.get("sdk_gui")
+    if gui:
+        if manifest.get("baseline_gui"):
+            gui["baseline"] = manifest["baseline_gui"]
+        observations.extend({"file": frozen["entry"], "input": scene["title"], "expected": scene["expected"],
+                             "actual": scene["observed"]} for scene in gui["scenes"])
+        observations.extend({"file": frozen["entry"], "input": item["title"], "expected": item["expected"],
+                             "actual": item["actual"]} for item in gui["checkpoints"])
+        observations.extend({"file": frozen["entry"], "input": scene["title"] + " / control bounds",
+                             "expected": True, "actual": scene["layout_inside_client"]} for scene in gui["scenes"])
+    elif manifest["kind"] == KIND:
+        observations.extend({"file": frozen["entry"], "input": name, "expected": True,
+                             "actual": "PASS " + name in evidence.get("tests", [])} for name in frozen["tests"])
     return {"verdict": verdict, "exit_code": next(reversed(steps.values()), {}).get("exitCode"),
-            "syntax": "PASS" if build_ok else "FAIL", "observations": observations, "runtime": KIND,
+            "syntax": "PASS" if build_ok else "FAIL", "observations": observations, "runtime": manifest["kind"],
             "runtime_manifest_sha256": digest(manifest), "job_active": evidence["job_active"],
             "boundary_observations": {"profile": "MXC", "network_policy": "OFF"},
             "artifacts": evidence.get("artifacts", {}), "artifact_dir": evidence.get("artifact_dir"),
             "build_steps": steps, "build_logs": evidence.get("logs", {}),
-            "cleanup": removal, "reason": evidence.get("reason")}
+            "cleanup": removal, "reason": evidence.get("reason"), "sdk_gui": gui}

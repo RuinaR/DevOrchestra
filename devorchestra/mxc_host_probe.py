@@ -70,7 +70,7 @@ def _args(child, *arguments):
 
 
 def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=512 * 1024 * 1024,
-             check=None, output_limit=256, encoding="ascii"):
+             check=None, output_limit=256, encoding="ascii", interact=None):
     import msvcrt
 
     api = _api()
@@ -93,6 +93,8 @@ def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=5
         if _account(api, job).active != 1 or api.ResumeThread(info.thread) != 1:
             raise Blocked("MXC probe ownership unverified")
         deadline = monotonic() + seconds
+        if interact is not None:
+            interact(api, job, deadline)
         if check is not None:
             while _account(api, job).active and monotonic() < deadline:
                 check()

@@ -147,7 +147,7 @@ def review(runner, project, manager_run, account, model, expires, *, session=Non
             f"\nReturn one JSON object mapping every exact approved filename to its full UTF-8 {language} text. "
             "Null input means approved creation. No deletion, move, tool request, or execution claims.")
         runtime = session.scope.get("runtime", {})
-        if language == "C#" and runtime.get("kind") != "mxc-dotnet-sdk-project-v1":
+        if language == "C#" and runtime.get("kind") == "mxc-dotnet-arithmetic-v1":
             from .csharp_sources import INSTRUCTION
 
             body["instructions"] += " " + INSTRUCTION
@@ -275,7 +275,8 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                 replacement = developer_batch.replacement(_text(completed), original,
                                                           csharp=approval["batch"]["formats"] == [".cs"],
                                                           sdk_project=bool(session and session.scope.get("runtime", {}).get(
-                                                              "kind") == "mxc-dotnet-sdk-project-v1"))
+                                                              "kind") in ("mxc-dotnet-sdk-project-v1",
+                                                                          "mxc-dotnet-winforms-project-v1")))
                 replica = Path(approval["replica"])
                 before = snapshot(replica)
                 if digest(before) != approval["replica_sha256"]:

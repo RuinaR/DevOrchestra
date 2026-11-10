@@ -62,6 +62,15 @@ def _prepare(runner, project, expires):
             or verifier.get("reviewer_sha256") != digest(reviewer)
             or final.get("verifier_sha256") != digest(verifier)):
         raise Blocked("A matching isolated build and test PASS is required")
+    if runtime["kind"] == "mxc-dotnet-winforms-project-v1":
+        from .mxc_owned_gui import verify_images
+
+        scenario = runtime["build"]["gui_scenario"]
+        evidence = verify_images(ledger, verifier.get("sdk_gui"), verifier["run_id"], scenario)
+        if (evidence["replica_sha256"] != developer["after_replica_sha256"]
+                or evidence["scenario_sha256"] != digest(scenario)
+                or evidence["dll_sha256"] not in {item["sha256"] for item in verifier["artifacts"].values()}):
+            raise Blocked("WinForms build and visual evidence are not bound to the Developer change")
     image = snapshot(replica)
     if digest(image) != developer["after_replica_sha256"] or not original_matches(source, frozen):
         raise Blocked("Original Git, worktree, or verified replica changed")

@@ -199,6 +199,12 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
                     or verifier.get("job_active") != 0 or not verifier.get("artifacts")
                     or any(verifier.get(key) != value for key, value in session.binding().items())):
                 raise Blocked("Final Manager requires the same approved MXC runtime receipt")
+            if runtime["kind"] == "mxc-dotnet-winforms-project-v1":
+                from .mxc_owned_gui import verify_images
+
+                visual = verify_images(ledger, verifier.get("sdk_gui"), verifier["run_id"],
+                                       runtime["build"]["gui_scenario"])
+                context["verifier"]["visual_sha256"] = [scene["original"]["sha256"] for scene in visual["scenes"]]
             context["verifier"].update(runtime=verifier["runtime"], artifacts=verifier["artifacts"],
                                        boundary_observations=verifier["boundary_observations"],
                                        observed_imports=verifier.get("observed_imports", []),
@@ -243,7 +249,8 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                   "scope_sha256": approved, "model": model, "source_sha256": developer["after_sha256"]}
         if session:
             fields.update(session.binding())
-        if phase == "verifier" and scope["backend"] in ("mxc-dotnet-arithmetic-v1", "mxc-dotnet-sdk-project-v1"):
+        if phase == "verifier" and scope["backend"] in ("mxc-dotnet-arithmetic-v1", "mxc-dotnet-sdk-project-v1",
+                                                        "mxc-dotnet-winforms-project-v1"):
             fields["cleanup_plan"] = {"workspace": "build-verifier-" + run_id, "classification": "AUTO_CLEAN"}
         started = False
 
@@ -280,7 +287,7 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                             from .mxc_dotnet import run_arithmetic
 
                             result.update(run_arithmetic(runner.ledger, scope["runtime"], replica, source, run_id, check))
-                        elif scope["runtime"]["kind"] == mxc_sdk_project.KIND:
+                        elif scope["runtime"]["kind"] in (mxc_sdk_project.KIND, mxc_sdk_project.GUI_KIND):
                             result.update(mxc_sdk_project.run_session(
                                 runner.ledger, scope["runtime"], replica, source, run_id, check))
                         else:

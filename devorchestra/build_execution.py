@@ -22,7 +22,7 @@ class BuildExecution:
         self.deadline = monotonic() + policy["max_seconds"]
         self.check = check
 
-    def step(self, name, arguments):
+    def step(self, name, arguments, *, interact=None):
         try:
             self.check()
             remaining = self.deadline - monotonic()
@@ -36,6 +36,7 @@ class BuildExecution:
             self.launcher, _args(self.tool, *arguments), self.work, scratch, self.environment,
             seconds=remaining, memory=self.policy["memory_bytes"], check=self.check,
             output_limit=self.policy["output_limit"], encoding=self.policy.get("encoding", "ascii"),
+            interact=interact,
         )
         receipt = {key: report[key] for key in ("exitCode", "job_active", "job_total")}
         for stream in ("stdout", "stderr"):

@@ -1635,6 +1635,12 @@ class CommandCenter:
                     ttk.Button(gallery, text="전후 비교 보기", command=lambda: open_image(
                         receipt, "전후 비교", receipt["comparison"],
                     )).grid(row=1, column=0, columnspan=3, pady=6)
+                if baseline := receipt.get("sdk_baseline"):
+                    prior = {"run_id": baseline["run_id"], "artifact_dir": baseline["evidence"]["artifact_dir"]}
+                    before = baseline["evidence"]["scenes"][-1]["original"]
+                    ttk.Button(gallery, text="변경 전 장면 보기", command=lambda: open_image(
+                        prior, "변경 전 장면", before,
+                    )).grid(row=1, column=0, columnspan=3, pady=6)
             except (Blocked, OSError, ValueError, KeyError, tk.TclError):
                 status.set(status.get() + "\n일부 이미지의 무결성 또는 표시를 확인할 수 없습니다.")
 

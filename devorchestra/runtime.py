@@ -523,7 +523,8 @@ class Runner:
         from pathlib import Path
         from . import mxc_dotnet, mxc_sdk_project
 
-        if kind not in (mxc_dotnet.KIND, mxc_dotnet.ONBOARDED_KIND, mxc_sdk_project.KIND):
+        sdk_kinds = (mxc_sdk_project.KIND, mxc_sdk_project.GUI_KIND)
+        if kind not in (mxc_dotnet.KIND, mxc_dotnet.ONBOARDED_KIND, *sdk_kinds):
             raise Blocked("Build tool adapter is not supported")
         catalog = Catalog(self.ledger).read()
         setup = catalog["setups"].get(project_id)
@@ -539,8 +540,9 @@ class Runner:
         replica = Path(setup["replica"])
         onboarded = kind == mxc_dotnet.ONBOARDED_KIND
         tool_root = registered(self.ledger, project_id, replica)
-        scope = (mxc_sdk_project.review(replica, launcher, sources, vectors, seconds, tool_root)
-                 if kind == mxc_sdk_project.KIND else mxc_dotnet.review(
+        scope = (mxc_sdk_project.review(replica, launcher, sources, vectors, seconds, tool_root,
+                                       winforms=kind == mxc_sdk_project.GUI_KIND)
+                 if kind in sdk_kinds else mxc_dotnet.review(
                      replica, launcher, sources, vectors, seconds, tool_root, arithmetic=onboarded, nested=onboarded))
         if onboarded:
             from .replica_readiness import bind
@@ -582,7 +584,7 @@ class Runner:
             scratch.mkdir()
             identity = scratch.stat().st_ino
             try:
-                adapter = mxc_sdk_project if kind == mxc_sdk_project.KIND else mxc_dotnet
+                adapter = mxc_sdk_project if kind in (mxc_sdk_project.KIND, mxc_sdk_project.GUI_KIND) else mxc_dotnet
                 evidence = adapter.run(self.ledger, scope, check, workspace=scratch)
             except OwnedMxcStopped as error:
                 evidence = {"result": "NOT_VERIFIED", "reason": str(error), "job_active": 0}
@@ -630,11 +632,19 @@ class Runner:
 
         if "read-receipt" not in ROLES.get(role, ()):
             raise Blocked("GUI evidence access denied for this role")
-        return next((event for event in reversed(self.ledger.read())
-                     if event["project_id"] == project_id and (
+        receipt = next((event for event in reversed(self.ledger.read())
+                     if event.get("project_id") == project_id and (
                          event["kind"] in ("gui_validation_intent", "gui_validation_result")
                          or event["kind"] == "subscription_cycle_result" and "provenance" in event
+                         or event["kind"] in ("build_verifier_result", "subscription_cycle_result")
+                         and event.get("sdk_gui")
                      )), None)
+        if receipt and (visual := receipt.get("sdk_gui")):
+            return {**receipt, "result": receipt.get("verdict", receipt.get("result")),
+                    "exit_code": receipt.get("exit_code", receipt.get("steps", {}).get("test", {}).get("exitCode")),
+                    "artifact_dir": visual["artifact_dir"], "scenes": visual["scenes"],
+                    "sdk_baseline": visual.get("baseline")}
+        return receipt
 
     @staticmethod
     def _gui_session_scope(scope):

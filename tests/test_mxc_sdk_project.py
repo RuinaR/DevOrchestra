@@ -2,6 +2,7 @@ import unittest
 
 from devorchestra.lease import Blocked
 from devorchestra.mxc_sdk_project import _project
+from devorchestra.mxc_owned_gui import validate
 
 
 class SdkProjectTests(unittest.TestCase):
@@ -21,3 +22,25 @@ class SdkProjectTests(unittest.TestCase):
                          '<PropertyGroup><BaseOutputPath>C:/output</BaseOutputPath></PropertyGroup>'):
             with self.subTest(fragment=fragment), self.assertRaises(Blocked):
                 self.project(fragment)
+
+    def test_winforms_allows_only_literal_text_resources(self):
+        project = ('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+                   '<TargetFramework>net7.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms>'
+                   '<OutputType>WinExe</OutputType></PropertyGroup><ItemGroup>'
+                   '<EmbeddedResource Include="Resources/Caption.txt"/></ItemGroup></Project>')
+        self.assertEqual(["app/Resources/Caption.txt"],
+                         _project(project.encode(), "app/App.csproj", "net7.0-windows", winforms=True)["resources"])
+        with self.assertRaises(Blocked):
+            _project(project.replace("Resources/Caption.txt", "../outside.txt").encode(),
+                     "app/App.csproj", "net7.0-windows", winforms=True)
+
+    def test_gui_checkpoint_targets_are_limited(self):
+        scenario = {"controls": {name: name for name in ("status", "open", "apply", "entry", "list")},
+                    "scenes": [{"title": "Ready", "expected": "Ready", "steps": [
+                        {"op": "expect-text", "target": "root", "value": "Owned"}]},
+                        {"title": "Search", "expected": "Found", "steps": [
+                            {"op": "expect-selection", "target": "list", "value": 20}]}]}
+        self.assertEqual(scenario, validate(scenario))
+        scenario["scenes"][1]["steps"][0]["target"] = "entry"
+        with self.assertRaises(Blocked):
+            validate(scenario)

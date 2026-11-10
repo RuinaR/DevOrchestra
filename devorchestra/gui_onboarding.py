@@ -39,13 +39,13 @@ def show_panel(center, initial):
     actions = ttk.Frame(panel)
     actions.pack(fill="x")
     ttk.Label(panel, text="오프라인 .NET 검증").pack(anchor="w", pady=(6, 0))
-    build_type = ttk.Combobox(panel, state="readonly", values=("SDK 프로젝트", "기존 Roslyn 계약"))
+    build_type = ttk.Combobox(panel, state="readonly", values=("SDK 프로젝트", "기존 Roslyn 계약", "WinForms SDK"))
     build_type.current(0)
     build_type.pack(anchor="w")
     ttk.Label(panel, text="SDK 테스트 .csproj 경로 또는 Roslyn C# 상대 경로 두 개").pack(anchor="w")
     build_paths = ttk.Entry(panel)
     build_paths.pack(fill="x")
-    ttk.Label(panel, text='SDK 테스트 이름 ["example"] 또는 Roslyn 기대 벡터 [[9, 31]]').pack(anchor="w")
+    ttk.Label(panel, text='SDK 테스트 이름, Roslyn 기대 벡터 또는 WinForms 장면 JSON').pack(anchor="w")
     build_vectors = ttk.Entry(panel)
     build_vectors.pack(fill="x")
     verification = ttk.Frame(panel)
@@ -104,14 +104,15 @@ def show_panel(center, initial):
         if mode == "build-review":
             try:
                 from .mxc_dotnet import ONBOARDED_KIND
-                from .mxc_sdk_project import KIND
+                from .mxc_sdk_project import GUI_KIND, KIND
 
                 launcher = which("codex.exe")
                 if not launcher:
                     raise ValueError
                 names = [name.strip() for name in build_input[0].split(",") if name.strip()]
-                sdk = build_input[2] == 0
-                build_args = (project, KIND if sdk else ONBOARDED_KIND, launcher, names, json.loads(build_input[1]),
+                sdk = build_input[2] != 1
+                kind = (KIND, ONBOARDED_KIND, GUI_KIND)[build_input[2]]
+                build_args = (project, kind, launcher, names, json.loads(build_input[1]),
                               90 if sdk else 20, int(time()) + 240)
             except ValueError:
                 display("Codex 실행기, 프로젝트 또는 소스 경로, 기대 결과 JSON을 확인하세요.")
@@ -144,7 +145,7 @@ def show_panel(center, initial):
                     value = runner.build_verifier_scope(*build_args)
                 elif mode == "build":
                     value = runner.build_verify(*build_args, build_digest, cancelled=cancellation.is_set)
-                    if build_input[2] != 0:
+                    if build_input[2] == 1:
                         value = project_onboarding.status(runner.ledger, project)
                 else:
                     value = project_onboarding.create(runner, project, path, include, approval)
@@ -174,11 +175,13 @@ def show_panel(center, initial):
                 display(review_text(value))
             elif mode == "build-review":
                 build_approved = (build_input, build_args, digest(value))
-                if build_input[2] == 0:
+                if build_input[2] != 1:
                     display("\n".join(("실행 승인 대기 · 오프라인 SDK 프로젝트",
                                        f'SDK {value["sdk"]} · 런타임 {value["runtime"]}',
                                        "프로젝트 · " + ", ".join(value["graph"]),
-                                       "테스트 · " + ", ".join(value["tests"]),
+                                       "테스트 · " + ", ".join(scene["title"] for scene in
+                                                               value["gui_scenario"]["scenes"])
+                                       if "gui_scenario" in value else "테스트 · " + ", ".join(value["tests"]),
                                        "외부 패키지 없음 · 네트워크 OFF")))
                     return
                 display("\n".join((
@@ -192,11 +195,13 @@ def show_panel(center, initial):
                     "네트워크 OFF · 패키지 복원 및 프로젝트 빌드 스크립트 없음",
                     f'시간 {value["limits"]["max_seconds"]}초 · 메모리 {value["limits"]["memory_bytes"]}B',
                 )))
-            elif mode == "build" and build_input[2] == 0:
+            elif mode == "build" and build_input[2] != 1:
                 build_approved = None
                 display("\n".join((f'{value["result"]} · {value.get("reason") or "빌드와 테스트 확인 완료"}',
                                     f'SDK {value["scope"]["sdk"]} · 소유 Job 활성 {value["job_active"]}',
                                     *(str(item) for item in value.get("tests", [])),
+                                    *(f"{scene['title']} · {scene['observed']} / {scene['expected']}"
+                                      for scene in (value.get("sdk_gui") or {}).get("scenes", [])),
                                     *(f'{name} · 종료 {step["exitCode"]}'
                                       for name, step in value.get("steps", {}).items()),
                                     f'정리 · {value["cleanup"]["status"]}',
