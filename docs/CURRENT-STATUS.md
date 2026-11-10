@@ -1,5 +1,7 @@
 # 현재 상태
 
+**P2.95 통합 승인 실측.** 독립 Git 프로젝트에서 한 승인으로 실제 Manager, Developer, Reviewer, 고정 Python Verifier, 최종 Manager를 실행했다. 첫 Reviewer가 의도적으로 결함 있는 변경을 반려했고, 같은 범위에서 Developer 재작업 한 번을 거쳐 Verifier PASS와 최종 COMPLETED를 기록했다. 제공자 보고 사용량은 10,501 토큰이다. 먼저 수행한 별도 세션의 최종 모델 답변은 증거 계약 위반으로 차단했다. GUI 영수증은 이 Python 세션에 연결하지 않는다.
+
 **P2.94 실제 구독 순차 사이클.** 독립 Git 프로젝트에서 실제 Manager, Developer, Reviewer, 최종 Manager가 응답했다. Controller가 `clamp.py` 한 파일을 변경하고, 결정적 하네스가 정수 테스트 세 건을 실행해 PASS를 기록했다. 최종 Manager가 해당 검증 영수증을 참조해 COMPLETED를 반환했다. 생성 코드의 일반 런타임, GUI 증거의 동일 사이클 통합, 자동 재작업과 통합 승인은 미연결이다.
 
 **P2.93 승인된 한 파일의 실제 구독 Developer 수정.** P2.92의 실제 계획으로 등록 복제본의 \`sample.txt\` 변경을 확인했다. 별도 합성 Git 프로젝트에서는 실제 Manager 계획과 구독 Developer를 순차 실행해 \`greeting.py\` 한 파일을 변경했다. Git 변경 목록, Python 컴파일 및 AST 인수 검사를 통과했다. 모델은 도구 없이 교체안을 반환했고 Controller가 승인 파일에 적용했다. SDK 실행, 모델 기반 Reviewer, 일반 빌드·셸 실행은 계속 차단한다. 보호된 diff는 후속 검토용으로 로컬에 남긴다.

@@ -62,7 +62,7 @@ def _head(replica):
     return head
 
 
-def review(runner, project, manager_run, account, model, expires):
+def review(runner, project, manager_run, account, model, expires, *, session=None):
     from .runtime import require_admission
 
     if type(expires) is not int or not time() < expires <= time() + 300:
@@ -72,7 +72,10 @@ def review(runner, project, manager_run, account, model, expires):
     require_admission(events)
     if any(event["kind"] == "subscription_developer_result" and event["project_id"] == project
            and event["manager_run_id"] == manager_run and event["outcome"] == "COMPLETED" for event in events):
-        raise Blocked("This Manager plan already has a completed Developer edit")
+        if not session or not session.rework:
+            raise Blocked("This Manager plan already has a completed Developer edit")
+        if not any(event == session.rework["receipt"] for event in events):
+            raise Blocked("Developer rework evidence has changed")
     plan = read_plan(ledger, project, manager_run)
     receipt = next(event for event in reversed(events) if event["kind"] == "native_manager_result"
                    and event["project_id"] == project and event["run_id"] == manager_run)
@@ -119,6 +122,13 @@ def review(runner, project, manager_run, account, model, expires):
     budget = {key: min(data["budget"][key], role["budget"][key], catalog["global_budget"][key])
               for key in ("seconds", "tokens")}
     budget.update(seconds=min(60, budget["seconds"]), cost_microunits=0)
+    if session:
+        session.limit(budget, project, "developer")
+        if path.name != session.scope["file"]:
+            raise Blocked("Manager plan is outside the session write scope")
+        if session.rework:
+            body["input"].append({"role": "user", "content": canonical(
+                {"previous_failure": session.rework["feedback"], "instruction": "Correct this failure only."})})
     if len(canonical(body).encode("utf-8")) > min(32768, budget["tokens"]):
         raise Blocked("Developer input exceeds the local request budget")
     approval = {"contract": "subscription-controlled-edit-v1", "backend": BACKEND, "role": "Developer",
@@ -132,6 +142,8 @@ def review(runner, project, manager_run, account, model, expires):
                 "instruction_layers": [{"layer": name, "version": item["version"], "sha256": item["sha256"]}
                                        for name, item in zip(parts, instructions)],
                 "request_sha256": digest(body)}
+    if session:
+        approval.update(session.binding())
     return approval, body, original
 
 
@@ -154,14 +166,14 @@ def _replacement(completed, name):
         raise Blocked("Developer response did not contain a valid replacement for the approved file") from None
 
 
-def run(runner, project, manager_run, account, model, expires, approved, cancelled=lambda: False):
+def run(runner, project, manager_run, account, model, expires, approved, cancelled=lambda: False, *, session=None):
     from .runtime import require_admission
     from .shutdown import HELD, shutdown_state
 
-    with execution_slot() as abandoned:
+    with (session.slot() if session else execution_slot()) as abandoned:
         events, fence = runner._idle_diagnostic(abandoned)
         args = runner, project, manager_run, account, model, expires
-        approval, body, original = review(*args)
+        approval, body, original = review(*args, session=session)
         if digest(approval) != approved or fence != approval["ledger_head"]:
             raise Blocked("Developer approval changed")
         deadline = monotonic() + min(approval["budget"]["seconds"], expires - time())
@@ -175,6 +187,8 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                   "git_head": approval["git_head"], "project_revision": approval["project_revision"],
                   "baseline_sha256": approval["baseline_sha256"],
                   "file": approval["file"], "before_sha256": approval["before_sha256"]}
+        if session:
+            fields.update(session.binding())
         started, applied = False, False
         result = {**fields, "kind": "subscription_developer_result", "usage": "UNKNOWN",
                   "response_completed": False, "owned_tree": "DRAINED", "owned_processes_started": 0}
@@ -189,7 +203,7 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
         def before_send():
             nonlocal count, fence, started
             check()
-            if digest(review(*args)[0]) != approved:
+            if digest(review(*args, session=session)[0]) != approved:
                 raise Blocked("Developer scope changed before dispatch")
             count, fence = runner.ledger.append(count, fence, {**fields, "kind": "subscription_developer_intent"},
                                                  admission=require_admission)

@@ -13,7 +13,7 @@ from .development import session_view, usage_totals, validate_proposal
 from .event_audit import Binding, FIXTURE_USAGE, Packet
 from .event_journal import EventJournal, OPEN_ROLE_EVENTS
 
-from .lease import Blocked, SlotBlocked, execution_slot
+from .lease import Blocked, SlotBlocked, current_development_session, execution_slot
 from .ledger import canonical, check_path, digest
 from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
@@ -102,7 +102,8 @@ def last_run(events):
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
                                                  "native_inspection_", "native_manager_", "supervised_",
                                                  "gui_validation_", "gui_build_", "gui_session_",
-                                                 "subscription_developer_", "subscription_cycle_"))]
+                                                 "subscription_developer_", "subscription_cycle_",
+                                                 "subscription_session_"))]
     return []
 
 
@@ -147,6 +148,10 @@ def require_admission(events, *, allow_supervised=False):
         raise Blocked("Diagnostic process ownership requires recovery")
     if native_unresolved(events):
         raise Blocked("Native process ownership requires recovery")
+    pending = {event["run_id"] for event in events if event["kind"] == "subscription_session_started"}
+    pending.difference_update(event["run_id"] for event in events if event["kind"] == "subscription_session_ended")
+    if pending - {current_development_session()}:
+        raise Blocked("An interrupted subscription session requires owner recovery")
     if pending_budget_stop(events):
         raise Blocked("Unsettled budget stop requires a shutdown checkpoint")
     if pending_question(events):

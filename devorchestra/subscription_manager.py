@@ -31,7 +31,7 @@ def read_plan(ledger, project, run_id):
     return parse_role_output(ROLE, canonical(plan).encode("utf-8"))
 
 
-def review(runner, project, account, model, expires):
+def review(runner, project, account, model, expires, *, session=None):
     from .runtime import require_admission
 
     if type(expires) is not int or not time() < expires <= time() + 300:
@@ -62,12 +62,16 @@ def review(runner, project, account, model, expires):
             "input": [{"role": "user", "content": canonical(context)}]}
     budget = {**baseline["budget_ceiling"], "seconds": min(60, baseline["budget_ceiling"]["seconds"]),
               "cost_microunits": 0}
+    if session:
+        session.limit(budget, project, "manager-planning")
     if len(canonical(body).encode("utf-8")) > min(32768, budget["tokens"]):
         raise Blocked("Subscription Manager input exceeds the local request budget")
     approval = {"contract": "subscription-manager-v1", "project_id": project, "account": account, "model": model,
                 "backend": BACKEND, "role": "Manager", "generation": len(events) + 1, "ledger_head": head,
                 "baseline_sha256": digest(baseline), "request_sha256": digest(body), "instruction_layers": layers,
                 "budget": budget, "tools": [], "expires": expires}
+    if session:
+        approval.update(session.binding())
     return approval, body, baseline
 
 
@@ -93,13 +97,13 @@ def _text(completed):
     return "".join(text).encode("utf-8")
 
 
-def run(runner, project, account, model, expires, approved, cancelled=lambda: False):
+def run(runner, project, account, model, expires, approved, cancelled=lambda: False, *, session=None):
     from .runtime import require_admission
     from .shutdown import HELD, shutdown_state
 
-    with execution_slot() as abandoned:
+    with (session.slot() if session else execution_slot()) as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
-        approval, body, baseline = review(runner, project, account, model, expires)
+        approval, body, baseline = review(runner, project, account, model, expires, session=session)
         if approval["ledger_head"] != head or digest(approval) != approved:
             raise Blocked("Subscription Manager approval changed")
         deadline = monotonic() + min(approval["budget"]["seconds"], expires - time())
@@ -120,6 +124,8 @@ def run(runner, project, account, model, expires, approved, cancelled=lambda: Fa
                   "owner_review_sha256": approved, "request_hash": approval["request_sha256"],
                   "instruction_layers": approval["instruction_layers"], "budget": approval["budget"],
                   "authentication": "CHATGPT_OAUTH_SUBSCRIPTION"}
+        if session:
+            fields.update(session.binding())
         count, fence = len(events), head
         started = False
 

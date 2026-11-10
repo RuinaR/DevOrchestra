@@ -123,6 +123,26 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         subscription_cycle = {"phase": cycle_event["phase"], "run_id": cycle_event["run_id"],
                               "status": (cycle_event.get("decision", cycle_event.get("verdict", outcome))
                                          if outcome == "COMPLETED" else outcome)}
+    unified = None
+    unified_start = next((event for event in reversed(project_events)
+                          if event["kind"] == "subscription_session_started"), None)
+    if unified_start:
+        tracked = [event for event in project_events
+                   if event.get("development_session_id") == unified_start["run_id"]]
+        terminal = next((event for event in tracked if event["kind"] == "subscription_session_ended"), None)
+        role_events = [event for event in tracked if event.get("role") and event["kind"].endswith("_result")]
+        attempts = sum(event["kind"] == "subscription_developer_intent" for event in tracked)
+        used = sum(event["usage"] for event in role_events if type(event.get("usage")) is int)
+        unified_role = next((event for event in reversed(tracked) if event.get("role")), {})
+        phase = unified_role.get("phase", unified_role.get("role"))
+        next_role = {"Manager": "Developer", "Developer": "Reviewer",
+                     "reviewer": "Verifier", "verifier": "Manager"}.get(phase)
+        if unified_role.get("decision") == "REWORK" or unified_role.get("verdict") == "FAIL":
+            next_role = "Developer"
+        unified = {"run_id": unified_start["run_id"], "status": terminal["outcome"] if terminal else "RUNNING_OR_UNSETTLED",
+                   "current": phase, "next": None if terminal else next_role,
+                   "reworks": max(0, attempts - 1), "reported_tokens": used,
+                   "remaining_tokens": max(0, unified_start["scope"]["tokens"] - used)}
     if selected_question:
         next_action = "ANSWER_QUESTION"
     elif not registration:
@@ -158,6 +178,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
             "pending_requirements_count": len(pending_requirements) if start or session else 0,
             "manager_status": manager_status,
             "subscription_cycle": subscription_cycle,
+            "subscription_session": unified,
             "next_action": next_action,
         },
         "shutdown": shutdown,

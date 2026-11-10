@@ -588,6 +588,11 @@ class CommandCenter:
             goal += f"\n자동 Manager · {manager_status}{cycle_label}"
             if subscription := workflow.get("subscription_cycle"):
                 goal += f"\n구독 개발 검증 · {subscription['phase']} · {subscription['status']}"
+            if unified := workflow.get("subscription_session"):
+                goal += (f"\n통합 개발 · {unified['status']} · {unified['current'] or '준비'}"
+                         f" · 다음 {unified['next'] or '없음'}"
+                         f"\n재작업 {unified['reworks']}회 · 보고 사용량 {unified['reported_tokens']} 토큰"
+                         f" · 남은 예산 {unified['remaining_tokens']} 토큰")
         session = view["development"]
         if session and getattr(self, "details_visible", False):
             start, end = session["start"], session["end"]
@@ -1616,12 +1621,92 @@ class CommandCenter:
 
         button = ttk.Button(panel, text="요청 검토 및 실행", command=start)
         button.pack(side="left", pady=6)
+        ttk.Button(panel, text="통합 개발 세션",
+                   command=lambda: self.subscription_development(project_id, picker.get(), baseline)).pack(anchor="w")
         if latest and latest.get("task_candidate_status") == "OWNER_SCOPE_REQUIRED":
             ttk.Button(panel, text="Developer 범위 검토",
                        command=lambda: start(latest["run_id"])).pack(anchor="w")
         ttk.Button(panel, text="닫기 / 취소", command=close).pack(side="right", pady=6)
         panel.protocol("WM_DELETE_WINDOW", close)
         panel.bind("<Escape>", lambda _event: close())
+
+    def subscription_development(self, project_id, account, baseline):
+        from . import subscription_session
+
+        panel = self.panel()
+        panel.title("구독 개발 세션 · 승인 한 번")
+        status = tk.StringVar(value="승인할 Python 검증 벡터와 전체 한도를 지정하세요.")
+        ttk.Label(panel, textvariable=status, wraplength=520).pack(fill="x", pady=8)
+        vectors = self.editor_box(panel, height=8)
+        vectors.insert("1.0", json.dumps({"function": "", "acceptance": baseline["acceptance"], "vectors": []},
+                                        ensure_ascii=False, indent=2))
+        row = ttk.Frame(panel)
+        row.pack(fill="x")
+        values = []
+        for name, default in (("초", 120), ("토큰", 12000), ("재작업", 2)):
+            ttk.Label(row, text=name).pack(side="left", padx=4)
+            field = ttk.Entry(row, width=8)
+            field.insert(0, str(default))
+            field.pack(side="left")
+            values.append(field)
+        cancellation = Event()
+        future = None
+
+        def close():
+            if future is not None and not future.done():
+                cancellation.set()
+                status.set("취소 요청됨 · 연결 및 자원 정리 대기")
+            else:
+                panel.destroy()
+
+        def start():
+            nonlocal future
+            try:
+                spec = json.loads(vectors.get("1.0", "end"))
+                seconds, tokens, reworks = (int(field.get()) for field in values)
+                fields = self.controller, project_id, account, int(time()) + 300, seconds, tokens, reworks, spec
+                scope = subscription_session.review(*fields)
+            except (Blocked, ValueError, OSError, sqlite3.Error) as error:
+                status.set(str(error))
+                return
+            if not self.confirm("통합 개발 세션 승인",
+                                f"{project_id} · {scope['file']} · {seconds}초 · {tokens} 토큰\n"
+                                f"목표: {scope['goal']}\n"
+                                f"복제본 {scope['replica']}\n재작업 최대 {reworks}회 · 고정 Python 벡터\n"
+                                "승인된 문맥과 소스 한 파일을 OpenAI에 전송합니다. 셸·GUI 실행은 포함되지 않습니다.",
+                                parent=panel):
+                return
+            future = Future()
+            cancellation.clear()
+            button.configure(state="disabled")
+            status.set("세션 실행 중 · 역할별 기록은 개발 상세 화면에서 확인")
+
+            def worker():
+                try:
+                    future.set_result(subscription_session.run(*fields, digest(scope), cancellation.is_set))
+                except Exception as error:
+                    future.set_exception(error)
+
+            def poll():
+                if not future.done():
+                    panel.after(150, poll)
+                    return
+                button.configure(state="normal")
+                if future.exception() is not None:
+                    status.set(str(future.exception()) if isinstance(future.exception(), Blocked)
+                               else "세션 실행을 확인할 수 없습니다.")
+                    return
+                result = future.result()
+                status.set(f"{result['outcome']} · 재작업 {result['reworks']}회 · "
+                           f"{result['used_reported_tokens']} 토큰\n{result['reason'] or ''}")
+
+            Thread(target=worker, daemon=False).start()
+            panel.after(150, poll)
+
+        button = ttk.Button(panel, text="세션 검토 및 시작", command=start)
+        button.pack(side="left", pady=6)
+        ttk.Button(panel, text="닫기 / 취소", command=close).pack(side="right", pady=6)
+        panel.protocol("WM_DELETE_WINDOW", close)
 
     def subscription_sign_in(self, panel, project_id, status, store, registrations):
         import os

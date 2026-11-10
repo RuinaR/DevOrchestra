@@ -57,6 +57,18 @@ def main():
     rework = commands.add_parser("cycle-rework", help="Read protected rework evidence locally")
     rework.add_argument("--project", required=True)
     rework.add_argument("--developer-run", required=True)
+    unified = commands.add_parser("subscription-session", help="Review or run one approved subscription development session")
+    unified.add_argument("--project", required=True)
+    unified.add_argument("--account", required=True)
+    unified.add_argument("--vectors", type=json.loads, required=True)
+    unified.add_argument("--seconds", type=int, required=True)
+    unified.add_argument("--tokens", type=int, required=True)
+    unified.add_argument("--reworks", type=int, default=2)
+    unified.add_argument("--expires", type=int, required=True)
+    unified.add_argument("--approve", metavar="REVIEW_SHA256")
+    unified_recover = commands.add_parser("subscription-session-recover", help="Close an interrupted session without replay")
+    unified_recover.add_argument("--project", required=True)
+    unified_recover.add_argument("--run", required=True)
     mxc_host = commands.add_parser("manager-mxc-offline", help="Measure MXC files and App Server stdio without login")
     for option in ("launcher", "launcher-sha256", "candidate", "candidate-sha256", "powershell-sha256"):
         mxc_host.add_argument("--" + option, required=True)
@@ -120,6 +132,23 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "subscription-session-recover":
+            from .subscription_session import recover
+
+            print(canonical(recover(Runner(ledger), args.project, args.run)))
+            return
+        if args.action == "subscription-session":
+            from . import subscription_session
+
+            fields = (Runner(ledger), args.project, args.account, args.expires, args.seconds, args.tokens,
+                      args.reworks, args.vectors)
+            if args.approve is None:
+                scope = subscription_session.review(*fields)
+                print(canonical({"review": scope, "review_sha256": digest(scope)}))
+                return
+            receipt = subscription_session.run(*fields, args.approve)
+            print(canonical(receipt))
+            return 0 if receipt["outcome"] == "COMPLETED" else 2
         if args.action == "cycle-rework":
             from .subscription_cycle import rework_context
 

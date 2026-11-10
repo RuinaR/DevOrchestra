@@ -9,6 +9,29 @@ MUTEX_NAME = r"Global\DevOrchestra.P1.Execution.v1"
 _thread_slot = local()
 
 
+@contextmanager
+def held_execution_slot():
+    """A sequential phase may borrow its enclosing Controller session's slot."""
+    if not getattr(_thread_slot, "owned", False):
+        raise Blocked("Development session does not own the execution slot")
+    yield False
+
+
+def current_development_session():
+    return getattr(_thread_slot, "development_session", None)
+
+
+@contextmanager
+def development_session_scope(identifier):
+    if not getattr(_thread_slot, "owned", False) or current_development_session() is not None:
+        raise Blocked("Development session ownership is unavailable")
+    _thread_slot.development_session = identifier
+    try:
+        yield
+    finally:
+        del _thread_slot.development_session
+
+
 class Blocked(RuntimeError):
     pass
 
