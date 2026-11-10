@@ -146,9 +146,10 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
                     or set(spec.get("files", {})) != set(source)
                     or digest(spec) != session.scope["vectors_sha256"]):
                 raise Blocked("Batch verification is outside the session scope")
-            for item in spec["files"].values():
-                validate_vectors(item, baseline["acceptance"])
             runtime = session.scope.get("runtime")
+            if session.scope["batch"]["formats"] != [".cs"]:
+                for item in spec["files"].values():
+                    validate_vectors(item, baseline["acceptance"])
             return ({**scope, "backend": runtime["kind"] if runtime else "fixed-python-vectors-v1",
                      "runtime": runtime, "batch": True, "vectors_sha256": digest(spec)},
                     None, source, replica, developer)
@@ -235,6 +236,8 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                   "scope_sha256": approved, "model": model, "source_sha256": developer["after_sha256"]}
         if session:
             fields.update(session.binding())
+        if phase == "verifier" and scope["backend"] == "mxc-dotnet-arithmetic-v1":
+            fields["cleanup_plan"] = {"workspace": "build-verifier-" + run_id, "classification": "AUTO_CLEAN"}
         started = False
 
         def check():
@@ -264,10 +267,15 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                                                                  run_id, check, cancelled, scope["budget"]["seconds"]))
                         result.update(harness=subscription_gui.TOOL, syntax="NOT_APPLICABLE", owned_processes_started=None)
                     elif scope.get("runtime"):
-                        from . import mxc_python
+                        from . import csharp_sources, mxc_python
 
-                        result.update(mxc_python.run(runner.ledger, scope["runtime"], source,
-                                                     spec["files"], check, scope["budget"]["seconds"]))
+                        if scope["runtime"]["kind"] == csharp_sources.KIND:
+                            from .mxc_dotnet import run_arithmetic
+
+                            result.update(run_arithmetic(runner.ledger, scope["runtime"], replica, source, run_id, check))
+                        else:
+                            result.update(mxc_python.run(runner.ledger, scope["runtime"], source,
+                                                         spec["files"], check, scope["budget"]["seconds"]))
                     elif scope.get("batch"):
                         checks = {name: run_vectors(data, spec["files"][name]) for name, data in source.items()}
                         passed = all(item["verdict"] == "PASS" for item in checks.values())

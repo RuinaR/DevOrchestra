@@ -34,7 +34,7 @@ CLI에서는 `python -B -m devorchestra gui-verify --project fixture-a`로 범�
 
 ### 개발 환경과 산출물 점검
 
-등록 프로젝트의 개발 도구 요구사항은 `python -B -m devorchestra environment-review --project <ID>`로 확인합니다. 이 명령은 복제본을 실행하지 않고 소스·매니페스트 표식을 조사합니다. .NET 콘솔 Verifier는 루트 `global.json`의 지원되는 정책을 읽고 설치된 SDK·런타임·참조 팩을 고른 뒤 신원을 승인에 묶습니다. 온라인 설치와 프로젝트 빌드 스크립트 실행은 현재 승인 대상 밖입니다.
+등록 프로젝트의 개발 도구 요구사항은 `python -B -m devorchestra environment-review --project <ID>`로 확인합니다. .NET 콘솔 Verifier는 루트 `global.json`의 정책과 SDK 신원을 승인에 묶습니다. 정확한 안정 버전이 필요한 프로젝트는 `sdk-install --project <ID> --launcher <CODEX_EXE> --expires <UNIX_SECONDS>`로 Microsoft ZIP 설치 범위를 검토하고, 동일한 인자에 `--approve <SHA256>`를 추가해 설치할 수 있습니다. 설치 스크립트와 일반 MSBuild는 이 범위 밖입니다.
 
 `python -B -m devorchestra artifact-review --retain 2`는 최근 로컬 릴리스와 기존 임시 자료를 분류합니다. 빌드 Verifier는 작업 전용 임시 폴더를 원장에 기록하고 소유 Job을 회수한 후 정리합니다.
 

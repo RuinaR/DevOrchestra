@@ -141,10 +141,15 @@ def review(runner, project, manager_run, account, model, expires, *, session=Non
                 {"plan": plan, "files": {name: value.decode("utf-8") if value is not None else None
                                          for name, value in original.items()}})}]}
     if batch:
+        language = "C#" if batch["formats"] == [".cs"] else "Python"
         body["instructions"] = "\n\n".join(item["text"] for item in instructions) + (
-            "\nReturn one JSON object mapping every exact approved filename to its full UTF-8 Python text. "
+            f"\nReturn one JSON object mapping every exact approved filename to its full UTF-8 {language} text. "
             "Null input means approved creation. No deletion, move, tool request, or execution claims.")
         runtime = session.scope.get("runtime", {})
+        if language == "C#":
+            from .csharp_sources import INSTRUCTION
+
+            body["instructions"] += " " + INSTRUCTION
         if "imports" in runtime:
             body["instructions"] += (
                 " Use only the approved local from-imports and direct unary calls. "
@@ -261,7 +266,8 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                 if usage["total_tokens"] > approval["budget"]["tokens"]:
                     raise Blocked("Developer reported usage exceeds the approved budget")
             if "batch" in approval:
-                replacement = developer_batch.replacement(_text(completed), original)
+                replacement = developer_batch.replacement(_text(completed), original,
+                                                          csharp=approval["batch"]["formats"] == [".cs"])
                 replica = Path(approval["replica"])
                 before = snapshot(replica)
                 if digest(before) != approval["replica_sha256"]:

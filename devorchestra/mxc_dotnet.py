@@ -63,8 +63,8 @@ CALCULATION = b"""static class Calculation {
 """
 
 
-def _toolchain(replica):
-    root = _known_folder(0x26) / "dotnet"
+def _toolchain(replica, root=None):
+    root = root or _known_folder(0x26) / "dotnet"
     selected = select(root, replica)
     compiler = selected["compiler"]
     refs = selected["ref_pack"] / "ref" / selected["target"]
@@ -87,7 +87,7 @@ def _toolchain(replica):
     return root, tool, compiler / "csc.dll", libraries, identity, selected
 
 
-def review(replica, launcher, source_names, vectors, seconds):
+def review(replica, launcher, source_names, vectors, seconds, tool_root=None, *, arithmetic=False):
     if (type(source_names) is not list or len(source_names) != 2
             or any(type(name) is not str or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}\.cs", name)
                    for name in source_names)
@@ -103,7 +103,13 @@ def review(replica, launcher, source_names, vectors, seconds):
            for path in image["files"]):
         raise Blocked("Project build scripts and MSBuild metadata are outside the direct Roslyn adapter")
     sources = {name: image["files"].get(name, {}).get("sha256") for name in source_names}
-    if sorted(filter(None, sources.values())) != sorted(sha256(data).hexdigest() for data in (PROGRAM, CALCULATION)):
+    if arithmetic:
+        from .csharp_sources import validate
+
+        if not all(sources.values()):
+            raise Blocked("Approved arithmetic source is missing")
+        validate({name: (replica / name).read_bytes() for name in source_names})
+    elif sorted(filter(None, sources.values())) != sorted(sha256(data).hexdigest() for data in (PROGRAM, CALCULATION)):
         raise Blocked("Only the reviewed .NET console sources are admitted")
     if not image["git"]:
         raise Blocked(".NET verification requires a Git replica")
@@ -111,12 +117,13 @@ def review(replica, launcher, source_names, vectors, seconds):
     if not launcher.is_absolute() or launcher.name.casefold() != "codex.exe":
         raise Blocked("MXC requires the absolute path of the approved Codex launcher")
     verify_app_server_binary(launcher, approved_sha256=LAUNCHER_PIN)
-    root, tool, compiler, libraries, identity, selected = _toolchain(replica)
+    root, tool, compiler, libraries, identity, selected = _toolchain(replica, tool_root)
     runtime = selected["runtime"].name
     config = {"runtimeOptions": {"tfm": selected["target"], "rollForward": "Disable",
                                  "framework": {"name": "Microsoft.NETCore.App", "version": runtime}}}
     compiler_command = ["exec", "--fx-version", runtime, str(compiler)]
-    return {"kind": KIND, "launcher": str(launcher), "launcher_sha256": LAUNCHER_PIN,
+    return {"kind": KIND, "arithmetic": arithmetic, "harness_sha256": sha256(PROGRAM).hexdigest(),
+            "launcher": str(launcher), "launcher_sha256": LAUNCHER_PIN,
             "replica": str(replica), "replica_sha256": digest(image), "git": image["git"],
             "sources": sources, "vectors": vectors, "tool": str(tool), "sdk": selected["sdk"], "runtime": runtime,
             "environment_selection": {"sdk_policy": selected["sdk_policy"],
@@ -141,7 +148,8 @@ def review(replica, launcher, source_names, vectors, seconds):
 def run(ledger, scope, check, workspace=None):
     replica, launcher = Path(scope["replica"]), Path(scope["launcher"])
     names = sorted(scope["sources"])
-    current = review(replica, launcher, names, scope["vectors"], scope["limits"]["max_seconds"])
+    current = review(replica, launcher, names, scope["vectors"], scope["limits"]["max_seconds"],
+                     Path(scope["tool_root_read_only"]), arithmetic=scope["arithmetic"])
     if any(scope.get(key) != value for key, value in current.items()):
         raise Blocked(".NET execution scope changed")
     with (nullcontext(workspace) if workspace is not None else
@@ -157,6 +165,13 @@ def run(ledger, scope, check, workspace=None):
             if sha256(data).hexdigest() != scope["sources"][name]:
                 raise Blocked(".NET input changed")
             (work / name).write_bytes(data)
+        compiled = names
+        if scope["arithmetic"]:
+            from .csharp_sources import validate
+
+            validate({name: (work / name).read_bytes() for name in names})
+            (work / "ControllerEntry.cs").write_bytes(PROGRAM)
+            compiled = [*names, "ControllerEntry.cs"]
         marker = protected / "marker.cs"
         marker.write_bytes(b"static class Protected {}")
         profile = _profile(work, home, output).replace(
@@ -189,14 +204,14 @@ def run(ledger, scope, check, workspace=None):
                 or not re.fullmatch(r"[0-9.]+(?:-[\w.+-]+)?(?: \([0-9a-f]+\))?", compiler_version)):
             return {**result, "result": "BLOCKED", "reason": "COMPILER_VERSION_UNVERIFIED"}
         result["compiler_version"] = compiler_version
-        report = step("compile", [*compiler, f"/out:{app}", *names])
+        report = step("compile", [*compiler, f"/out:{app}", *compiled])
         if report["exitCode"] != 0 or report["stderr"]:
             return {**result, "reason": "COMPILER_FAILED"}
         artifact = fingerprint(app)
         config.write_text(canonical(scope["runtime_config"]), encoding="ascii")
         result["artifacts"] = {app.name: artifact, config.name: fingerprint(config)}
-        write = step("compiler-write", [*compiler, "/out:denied.dll", *names])
-        read = step("compiler-read", [*compiler, f"/out:{output / 'denied.dll'}", *names, str(marker)])
+        write = step("compiler-write", [*compiler, "/out:denied.dll", *compiled])
+        read = step("compiler-read", [*compiler, f"/out:{output / 'denied.dll'}", *compiled, str(marker)])
         result["boundaries"] = {
             "compiler_read_denied": read["exitCode"] == 1 and "error CS1504" in read["stdout"]
             and "denied" in read["stdout"].lower() and not (output / "denied.dll").exists(),
@@ -237,3 +252,38 @@ def run(ledger, scope, check, workspace=None):
             return {**result, "result": "BLOCKED", "reason": "EXECUTION_INPUT_OR_ARTIFACT_CHANGED"}
         return {**result, "result": "PASS" if all(row["actual"] == row["expected"]
                                                 for row in result["observations"]) else "FAIL"}
+
+
+def run_arithmetic(ledger, manifest, replica, sources, run_id, check):
+    from .mxc_host_probe import OwnedMxcStopped
+    from .owned_artifacts import cleanup, workspace
+
+    frozen = manifest["build"]
+    current = review(replica, frozen["launcher"], list(sources), frozen["vectors"],
+                     frozen["limits"]["max_seconds"], Path(frozen["tool_root_read_only"]), arithmetic=True)
+    if (any(value != current[key] for key, value in frozen.items() if key not in ("replica_sha256", "sources"))
+            or current["sources"] != {name: sha256(data).hexdigest() for name, data in sources.items()}):
+        raise Blocked("C# source or toolchain changed outside the approved session")
+    scratch = workspace(ledger, run_id)
+    ledger.local_directory("temp", create=True)
+    scratch.mkdir()
+    identity = scratch.stat().st_ino
+    try:
+        evidence = run(ledger, current, check, workspace=scratch)
+    except OwnedMxcStopped as error:
+        return {"verdict": "NOT_VERIFIED", "exit_code": None, "syntax": "NOT_VERIFIED",
+                "observations": [], "runtime": manifest["kind"], "runtime_manifest_sha256": digest(manifest),
+                "job_active": 0, "cleanup": cleanup(ledger, run_id, scratch, identity), "reason": str(error)}
+    removal = cleanup(ledger, run_id, scratch, identity)
+    observed = [{"file": "Calculation.cs", **row} for row in evidence["observations"]]
+    verdict = evidence["result"] if removal["status"] == "REMOVED" else "NOT_VERIFIED"
+    last_step = next(reversed(evidence["steps"].values()), {})
+    return {"verdict": verdict, "exit_code": last_step.get("exitCode"),
+            "syntax": "PASS" if evidence.get("artifacts") else "FAIL",
+            "observations": observed, "runtime": manifest["kind"], "runtime_manifest_sha256": digest(manifest),
+            "job_active": evidence["job_active"], "artifacts": evidence.get("artifacts", {}),
+            "boundary_observations": evidence.get("boundaries", {}), "build_steps": evidence["steps"],
+            "compiler_version": evidence.get("compiler_version"),
+            "owned_processes_started": sum(step["job_total"] for step in evidence["steps"].values()),
+            "source_files_sha256": current["sources"], "cleanup": removal,
+            "reason": evidence.get("reason")}

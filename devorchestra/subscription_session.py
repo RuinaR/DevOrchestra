@@ -13,6 +13,7 @@ from .lease import Blocked, development_session_scope, execution_slot, held_exec
 from .ledger import digest
 from .python_vectors import validate_vectors
 from .replica_evidence import snapshot
+from . import csharp_sources
 
 
 def review(runner, project, account, expires, seconds, tokens, reworks, vectors):
@@ -28,6 +29,7 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
     baseline = runner.native_manager_context(project)
     gui = isinstance(vectors, dict) and "gui" in vectors
     batch = isinstance(vectors, dict) and "files" in vectors
+    csharp = batch and isinstance(vectors.get("runtime"), dict) and vectors["runtime"].get("kind") == csharp_sources.KIND
     if not gui and not batch:
         validate_vectors(vectors, baseline["acceptance"])
     catalog = Catalog(runner.ledger).read()
@@ -42,9 +44,15 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
         if (not setup or set(vectors) not in ({"files", "create"}, {"files", "create", "runtime"})
                 or type(vectors["files"]) is not dict or set(vectors["files"]) != set(files)):
             raise Blocked("Batch Verifier requires vectors for every approved file")
-        check_names(files, vectors["create"])
-        for spec in vectors["files"].values():
-            validate_vectors(spec, baseline["acceptance"])
+        check_names(files, vectors["create"], "cs" if csharp else "py")
+        if csharp:
+            if (set(files) != csharp_sources.FILES or vectors["create"]
+                    or set(vectors["runtime"]) != {"kind", "launcher", "vectors"}
+                    or any(item != baseline["acceptance"] for item in vectors["files"].values())):
+                raise Blocked("C# runtime requires two existing approved arithmetic files and frozen acceptance")
+        else:
+            for spec in vectors["files"].values():
+                validate_vectors(spec, baseline["acceptance"])
     elif (not setup or len(files) != 1 or "/" in files[0]
             or (files[0] != "gui-test.json" if gui else not files[0].endswith(".py"))):
         raise Blocked("Select one registered Python file or the approved data-only GUI descriptor")
@@ -75,11 +83,24 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
         scope["gui_contract"] = subscription_gui.contract(vectors, project, replica, baseline["project_revision"], data)
         scope["tools"] = ["controller-replace-one-file", subscription_gui.TOOL]
     if batch:
-        scope["batch"] = {"max_files": len(files), "formats": [".py"], "create": vectors["create"],
+        scope["batch"] = {"max_files": len(files), "formats": [".cs" if csharp else ".py"], "create": vectors["create"],
                           "delete": False, "move": False, "max_bytes": BATCH_LIMIT,
                           "before_sha256": {name: image["files"].get(name, {}).get("sha256") for name in files}}
         scope["tools"] = ["controller-replace-batch", "fixed-python-vectors-v1"]
-        if "runtime" in vectors:
+        if csharp:
+            from . import mxc_dotnet
+            from .dotnet_install import registered
+
+            replica = Path(scope["replica"])
+            spec = vectors["runtime"]
+            if type(spec["launcher"]) is not str:
+                raise Blocked("C# runtime requires a pinned launcher path")
+            scope["runtime"] = {"kind": csharp_sources.KIND, "build": mxc_dotnet.review(
+                replica, spec["launcher"], files, spec["vectors"], min(seconds, 20),
+                registered(runner.ledger, project, replica), arithmetic=True,
+            )}
+            scope["tools"] = ["controller-replace-batch", csharp_sources.KIND]
+        elif "runtime" in vectors:
             from . import mxc_python
 
             scope["runtime"] = mxc_python.manifest(vectors["runtime"])

@@ -18,16 +18,16 @@ FILE_LIMIT = 8192
 BATCH_LIMIT = 16384
 
 
-def check_names(names, create):
+def check_names(names, create, extension="py"):
     if (type(create) is not list or not 2 <= len(names) <= 4
             or len({name.casefold() for name in names}) != len(names)
-            or any(not re.fullmatch(r"[A-Za-z0-9_-]{1,64}\.py", name) for name in names)
+            or any(not re.fullmatch(rf"[A-Za-z0-9_-]{{1,64}}\.{extension}", name) for name in names)
             or any(type(name) is not str or name not in names for name in create)
             or len(set(create)) != len(create)):
-        raise Blocked("Batch requires two to four exact root Python files and explicit creation paths")
+        raise Blocked(f"Batch requires two to four exact root .{extension} files and explicit creation paths")
 
 
-def replacement(output, names):
+def replacement(output, names, *, csharp=False):
     try:
         if len(output) > BATCH_LIMIT * 2:
             raise ValueError
@@ -41,13 +41,18 @@ def replacement(output, names):
             data = text.encode("utf-8")
             if not 0 < len(data) <= FILE_LIMIT or b"\0" in data:
                 raise ValueError
-            compile(data, name, "exec", dont_inherit=True)
+            if not csharp:
+                compile(data, name, "exec", dont_inherit=True)
             result[name] = data
         if sum(map(len, result.values())) > BATCH_LIMIT:
             raise ValueError
+        if csharp:
+            from .csharp_sources import validate
+
+            validate(result)
         return result
     except (ValueError, UnicodeError, SyntaxError, RecursionError):
-        raise Blocked("Invalid batch replacement for the approved Python files") from None
+        raise Blocked("Invalid batch replacement for the approved files") from None
 
 
 def _encode(data):

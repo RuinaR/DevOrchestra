@@ -81,6 +81,13 @@ def review(ledger, retain):
     pending = {event["cleanup_plan"]["workspace"] for event in events
                if event["kind"] == "build_verifier_intent" and "cleanup_plan" in event
                and event["run_id"] not in completed}
+    settled_installs = {event["run_id"] for event in events if event["kind"] == "sdk_install_result"}
+    pending.update(event["workspace"] for event in events if event["kind"] == "sdk_install_intent"
+                   and event["run_id"] not in settled_installs)
+    settled_cycles = {event["run_id"] for event in events if event["kind"] == "subscription_cycle_result"}
+    pending.update(event["cleanup_plan"]["workspace"] for event in events
+                   if event["kind"] == "subscription_cycle_intent" and "cleanup_plan" in event
+                   and event["run_id"] not in settled_cycles)
     entries, releases = [], []
     for category in ("release", "temp"):
         directory = base / category

@@ -101,7 +101,7 @@ def last_run(events):
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
                                                  "native_inspection_", "native_manager_", "supervised_",
-                                                 "gui_validation_", "gui_build_", "gui_session_", "build_verifier_",
+                                                 "gui_validation_", "gui_build_", "gui_session_", "build_verifier_", "sdk_install_",
                                                  "subscription_developer_", "subscription_cycle_",
                                                  "subscription_session_"))]
     return []
@@ -142,6 +142,10 @@ def native_unresolved(events):
             pending.add(("build-verifier", event["run_id"]))
         elif event["kind"] == "build_verifier_result":
             pending.discard(("build-verifier", event["run_id"]))
+        elif event["kind"] == "sdk_install_intent":
+            pending.add(("sdk-install", event["run_id"]))
+        elif event["kind"] == "sdk_install_result":
+            pending.discard(("sdk-install", event["run_id"]))
     return bool(pending)
 
 
@@ -427,6 +431,86 @@ class Runner:
             self.ledger.append(count, fence, result, allow_shutdown=True)
             return result
 
+    def sdk_install_scope(self, project_id, launcher, expires):
+        from pathlib import Path
+        from . import dotnet_install
+        from .app_server import verify_app_server_binary
+        from .mxc_host_probe import LAUNCHER_PIN
+
+        setup = Catalog(self.ledger).read()["setups"].get(project_id)
+        if not setup or not Path(launcher).is_absolute() or not time() < expires <= time() + 3600:
+            raise Blocked("SDK install requires a registered project, absolute launcher and current expiry")
+        verify_app_server_binary(Path(launcher), approved_sha256=LAUNCHER_PIN)
+        replica = Path(setup["replica"])
+        return {**dotnet_install.review(replica, project_id), "replica": str(replica),
+                "launcher": launcher, "launcher_sha256": LAUNCHER_PIN, "expires_epoch": expires}
+
+    def sdk_install(self, project_id, launcher, expires, approval):
+        from http.client import HTTPException
+        from pathlib import Path
+        from zipfile import BadZipFile
+        from . import dotnet_install
+        from .mxc_host_probe import OwnedMxcStopped
+        from .owned_artifacts import _remove_owned_tree
+
+        with execution_slot() as abandoned:
+            events, tail = self._idle_diagnostic(abandoned)
+            scope = self.sdk_install_scope(project_id, launcher, expires)
+            if digest(scope) != approval:
+                raise Blocked("SDK installation approval changed")
+            parent = dotnet_install.project_root(self.ledger, project_id)
+            target = parent / scope["sdk"]
+            check_path(target)
+            if target.exists():
+                raise Blocked("SDK destination exists; reuse or review it")
+            run_id = uuid4().hex
+            scratch = self.ledger.local_directory("temp") / ("sdk-install-" + run_id)
+            fields = {"run_id": run_id, "project_id": project_id, "scope": scope, "scope_sha256": approval,
+                      "generation": len(events) + 1, "workspace": scratch.name}
+            count, fence = self.ledger.append(len(events), tail, {**fields, "kind": "sdk_install_intent"},
+                                              admission=require_admission)
+
+            def check():
+                self._check_diagnostic_fence(count, fence)
+                if time() >= expires:
+                    raise Blocked("SDK installation approval expired")
+
+            self.ledger.local_directory("temp", create=True)
+            check_path(scratch)
+            scratch.mkdir()
+            identity = scratch.stat().st_ino
+            replica = Path(scope["replica"])
+            try:
+                output, observed = dotnet_install.install(scope, replica, scratch, check)
+            except (Blocked, OSError, ValueError, KeyError, BadZipFile, HTTPException) as error:
+                evidence = {"result": "BLOCKED", "reason": str(error)}
+            else:
+                try:
+                    verified = dotnet_install.verify(scope, replica, scratch, output, check)
+                except OwnedMxcStopped as error:
+                    evidence = {"result": "BLOCKED", "reason": str(error)}
+                else:
+                    check()
+                    if self.sdk_install_scope(project_id, launcher, expires) != scope:
+                        raise Blocked("SDK project requirements changed")
+                    parent.mkdir(parents=True, exist_ok=True)
+                    check_path(target)
+                    output.rename(target)
+                    evidence = {"result": "PASS", "installed": str(target), **observed, **verified}
+                    try:
+                        identity = dotnet_install.identity_at(replica, target)
+                    except Blocked:
+                        identity = None
+                    if identity != (scope["sdk"], verified["tool_sha256"]):
+                        evidence.update(result="NOT_VERIFIED", reason="Published SDK identity could not be verified")
+            self._check_diagnostic_fence(count, fence)
+            cleanup = _remove_owned_tree(scratch, identity)
+            if cleanup["status"] != "REMOVED":
+                evidence.update(result="NOT_VERIFIED", reason="SDK installation cleanup unconfirmed")
+            result = {**fields, **evidence, "cleanup": cleanup, "kind": "sdk_install_result"}
+            self.ledger.append(count, fence, result, allow_shutdown=True)
+            return result
+
     def build_verifier_scope(self, project_id, kind, launcher, sources, vectors, seconds, expires):
         from pathlib import Path
         from . import mxc_dotnet
@@ -442,7 +526,11 @@ class Runner:
                 or type(seconds) is not int
                 or seconds > min(catalog["global_budget"]["seconds"], project["data"]["budget"]["seconds"])):
             raise Blocked("Build verification expiry or budget is outside the project scope")
-        scope = mxc_dotnet.review(Path(setup["replica"]), launcher, sources, vectors, seconds)
+        from .dotnet_install import registered
+
+        replica = Path(setup["replica"])
+        scope = mxc_dotnet.review(replica, launcher, sources, vectors, seconds,
+                                  registered(self.ledger, project_id, replica))
         return {**scope, "project_id": project_id, "project_revision": project["revision"],
                 "role": "Verifier", "expires_epoch": expires}
 

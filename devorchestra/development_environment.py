@@ -8,6 +8,7 @@ from .replica_evidence import snapshot
 
 
 def review(ledger, project_id):
+    from .dotnet_install import registered
     from .mxc_dotnet import _toolchain
 
     catalog = Catalog(ledger).read()
@@ -34,11 +35,13 @@ def review(ledger, project_id):
                               "status": "DETECTED"}
     if ".NET" in detected:
         try:
-            root, tool, _, _, identity, selection = _toolchain(replica)
+            local = registered(ledger, project_id, replica) if ledger.path.exists() else None
+            root, tool, _, _, identity, selection = _toolchain(replica, local)
         except Blocked as error:
             detected[".NET"].update(status="BLOCKED", reason=str(error))
         else:
-            detected[".NET"].update(status="SIGNED_TOOLCHAIN_FOUND", source="INSTALLED_TOOLCHAIN",
+            detected[".NET"].update(status="SIGNED_TOOLCHAIN_FOUND",
+                                    source="REGISTERED_PROJECT_SDK" if local else "INSTALLED_TOOLCHAIN",
                                     root=str(root), executable=str(tool), architecture="win-x64",
                                     sdk=selection["sdk"], runtime=selection["runtime"].name,
                                     reference_pack=selection["ref_pack"].name, console_target=selection["target"],

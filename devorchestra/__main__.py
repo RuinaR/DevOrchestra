@@ -100,6 +100,11 @@ def main():
     commands.add_parser("artifact-review", help="Classify retained local builds and cleanup candidates").add_argument(
         "--retain", type=int, default=2,
     )
+    install_sdk = commands.add_parser("sdk-install", help="Review or install an approved project-local .NET ZIP")
+    for name in ("project", "launcher"):
+        install_sdk.add_argument("--" + name, required=True)
+    install_sdk.add_argument("--expires", required=True, type=int)
+    install_sdk.add_argument("--approve")
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -147,6 +152,16 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "sdk-install":
+            runner = Runner(ledger)
+            fields = (args.project, args.launcher, args.expires)
+            if args.approve is None:
+                scope = runner.sdk_install_scope(*fields)
+                print(canonical({"review": scope, "review_sha256": digest(scope)}))
+                return
+            receipt = runner.sdk_install(*fields, args.approve)
+            print(canonical(receipt))
+            return 0 if receipt["result"] == "PASS" else 2
         if args.action == "artifact-review":
             from .owned_artifacts import review
 

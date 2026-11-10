@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.102의 `sdk-install`은 루트 `global.json`의 정확한 안정 버전과 `rollForward: disable`을 요구한다. Microsoft HTTPS 메타데이터 및 ZIP만 읽고 설치 스크립트 없이 풀며 MXC에서 `dotnet --info`를 확인한다. 성공 영수증에 있는 프로젝트 SDK만 이후 검토에서 재사용한다. 구독 C# 세션은 `mxc-dotnet-arithmetic-v1`과 두 기존 산술 파일에 한정하며, 변경된 소스와 DLL 해시를 같은 Verifier 영수증에 기록한다.
+
 P2.101의 `environment-review`는 설치나 실행을 시작하지 않는다. .NET의 경우 로컬 SDK 선택 근거와 해시를 확인한 뒤 기존 `build-verify`를 검토·승인한다. `global.json`의 `disable`, `patch`, `latestPatch`, `latestFeature`, `latestMinor`, `latestMajor`를 지원한다. 자동 설치를 연결하려면 승인된 공식 다운로드 목적지, 아카이브 무결성, 프로젝트 전용 설치 경계, 설치 취소·회수 검증이 필요하다. 모델 변경 소스 실행의 경계는 기존 검토된 두 파일 경로와 별개다.
 
 빌드 Verifier의 미확정 실행 의도는 소유 폴더를 보호하며 재시도 시 자동 삭제하지 않는다. `artifact-review --retain 2`는 로컬 릴리스 및 기존 임시 자료를 검토용으로 분류한다. 최종 배포본·원장·복구·공유 도구의 삭제는 이 경로에 포함되지 않는다.
