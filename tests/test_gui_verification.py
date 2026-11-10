@@ -1,13 +1,14 @@
 import json
 from pathlib import Path
 import os
+import subprocess
 from tempfile import TemporaryDirectory
-from time import sleep
+from time import monotonic, sleep, time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from devorchestra.catalog import Catalog, DEFAULT_BUDGET, new_project
-from devorchestra.gui_verification import verified_image
+from devorchestra.gui_verification import _Window, verified_image
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
 from devorchestra.runtime import Runner, native_unresolved
@@ -112,6 +113,99 @@ class GuiVerificationTests(unittest.TestCase):
             self.runner.verify_gui_fixture("fixture-a", approval)
         self.assertTrue(native_unresolved(self.ledger.read()))
 
+    def test_gui_session_rejects_role_descriptor_and_expiry_changes(self):
+        descriptor = self.register_form()
+        scope = self.runner.gui_verification_scope("inventory", registered=True, role="Developer")
+        expires = int(time()) + 300
+        session = self.runner.approve_gui_session(scope, None, expires)
+        with self.assertRaisesRegex(Blocked, "scope changed"):
+            self.runner.verify_gui_fixture("inventory", None, registered=True, role="Reviewer",
+                                           gui_session_id=session)
+        with patch("devorchestra.runtime.time", return_value=expires):
+            with self.assertRaisesRegex(Blocked, "expired"):
+                self.runner.verify_gui_fixture("inventory", None, registered=True, role="Developer",
+                                               gui_session_id=session)
+        descriptor.write_bytes(descriptor.read_bytes() + b" ")
+        with self.assertRaisesRegex(Blocked, "scope changed"):
+            self.runner.verify_gui_fixture("inventory", None, registered=True, role="Developer",
+                                           gui_session_id=session)
+        self.assertEqual(["gui_session_approved"], [event["kind"] for event in self.ledger.read()])
+
+    def test_window_input_is_addressed_and_rejects_reused_pid_and_replaced_window(self):
+        window = object.__new__(_Window)
+        window.handles, window.pid, window.thread = {"root": 100, "button": 200}, 123, 7
+        window.check, window.send = Mock(), Mock(return_value=1)
+        window.ancestor = Mock(return_value=100)
+        window.alive = Mock(return_value=True)
+
+        def owner(_target, pid):
+            pid._obj.value = 123
+            return 7
+
+        window.owner = Mock(side_effect=owner)
+        window.click("button")
+        self.assertEqual((200, 0x00F5), window.send.call_args.args[:2])
+        window.send.reset_mock()
+        window.alive.return_value = False  # A replacement window reports the same PID.
+        with self.assertRaisesRegex(Blocked, "ownership changed"):
+            window.click("button")
+        window.alive.return_value = True
+        window.ancestor.return_value = 300
+        with self.assertRaisesRegex(Blocked, "ownership changed"):
+            window.click("button")
+        window.send.assert_not_called()
+
+    @unittest.skipUnless(os.environ.get("DEVORCHESTRA_GUI_E2E") == "1", "Interactive Windows GUI opt-in")
+    def test_separate_same_executable_survives_success_cancel_and_timeout(self):
+        from devorchestra.system_powershell import _system_path
+
+        scope = self.runner.gui_verification_scope("fixture-a")
+        powershell = _system_path()
+        self.assertEqual(str(powershell), scope["exe"])
+        root = self.ledger.state_boundary.parent
+        # The unrelated fixture is started before the Controller run and exits on pipe EOF.
+        with subprocess.Popen(
+            [str(powershell), "-NoProfile", "-NonInteractive", "-Command",
+             "[IO.File]::WriteAllText('ready.txt', 'protected'); [void][Console]::ReadLine()"],
+            cwd=root, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        ) as protected:
+            try:
+                ready = root / "ready.txt"
+                deadline = monotonic() + 8
+                while not ready.is_file() and monotonic() < deadline and protected.poll() is None:
+                    sleep(0.02)
+                self.assertEqual("protected", ready.read_text())
+                receipt = self.runner.verify_gui_fixture("fixture-a", digest(scope))
+                self.assertEqual(("PASS", 0), (receipt["result"], receipt["job_active"]))
+                self.assertIsNone(protected.poll())
+
+                def launched():
+                    return any(self.ledger.local_directory("temp").glob("gui-verification-*/windows.json"))
+
+                stopped = self.runner.verify_gui_fixture("fixture-a", digest(scope), launched)
+                self.assertEqual(("CANCELLED", 0), (stopped["reason"], stopped["job_active"]))
+                self.assertIsNone(protected.poll())
+
+                Catalog(self.ledger).save_limits({**DEFAULT_BUDGET, "seconds": 1}, 0)
+                short = self.runner.gui_verification_scope("fixture-a")
+
+                def stall():
+                    if launched():
+                        sleep(1.05)
+                    return False
+
+                timed_out = self.runner.verify_gui_fixture("fixture-a", digest(short), stall)
+                self.assertEqual(("TIME_LIMIT", 0), (timed_out["reason"], timed_out["job_active"]))
+                self.assertIsNone(protected.poll())
+            finally:
+                protected.stdin.close()
+                try:
+                    protected.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    protected.kill()
+                    protected.wait(timeout=3)
+
     @unittest.skipUnless(os.environ.get("DEVORCHESTRA_GUI_E2E") == "1", "Interactive Windows GUI opt-in")
     def test_registered_project_runs_independent_role_scopes(self):
         descriptor = self.register_form()
@@ -128,6 +222,16 @@ class GuiVerificationTests(unittest.TestCase):
                 self.assertEqual(3, len(receipt["scenes"]))
                 self.assertEqual(receipt, self.runner.gui_verification_receipt("inventory", role="Manager"))
                 self.assertFalse(native_unresolved(self.ledger.read()))
+        options = {"registered": True, "role": "Developer"}
+        scope = self.runner.gui_verification_scope("inventory", **options)
+        session = self.runner.approve_gui_session(scope, None, int(time()) + 300)
+        for _ in range(3):
+            receipt = self.runner.verify_gui_fixture("inventory", None, gui_session_id=session, **options)
+            self.assertEqual(("PASS", session, 0),
+                             (receipt["result"], receipt["gui_session_id"], receipt["job_active"]))
+        with self.assertRaisesRegex(Blocked, "exhausted"):
+            self.runner.verify_gui_fixture("inventory", None, gui_session_id=session, **options)
+        self.assertFalse(native_unresolved(self.ledger.read()))
         self.assertEqual(original, descriptor.read_bytes())
         self.assertEqual([descriptor], list(descriptor.parent.iterdir()))
         self.assertFalse(list(self.ledger.local_directory("temp").iterdir()))

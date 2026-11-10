@@ -101,7 +101,7 @@ def last_run(events):
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
                                                  "native_inspection_", "native_manager_", "supervised_",
-                                                 "gui_validation_", "gui_build_"))]
+                                                 "gui_validation_", "gui_build_", "gui_session_"))]
     return []
 
 
@@ -432,6 +432,45 @@ class Runner:
                      if event["project_id"] == project_id and event["kind"] in
                      ("gui_validation_intent", "gui_validation_result")), None)
 
+    @staticmethod
+    def _gui_session_scope(scope):
+        # Per-dispatch IDs still get checked in dispatch_gui_tool.
+        return digest({key: value for key, value in scope.items()
+                       if key not in ("generation", "task_id", "session_id", "cancel_token")})
+
+    def approve_gui_session(self, reviewed_scope, exe_name, expires):
+        """Owner entry point for three bounded runs of one registered GUI scenario."""
+        with execution_slot() as abandoned:
+            events, head = self._idle_diagnostic(abandoned)
+            if type(expires) is not int or not time() < expires <= time() + 300:
+                raise Blocked("GUI session approval must expire within five minutes")
+            scope, _ = self._gui_verification_scope(
+                reviewed_scope["project_id"], True, reviewed_scope["role"], exe_name, events,
+            )
+            if digest(scope) != digest(reviewed_scope):
+                raise Blocked("GUI session scope changed; review it again")
+            identifier = uuid4().hex
+            self.ledger.append(len(events), head, {
+                "kind": "gui_session_approved", "state": "DIAGNOSTIC", "project_id": scope["project_id"],
+                "run_id": None, "session_id": identifier, "role": scope["role"],
+                "generation": len(events) + 1, "scope_sha256": self._gui_session_scope(scope),
+                "expires": expires, "max_runs": 3, "timestamp": datetime.now(timezone.utc).isoformat(),
+            }, admission=require_admission)
+            return identifier
+
+    def _require_gui_session(self, events, session_id, scope):
+        session = next((event for event in reversed(events) if event["kind"] == "gui_session_approved"
+                        and event["session_id"] == session_id), None)
+        if (not session or time() >= session["expires"]
+                or session["scope_sha256"] != self._gui_session_scope(scope)):
+            raise Blocked("GUI session expired or scope changed")
+        subsequent = events[session["generation"]:]
+        uses = sum(event["kind"] == "gui_validation_intent" and event.get("gui_session_id") == session_id
+                   for event in subsequent)
+        if uses >= session["max_runs"] or any(event["kind"].startswith("shutdown_") for event in subsequent):
+            raise Blocked("GUI session exhausted or invalidated by shutdown")
+        return session["expires"]
+
     def dispatch_gui_tool(self, request, owner_scope_sha256, cancelled=lambda: False):
         """Client tool request. The approval and cancellation source come from the owner channel."""
         keys = {"tool", "project_id", "role", "generation", "task_id", "session_id", "cancel_token", "exe_name"}
@@ -444,7 +483,8 @@ class Runner:
                                        tool_request_binding=request)
 
     def verify_gui_fixture(self, project_id, approved_scope, cancelled=lambda: False, *,
-                           registered=False, role="Verifier", exe_name=None, tool_request_binding=None):
+                           registered=False, role="Verifier", exe_name=None, tool_request_binding=None,
+                           gui_session_id=None):
         """Run the approved deterministic GUI scenario in an owner-driven slot."""
         from contextlib import ExitStack
         from pathlib import Path
@@ -461,7 +501,13 @@ class Runner:
             if form is not None and exe_data is None and any(
                     step["op"] == "menu" for scene in form["scenes"] for step in scene["steps"]):
                 raise Blocked("NOT_VERIFIED: native menu requires the Controller-built EXE")
-            if digest(scope) != approved_scope:
+            if gui_session_id is not None:
+                if not registered or approved_scope is not None or tool_request_binding is not None:
+                    raise Blocked("GUI session requires an owner-channel registered scenario request")
+                expires = self._require_gui_session(events, gui_session_id, scope)
+                original_cancel = cancelled
+                cancelled = lambda: original_cancel() or time() >= expires
+            elif digest(scope) != approved_scope:
                 raise Blocked("GUI verification scope changed; review it again")
             if tool_request_binding is not None:
                 from .gui_exe import tool_request
@@ -477,7 +523,9 @@ class Runner:
                        "source": ("WINDOWS_TRUSTED_PROJECT_EXE" if exe_data is not None else
                                   "WINDOWS_OWNED_PROJECT_FORM" if registered else "WINDOWS_OWNED_GUI_FIXTURE"),
                        "scope": scope,
-                       "scope_sha256": approved_scope}
+                       "scope_sha256": digest(scope)}
+            if gui_session_id is not None:
+                binding["gui_session_id"] = gui_session_id
             count, fence = self.ledger.append(len(events), tail, {
                 **binding, "kind": "gui_validation_intent", "timestamp": datetime.now(timezone.utc).isoformat(),
             }, admission=require_admission)

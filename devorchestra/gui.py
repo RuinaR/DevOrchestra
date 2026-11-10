@@ -1288,6 +1288,7 @@ class CommandCenter:
         gallery = ttk.Frame(panel)
         gallery.pack(fill="both", expand=True)
         thumbnails = []
+        session = None
 
         def load(receipt, image):
             if receipt["artifact_dir"] != f"gui-{UUID(receipt['run_id']).hex}":
@@ -1353,7 +1354,9 @@ class CommandCenter:
                 panel.destroy()
 
         def start():
-            nonlocal future
+            nonlocal future, session
+            from time import time
+
             if self.gui_verification_cancel is not None:
                 status.set("다른 GUI 검증이 진행 중입니다.")
                 return
@@ -1371,14 +1374,27 @@ class CommandCenter:
             descriptor = (f"\n복제본: {scope['replica']}\n"
                           f"{scope['descriptor']} · SHA-256 {scope['descriptor_sha256']}\n"
                           if registered else "")
-            if not self.confirm("GUI 검증 승인",
+            target = (selected_role, filename, self.controller._gui_session_scope(scope))
+            if session and (session["target"] != target or time() >= session["expires"]):
+                session = None
+            if session is None and not self.confirm("GUI 검증 승인",
                                 f"{project_id} · {selected_role} · {scope['scenario']}\n"
                                 f"대상: {scope['exe']}\nSHA-256 {scope['exe_sha256']}\n"
                                 f"호스트 스크립트 SHA-256 {scope['fixture_sha256']}\n"
                                 f"{descriptor}"
-                                f"소유 창 조작 및 비공개 캡처 · 최대 {scope['timeout_seconds']}초 실행",
+                                f"소유 창 조작 및 비공개 캡처 · 회당 최대 {scope['timeout_seconds']}초 실행"
+                                + ("\n이 범위로 5분 동안 최대 3회 허용" if registered else ""),
                                 parent=panel):
                 return
+            if registered and session is None:
+                expires = int(time()) + 300
+                try:
+                    identifier = self.controller.approve_gui_session(scope, filename, expires)
+                except (Blocked, OSError, sqlite3.Error, ValueError) as error:
+                    status.set(str(error) if isinstance(error, Blocked) else "GUI 세션을 승인할 수 없습니다.")
+                    return
+                session = {"id": identifier, "target": target, "expires": expires, "remaining": 3}
+            session_id = session["id"] if session else None
             cancellation = Event()
             self.gui_verification_cancel = cancellation
             future = Future()
@@ -1387,34 +1403,37 @@ class CommandCenter:
 
             def work():
                 try:
-                    if filename:
-                        from .gui_exe import tool_request
-
-                        result = self.controller.dispatch_gui_tool(tool_request(scope), digest(scope), cancellation.is_set)
-                    else:
-                        result = self.controller.verify_gui_fixture(
-                            project_id, digest(scope), cancellation.is_set, registered=registered, role=selected_role,
-                        )
+                    result = self.controller.verify_gui_fixture(
+                        project_id, None if session_id else digest(scope), cancellation.is_set,
+                        registered=registered, role=selected_role, exe_name=filename, gui_session_id=session_id,
+                    )
                     future.set_result(result)
                 except Exception as error:
                     future.set_exception(error)
 
             def poll():
+                nonlocal session
                 if not future.done():
                     panel.after(80, poll)
                     return
                 self.gui_verification_cancel = None
                 run.configure(state="normal")
                 if future.exception() is not None:
+                    session = None
                     status.set("검증 차단 · 원장에서 승인 및 회수 상태를 확인하세요.")
                 else:
                     render(future.result())
+                    if session:
+                        session["remaining"] -= 1
+                        status.set(status.get() + f"\n세션 승인 잔여 {session['remaining']}회")
+                        if not session["remaining"] or cancellation.is_set():
+                            session = None
 
             Thread(target=work, daemon=False).start()
             panel.after(80, poll)
 
         future = None
-        run = ttk.Button(controls, text="GUI 검증 실행", command=start)
+        run = ttk.Button(controls, text="GUI 세션 검증" if registered else "GUI 검증 실행", command=start)
         run.pack(side="left")
         ttk.Button(controls, text="닫기 / 실행 취소", command=close).pack(side="right")
         panel.protocol("WM_DELETE_WINDOW", close)
@@ -1441,7 +1460,8 @@ class CommandCenter:
         for boundary in decision.get("missing_boundaries", ())[1:]:
             label(panel, boundary["message"], bg=BG, wraplength=520).pack(fill="x", pady=(0, 8))
         label(panel, "지금 사용 가능 · 기존 Codex에 지시를 직접 전달하는 감독형 개발\n"
-              "자동 개발 후보 · 공식 App Server (실행 경계 확인 전 차단)",
+              "등록 프로젝트 QA · 역할별 소유 창 검증 범위를 한 번 승인해 반복 실행\n"
+              "자동 모델 후보 · 공식 App Server (실행 경계 확인 전 차단)",
               bg=BG, fg=MUTED, wraplength=520).pack(fill="x", pady=(0, 8))
         if summary := decision["summary"]:
             budget = summary["budget_ceiling"]

@@ -251,6 +251,9 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
                                or sha256(exe_data).hexdigest() != approved["exe_sha256"]):
         raise Blocked("Trusted EXE launch does not match approval")
     api = _api()
+    kernel = c.WinDLL("kernel32", winmode=0x800, use_last_error=True)
+    times = signature(kernel, "GetProcessTimes", w.BOOL, w.HANDLE, *([c.POINTER(w.FILETIME)] * 4))
+    membership = signature(kernel, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
     info = ProcessInfo()
     exit_code = w.DWORD()
     observed, scenes = {}, []
@@ -261,6 +264,7 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
     active = total = None
     graceful = False
     deadline = monotonic() + approved["timeout_seconds"]
+    created = None
 
     def check():
         if cancelled():
@@ -283,8 +287,17 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
         if str(exe) != approved["exe"]:
             raise Blocked("GUI executable path changed")
 
+    def creation_time():
+        fields = [w.FILETIME() for _ in range(4)]
+        _require(times(info.process, *(c.byref(field) for field in fields)))
+        return fields[0].dwHighDateTime, fields[0].dwLowDateTime
+
     def alive():
-        return api.WaitForSingleObject(info.process, 0) == 258
+        if created is None or api.WaitForSingleObject(info.process, 0) != 258:
+            return False
+        member = w.BOOL()
+        _require(membership(info.process, job, c.byref(member)))
+        return bool(member.value and creation_time() == created)
 
     manifest = directory / "windows.json"
     names = {"root", "capture", *(form or DEFAULT_FORM)["controls"].values()}
@@ -321,7 +334,8 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
                 _launch(api, job, exe, argv, directory, info)
         else:
             _launch(api, job, exe, argv, directory, info)
-        if _account(api, job).active != 1 or api.ResumeThread(info.thread) != 1:
+        created = creation_time()
+        if _account(api, job).active != 1 or not alive() or api.ResumeThread(info.thread) != 1:
             raise Blocked("Owned GUI process admission unverified")
         wait_for(manifest.exists)
         window = resolve_window()
@@ -337,12 +351,12 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
     finally:
         try:
             if info.process:
-                if alive():
-                    try:
+                try:
+                    if alive():
                         (window or resolve_window()).close()
                         graceful = True
-                    except (Blocked, OSError, ValueError, TypeError):
-                        pass
+                except (Blocked, OSError, ValueError, TypeError):
+                    pass
                 counts = _wait_empty(api, job, monotonic() + (3 if graceful else 0))
                 if counts.active:
                     graceful = False
