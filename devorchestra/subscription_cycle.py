@@ -148,7 +148,9 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
                 raise Blocked("Batch verification is outside the session scope")
             for item in spec["files"].values():
                 validate_vectors(item, baseline["acceptance"])
-            return ({**scope, "backend": "fixed-python-vectors-v1", "batch": True, "vectors_sha256": digest(spec)},
+            runtime = session.scope.get("runtime")
+            return ({**scope, "backend": runtime["kind"] if runtime else "fixed-python-vectors-v1",
+                     "runtime": runtime, "batch": True, "vectors_sha256": digest(spec)},
                     None, source, replica, developer)
         if account is not None or model is not None or not developer["file"].endswith(".py"):
             raise Blocked("The fixed Verifier supports only a Python file and owner test vectors")
@@ -184,6 +186,13 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
                        )})
         if "provenance" in verifier:
             context["verifier"].update(gui=verifier["gui"], provenance=verifier["provenance"])
+        if session and (runtime := session.scope.get("runtime")):
+            if (verifier.get("runtime_manifest_sha256") != digest(runtime)
+                    or verifier.get("job_active") != 0 or not verifier.get("artifacts")
+                    or any(verifier.get(key) != value for key, value in session.binding().items())):
+                raise Blocked("Final Manager requires the same approved MXC runtime receipt")
+            context["verifier"].update(runtime=verifier["runtime"], artifacts=verifier["artifacts"],
+                                       boundary_observations=verifier["boundary_observations"])
         role_instruction = (" Use only GOAL_COMPLETE, REWORK, APPROVAL, or BLOCK. "
                             f"Copy goal_hash exactly: {context['goal_hash']}. "
                             f"Copy evidence_ref exactly: {context['evidence_ref']}. "
@@ -252,6 +261,11 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                         result.update(subscription_gui.run_bound(runner.ledger, developer, source, replica, frozen,
                                                                  run_id, check, cancelled, scope["budget"]["seconds"]))
                         result.update(harness=subscription_gui.TOOL, syntax="NOT_APPLICABLE", owned_processes_started=None)
+                    elif scope.get("runtime"):
+                        from . import mxc_python
+
+                        result.update(mxc_python.run(runner.ledger, scope["runtime"], source,
+                                                     spec["files"], check, scope["budget"]["seconds"]))
                     elif scope.get("batch"):
                         checks = {name: run_vectors(data, spec["files"][name]) for name, data in source.items()}
                         passed = all(item["verdict"] == "PASS" for item in checks.values())
@@ -262,12 +276,20 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                     else:
                         result.update(run_vectors(source, spec))
                 except Blocked as error:
-                    if frozen:
+                    if scope.get("runtime"):
+                        from .mxc_host_probe import OwnedMxcStopped
+
+                        if not isinstance(error, OwnedMxcStopped):
+                            raise
+                        result.update(runtime=scope["runtime"]["kind"],
+                                      runtime_manifest_sha256=digest(scope["runtime"]), job_active=0)
+                    elif frozen:
                         raise
                     result.update(verdict="NOT_VERIFIED", exit_code=None, syntax="PASS",
                                   observations=[], reason=str(error))
                 if "vectors_sha256" in scope:
-                    result.update(harness="RESTRICTED_AST_RUNTIME", vectors_sha256=scope["vectors_sha256"])
+                    result.update(harness=result.get("runtime", "RESTRICTED_AST_RUNTIME"),
+                                  vectors_sha256=scope["vectors_sha256"])
                 result["artifact_sha256"] = digest(result["observations"])
             else:
                 token = AccountStore(runner.ledger).access(account)
@@ -302,7 +324,8 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
             if result.get("decision") in {"REWORK", "REWORK_REQUIRED"}:
                 result["next_action"] = "OWNER_REWORK_APPROVAL_REQUIRED"
         except (Blocked, KeyboardInterrupt) as error:
-            if not started or (phase == "verifier" and scope.get("gui_contract") and "provenance" not in result):
+            if (not started or (phase == "verifier" and scope.get("gui_contract") and "provenance" not in result)
+                    or (phase == "verifier" and scope.get("runtime") and "runtime_manifest_sha256" not in result)):
                 raise
             result.update(outcome="FAILED" if result["response_completed"] else "UNKNOWN",
                           reason=str(error) if isinstance(error, Blocked) else "CANCELLED")

@@ -27,6 +27,12 @@ from .system_powershell import hold_system_powershell
 PROFILE = "manager-host-offline"
 LAUNCHER_PIN = "4f91ae86895ff124760d70ed1630e2354ca874765c9bb61ae524b600327efc17"
 SERVER_PIN = "d781e2c96caeae19f5c8280814d778b92d4958bcca86064d6bec09d789ae7e22"
+
+
+class OwnedMxcStopped(Blocked):
+    """Execution stopped and the owned Job was verified empty."""
+
+
 FILE_PROBE = r"""
 $ErrorActionPreference = 'Stop'
 function Observe([string]$Name, [scriptblock]$Operation) {
@@ -63,19 +69,21 @@ def _args(child, *arguments):
             "--permission-profile", PROFILE, "--", str(child), *arguments]
 
 
-def _observe(launcher, argv, work, scratch, environment):
+def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=512 * 1024 * 1024,
+             check=None, output_limit=256):
     import msvcrt
 
     api = _api()
     job = _require(api.CreateJobObjectW(None, None))
     info, drained = ProcessInfo(), False
     stdout, stderr = scratch / "probe.stdout", scratch / "probe.stderr"
+    stopped = None
     try:
         limits = ExtendedLimits()
         limits.basic.flags = (JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_JOB_MEMORY
                               | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
         limits.basic.active_limit = 8
-        limits.job_memory = 512 * 1024 * 1024
+        limits.job_memory = memory
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
         with open(os.devnull, "rb") as stdin, stdout.open("xb") as out, stderr.open("xb") as err:
             stdio = tuple(msvcrt.get_osfhandle(stream.fileno()) for stream in (stdin, out, err))
@@ -84,18 +92,33 @@ def _observe(launcher, argv, work, scratch, environment):
             _create_owned(api, job, launcher, argv, work, environment, info, stdio)
         if _account(api, job).active != 1 or api.ResumeThread(info.thread) != 1:
             raise Blocked("MXC probe ownership unverified")
-        if _wait_empty(api, job, monotonic() + 15).active or api.WaitForSingleObject(info.process, 0) != 0:
+        deadline = monotonic() + seconds
+        if check is not None:
+            while _account(api, job).active and monotonic() < deadline:
+                check()
+                _wait_empty(api, job, min(deadline, monotonic() + 0.1))
+        counts = _wait_empty(api, job, deadline)
+        if counts.active or api.WaitForSingleObject(info.process, 500) != 0:
             raise Blocked("MXC probe timeout")
         drained = True
         code = w.DWORD()
         _require(api.GetExitCodeProcess(info.process, c.byref(code)))
+    except Blocked as error:
+        if check is None:
+            raise
+        stopped = str(error)
     finally:
         _cleanup(api, job, info, drained)
+    if stopped is not None:
+        raise OwnedMxcStopped(stopped)
     for path in (stdout, stderr):
         check_path(path)
     with stdout.open("rb") as stream:
-        output = stream.read(257)
+        output = stream.read(output_limit + 1)
+    if check is not None and len(output) > output_limit:
+        raise Blocked("MXC output exceeds the approved limit")
     return {"exitCode": code.value, "stdout": output.decode("ascii", errors="replace"),
+            "job_active": counts.active, "job_total": counts.total,
             "stderr": "" if stderr.stat().st_size == 0 else "REDACTED"}
 
 

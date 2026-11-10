@@ -39,7 +39,8 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
         raise Blocked("Session exceeds registered project or global limits")
     files = baseline["proposed_files_ceiling"]
     if batch:
-        if not setup or set(vectors) != {"files", "create"} or type(vectors["files"]) is not dict or set(vectors["files"]) != set(files):
+        if (not setup or set(vectors) not in ({"files", "create"}, {"files", "create", "runtime"})
+                or type(vectors["files"]) is not dict or set(vectors["files"]) != set(files)):
             raise Blocked("Batch Verifier requires vectors for every approved file")
         check_names(files, vectors["create"])
         for spec in vectors["files"].values():
@@ -78,6 +79,11 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
                           "delete": False, "move": False, "max_bytes": BATCH_LIMIT,
                           "before_sha256": {name: image["files"].get(name, {}).get("sha256") for name in files}}
         scope["tools"] = ["controller-replace-batch", "fixed-python-vectors-v1"]
+        if "runtime" in vectors:
+            from . import mxc_python
+
+            scope["runtime"] = mxc_python.manifest(vectors["runtime"])
+            scope["tools"] = ["controller-replace-batch", mxc_python.TOOL]
     return scope
 
 

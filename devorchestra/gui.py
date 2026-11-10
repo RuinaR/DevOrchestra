@@ -1681,7 +1681,8 @@ class CommandCenter:
             except (Blocked, ValueError, OSError, sqlite3.Error) as error:
                 status.set(str(error))
                 return
-            verification = ("검토된 WinForms 빌드·소유 창 조작·비공개 캡처" if scope.get("gui_contract")
+            verification = ("MXC 오프라인 CPython 빌드 및 고정 벡터 실행" if scope.get("runtime") else
+                            "검토된 WinForms 빌드·소유 창 조작·비공개 캡처" if scope.get("gui_contract")
                             else "파일별 고정 Python 벡터" if scope.get("batch") else "고정 Python 벡터")
             allowed = ", ".join(scope["writable_files"])
             if not self.confirm("통합 개발 세션 승인",
