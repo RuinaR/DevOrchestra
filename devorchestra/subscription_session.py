@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from . import subscription_cycle as cycle, subscription_developer as developer, subscription_gui, subscription_manager as manager
 from .catalog import Catalog
+from .developer_batch import BATCH_LIMIT, check_names
 from .default_instructions import public_instruction
 from .lease import Blocked, development_session_scope, execution_slot, held_execution_slot
 from .ledger import digest
@@ -26,7 +27,8 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
     require_admission(events)
     baseline = runner.native_manager_context(project)
     gui = isinstance(vectors, dict) and "gui" in vectors
-    if not gui:
+    batch = isinstance(vectors, dict) and "files" in vectors
+    if not gui and not batch:
         validate_vectors(vectors, baseline["acceptance"])
     catalog = Catalog(runner.ledger).read()
     data = catalog["projects"][project]["data"]
@@ -36,11 +38,18 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
             or tokens > min(limits["tokens"], data["budget"]["tokens"])):
         raise Blocked("Session exceeds registered project or global limits")
     files = baseline["proposed_files_ceiling"]
-    if (not setup or len(files) != 1 or "/" in files[0]
+    if batch:
+        if not setup or set(vectors) != {"files", "create"} or type(vectors["files"]) is not dict or set(vectors["files"]) != set(files):
+            raise Blocked("Batch Verifier requires vectors for every approved file")
+        check_names(files, vectors["create"])
+        for spec in vectors["files"].values():
+            validate_vectors(spec, baseline["acceptance"])
+    elif (not setup or len(files) != 1 or "/" in files[0]
             or (files[0] != "gui-test.json" if gui else not files[0].endswith(".py"))):
         raise Blocked("Select one registered Python file or the approved data-only GUI descriptor")
     image = snapshot(Path(setup["replica"]))
-    if not image["git"] or not image["git"].get("index") or files[0] not in image["files"]:
+    missing = set(files) - image["files"].keys()
+    if not image["git"] or not image["git"].get("index") or missing != set(vectors["create"] if batch else ()):
         raise Blocked("The session requires an existing file and local Git index")
     model_by_role = {name: item["model"] for name, item in data["roles"].items()}
     if any(model_by_role[role] in ("mock-v1", "deterministic") for role in ("Manager", "Developer", "Reviewer")):
@@ -64,6 +73,11 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
             raise Blocked("GUI descriptor changed during session review")
         scope["gui_contract"] = subscription_gui.contract(vectors, project, replica, baseline["project_revision"], data)
         scope["tools"] = ["controller-replace-one-file", subscription_gui.TOOL]
+    if batch:
+        scope["batch"] = {"max_files": len(files), "formats": [".py"], "create": vectors["create"],
+                          "delete": False, "move": False, "max_bytes": BATCH_LIMIT,
+                          "before_sha256": {name: image["files"].get(name, {}).get("sha256") for name in files}}
+        scope["tools"] = ["controller-replace-batch", "fixed-python-vectors-v1"]
     return scope
 
 
@@ -164,9 +178,9 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                 changed = execute("developer", developer, runner, project, planned["run_id"],
                                   account, models["Developer"], expires)
                 session.replica_sha256 = changed["after_replica_sha256"]
-                if changed["after_sha256"] in outputs:
+                if changed["after_replica_sha256"] in outputs:
                     raise Blocked("NO_PROGRESS")
-                outputs.add(changed["after_sha256"])
+                outputs.add(changed["after_replica_sha256"])
                 prefix = runner, project, changed["run_id"]
                 reviewed = execute("reviewer", cycle, *prefix, "reviewer", account, models["Reviewer"], expires, None)
                 if reviewed["decision"] == "REWORK":
@@ -185,8 +199,7 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                     failure = verified
                     feedback = [item for item in verified["observations"] if item["actual"] != item["expected"]]
                     if scope.get("gui_contract"):
-                        feedback = {"observations": feedback, "reason": verified.get("reason"),
-                                    "provenance": verified.get("provenance")}
+                        feedback = subscription_gui.failure_feedback(runner.ledger, verified, changed, session.binding())
                 else:
                     raise Blocked("Reviewer blocked the change")
                 fingerprint = digest([failure["phase"], [

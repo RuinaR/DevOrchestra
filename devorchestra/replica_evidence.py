@@ -64,8 +64,13 @@ def _git_identity(root):
     return result
 
 
-def snapshot(root):
+def snapshot(root, *, owned_staging=None):
     """Capture files without following links or invoking Git or a build tool."""
+    if owned_staging is not None:
+        check_path(owned_staging)
+        if (owned_staging.parent != root or not owned_staging.is_dir()
+                or not owned_staging.name.startswith(".devorchestra-batch-")):
+            raise Blocked("Unrecognized owned batch staging")
     files, keys = {}, set()
     total = count = 0
     directories = [root]
@@ -79,6 +84,8 @@ def snapshot(root):
                 if count > 4096:
                     raise Blocked("Replica exceeds the evidence entry limit")
                 path = Path(item.path)
+                if path == owned_staging:
+                    continue
                 relative = path.relative_to(root).as_posix()
                 folded = relative.casefold()
                 if folded in keys:

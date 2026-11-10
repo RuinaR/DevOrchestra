@@ -67,6 +67,10 @@ def review(runner, project, account, model, expires, *, session=None):
             + canonical(baseline["acceptance"]) +
             ". Change only opened; the owner-approved GUI scenario must remain unchanged."
         )
+    elif len(baseline["proposed_files_ceiling"]) > 1:
+        body["instructions"] += (" For this batch, proposed_paths must name every approved file exactly once: "
+                                 + canonical(baseline["proposed_files_ceiling"])
+                                 + ". Copy acceptance_checks literally from the approved acceptance list.")
     budget = {**baseline["budget_ceiling"], "seconds": min(60, baseline["budget_ceiling"]["seconds"]),
               "cost_microunits": 0}
     if session:

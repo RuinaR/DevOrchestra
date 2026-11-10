@@ -39,6 +39,12 @@ def _find(events, kind, **binding):
 def _current(replica, developer):
     if _head(replica) != developer["git_head"] or digest(snapshot(replica)) != developer["after_replica_sha256"]:
         raise Blocked("Developer replica or Git scope has changed")
+    if "after_files" in developer:
+        sources = {name: _read(replica / name, LIMIT) for name in developer["before_files"]}
+        expected = {**developer["before_files"], **developer["after_files"]}
+        if any(sha256(data).hexdigest() != expected[name] for name, data in sources.items()):
+            raise Blocked("Developer batch output hash has changed")
+        return sources
     source = _read(replica / developer["file"], LIMIT)
     if sha256(source).hexdigest() != developer["after_sha256"]:
         raise Blocked("Developer output hash has changed")
@@ -82,7 +88,7 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
     require_admission(events)
     developer = _find(events, "subscription_developer_result", project_id=project, run_id=developer_run,
                       outcome="COMPLETED")
-    if (not developer or developer.get("changed_files") != [developer["file"]]
+    if (not developer or developer.get("changed_files") != sorted(developer.get("after_files", {developer["file"]: None}))
             or not developer.get("after_replica_sha256")):
         raise Blocked("Cycle requires a Developer receipt with a verified change manifest")
     binding = {"project_id": project, "developer_run_id": developer_run}
@@ -109,6 +115,8 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
                "change": {"file": developer["file"], "diff": read_diff(ledger, project, developer_run),
                           "before_sha256": developer["before_sha256"], "after_sha256": developer["after_sha256"],
                           "prior_verification": developer["verification"]}}
+    if "after_files" in developer:
+        context["change"].update(before_files=developer["before_files"], after_files=developer["after_files"])
     role = PHASES[phase]
     data = record["data"]
     role_config = data["roles"][role]
@@ -132,6 +140,15 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
                 raise Blocked("GUI verification is outside the session scope")
             subscription_gui.validate_change(source, frozen)
             return ({**scope, "backend": subscription_gui.TOOL, "gui_contract": frozen},
+                    None, source, replica, developer)
+        if session and session.scope.get("batch"):
+            if (account is not None or model is not None or type(spec) is not dict
+                    or set(spec.get("files", {})) != set(source)
+                    or digest(spec) != session.scope["vectors_sha256"]):
+                raise Blocked("Batch verification is outside the session scope")
+            for item in spec["files"].values():
+                validate_vectors(item, baseline["acceptance"])
+            return ({**scope, "backend": "fixed-python-vectors-v1", "batch": True, "vectors_sha256": digest(spec)},
                     None, source, replica, developer)
         if account is not None or model is not None or not developer["file"].endswith(".py"):
             raise Blocked("The fixed Verifier supports only a Python file and owner test vectors")
@@ -235,6 +252,13 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                         result.update(subscription_gui.run_bound(runner.ledger, developer, source, replica, frozen,
                                                                  run_id, check, cancelled, scope["budget"]["seconds"]))
                         result.update(harness=subscription_gui.TOOL, syntax="NOT_APPLICABLE", owned_processes_started=None)
+                    elif scope.get("batch"):
+                        checks = {name: run_vectors(data, spec["files"][name]) for name, data in source.items()}
+                        passed = all(item["verdict"] == "PASS" for item in checks.values())
+                        result.update(verdict="PASS" if passed else "FAIL", exit_code=0 if passed else 1,
+                                      syntax="PASS" if all(item["syntax"] == "PASS" for item in checks.values()) else "FAIL",
+                                      observations=[{"file": name, **row} for name, item in checks.items()
+                                                    for row in item["observations"]])
                     else:
                         result.update(run_vectors(source, spec))
                 except Blocked as error:

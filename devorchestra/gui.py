@@ -1640,10 +1640,14 @@ class CommandCenter:
         status = tk.StringVar(value="승인할 검증 계약과 전체 한도를 지정하세요.")
         ttk.Label(panel, textvariable=status, wraplength=520).pack(fill="x", pady=8)
         vectors = self.editor_box(panel, height=8)
-        if baseline["proposed_files_ceiling"] == ["gui-test.json"]:
+        approved_files = baseline["proposed_files_ceiling"]
+        if approved_files == ["gui-test.json"]:
             from .subscription_gui import SPEC
 
             spec = SPEC
+        elif len(approved_files) > 1:
+            spec = {"files": {name: {"function": "", "acceptance": baseline["acceptance"], "vectors": []}
+                              for name in approved_files}, "create": []}
         else:
             spec = {"function": "", "acceptance": baseline["acceptance"], "vectors": []}
         vectors.insert("1.0", json.dumps(spec,
@@ -1678,12 +1682,13 @@ class CommandCenter:
                 status.set(str(error))
                 return
             verification = ("검토된 WinForms 빌드·소유 창 조작·비공개 캡처" if scope.get("gui_contract")
-                            else "고정 Python 벡터")
+                            else "파일별 고정 Python 벡터" if scope.get("batch") else "고정 Python 벡터")
+            allowed = ", ".join(scope["writable_files"])
             if not self.confirm("통합 개발 세션 승인",
-                                f"{project_id} · {scope['file']} · {seconds}초 · {tokens} 토큰\n"
+                                f"{project_id} · {allowed} · {seconds}초 · {tokens} 토큰\n"
                                 f"목표: {scope['goal']}\n"
                                 f"복제본 {scope['replica']}\n재작업 최대 {reworks}회 · {verification}\n"
-                                "승인된 문맥과 소스 한 파일을 OpenAI에 전송합니다. 모델 셸 권한은 없습니다.",
+                                "승인된 문맥과 지정한 소스를 OpenAI에 전송합니다. 모델 셸 권한은 없습니다.",
                                 parent=panel):
                 return
             future = Future()

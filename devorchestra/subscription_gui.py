@@ -1,6 +1,7 @@
 """Bind a reviewed data-only WinForms build to one subscription cycle change."""
 from hashlib import sha256
 from pathlib import Path
+import re
 from tempfile import TemporaryDirectory
 
 from . import gui_exe, gui_project, gui_verification
@@ -40,6 +41,35 @@ def validate_change(data, frozen):
             or digest(form["scenes"]) != frozen["scenario_sha256"]):
         raise Blocked("GUI change modifies the owner-approved tests or immutable form fields")
     return form
+
+
+def failure_feedback(ledger, receipt, developer, binding):
+    provenance = receipt.get("provenance", {})
+    if (receipt.get("gui") != "FAIL" or receipt.get("job_active") != 0
+            or receipt.get("task_id") != developer["task_id"]
+            or provenance.get("changed_file_sha256") != developer["after_sha256"]
+            or provenance.get("replica_sha256") != developer["after_replica_sha256"]
+            or any(receipt.get(key) != value for key, value in binding.items())):
+        raise Blocked("GUI failure is not bound to the current development change")
+    observations = []
+    for scene in receipt["scenes"]:
+        if scene["expected"] == scene["observed"]:
+            continue
+        ref = "gui-" + receipt["run_id"]
+        if receipt.get("artifact_dir") != ref or not re.fullmatch(r"gui-[a-f0-9]{32}", ref):
+            raise Blocked("GUI failure artifact directory is invalid")
+        folder = ledger.local_directory("logs") / ref
+        for image in (scene["original"], scene["processed"]):
+            if not re.fullmatch(r"(?:scene|report)-[1-3]\.png", image["file"]):
+                raise Blocked("GUI failure artifact name is invalid")
+            gui_verification.verified_image(folder / image["file"], image["sha256"])
+        observations.append({"title": scene["title"], "expected": scene["expected"], "actual": scene["observed"],
+                             "input": scene["input"], "original_sha256": scene["original"]["sha256"],
+                             "processed_sha256": scene["processed"]["sha256"]})
+    if not observations:
+        raise Blocked("GUI failure has no verified state mismatch to repair")
+    return {"observations": observations, "reason": receipt["reason"], "provenance": provenance,
+            "task_id": receipt["task_id"], "git_head": receipt["git_head"], "receipt_sha256": digest(receipt)}
 
 
 def run_bound(ledger, developer, source, replica, frozen, run_id, check, cancelled, seconds):
