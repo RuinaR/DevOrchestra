@@ -83,7 +83,9 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
             from . import mxc_python
 
             scope["runtime"] = mxc_python.manifest(vectors["runtime"])
-            scope["tools"] = ["controller-replace-batch", mxc_python.TOOL]
+            if "imports" in scope["runtime"] and set(scope["runtime"]["imports"]) != set(files):
+                raise Blocked("MXC module manifest does not match the approved file list")
+            scope["tools"] = ["controller-replace-batch", scope["runtime"]["kind"]]
     return scope
 
 
@@ -206,10 +208,14 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                     feedback = [item for item in verified["observations"] if item["actual"] != item["expected"]]
                     if scope.get("gui_contract"):
                         feedback = subscription_gui.failure_feedback(runner.ledger, verified, changed, session.binding())
+                    elif scope.get("runtime"):
+                        feedback = {"observations": feedback, "exit_code": verified["exit_code"],
+                                    "source_sha256": verified["source_sha256"], "receipt_sha256": digest(verified)}
                 else:
                     raise Blocked("Reviewer blocked the change")
                 fingerprint = digest([failure["phase"], [
-                    [item["title"], item["expected"], item["actual"]] for item in feedback["observations"]
+                    [item.get("title", item.get("file")), item.get("input"), item["expected"], item["actual"]]
+                    for item in feedback["observations"]
                 ] if isinstance(feedback, dict) else feedback])
                 if fingerprint in failures:
                     raise Blocked("NO_PROGRESS")

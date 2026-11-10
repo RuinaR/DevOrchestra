@@ -144,6 +144,13 @@ def review(runner, project, manager_run, account, model, expires, *, session=Non
         body["instructions"] = "\n\n".join(item["text"] for item in instructions) + (
             "\nReturn one JSON object mapping every exact approved filename to its full UTF-8 Python text. "
             "Null input means approved creation. No deletion, move, tool request, or execution claims.")
+        runtime = session.scope.get("runtime", {})
+        if "imports" in runtime:
+            body["instructions"] += (
+                " Use only the approved local from-imports and direct unary calls. "
+                "Do not add module initialization, standard library imports, annotations or decorators. "
+                f"Entry and imports: {canonical({key: runtime[key] for key in ('entry', 'imports')})}"
+            )
     budget = {key: min(data["budget"][key], role["budget"][key], catalog["global_budget"][key])
               for key in ("seconds", "tokens")}
     budget.update(seconds=min(60, budget["seconds"]), cost_microunits=0)

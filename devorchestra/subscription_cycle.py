@@ -192,7 +192,9 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
                     or any(verifier.get(key) != value for key, value in session.binding().items())):
                 raise Blocked("Final Manager requires the same approved MXC runtime receipt")
             context["verifier"].update(runtime=verifier["runtime"], artifacts=verifier["artifacts"],
-                                       boundary_observations=verifier["boundary_observations"])
+                                       boundary_observations=verifier["boundary_observations"],
+                                       observed_imports=verifier.get("observed_imports", []),
+                                       observed_calls=verifier.get("observed_calls", []))
         role_instruction = (" Use only GOAL_COMPLETE, REWORK, APPROVAL, or BLOCK. "
                             f"Copy goal_hash exactly: {context['goal_hash']}. "
                             f"Copy evidence_ref exactly: {context['evidence_ref']}. "

@@ -26,7 +26,8 @@ internal static class GuiTest
 
     static void Save(Bitmap bitmap, string name)
     {
-        bitmap.Save(name + ".tmp", ImageFormat.Png);
+        using (var stream = new FileStream(name + ".tmp", FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            bitmap.Save(stream, ImageFormat.Png);
         File.Move(name + ".tmp", name);
     }
 
@@ -49,7 +50,8 @@ internal static class GuiTest
                 Save(report, "report-" + (index + 1) + ".png");
             }
             if (index != 2) return;
-            using (var first = Image.FromFile("scene-1.png"))
+            using (var stream = new MemoryStream(File.ReadAllBytes("scene-1.png"), false))
+            using (var first = Image.FromStream(stream))
             using (var comparison = new Bitmap(1200, 480))
             {
                 using (var graphics = Graphics.FromImage(comparison))

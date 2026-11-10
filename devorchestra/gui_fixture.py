@@ -34,6 +34,12 @@ function Add-Button($text, $x) {
     $button.FlatStyle = 'System'
     Add-Control $button $text $x 105 144 34
 }
+function Save-CapturePng($bitmap, $path) {
+    $stream = [IO.File]::Open("$path.tmp", 'CreateNew', 'Write', 'None')
+    try { $bitmap.Save($stream, [Drawing.Imaging.ImageFormat]::Png) }
+    finally { $stream.Dispose() }
+    [IO.File]::Move("$path.tmp", $path)
+}
 
 $heading = Add-Control ([Windows.Forms.Label]::new()) $config.title 20 17 530 32
 $status = Add-Control ([Windows.Forms.TextBox]::new()) $config.initial 20 58 530 30
@@ -62,8 +68,7 @@ $capture.Add_Click({
         try {
             $form.DrawToBitmap($bitmap, [Drawing.Rectangle]::new(0, 0, $bitmap.Width, $bitmap.Height))
             $raw = [IO.Path]::GetFullPath("scene-$number.png")
-            $bitmap.Save("$raw.tmp", [Drawing.Imaging.ImageFormat]::Png)
-            [IO.File]::Move("$raw.tmp", $raw)
+            Save-CapturePng $bitmap $raw
             # Uniformly enlarge the area containing the observed status and controls.
             $crop = [Drawing.Rectangle]::new(12, 40, 564, 366)
             $report = [Drawing.Bitmap]::new(880, 610)
@@ -78,12 +83,14 @@ $capture.Add_Click({
                     $draw.DrawRectangle([Drawing.Pens]::RoyalBlue, 37, 114, 804, 42)
                 } finally { $draw.Dispose() }
                 $output = [IO.Path]::GetFullPath("report-$number.png")
-                $report.Save("$output.tmp", [Drawing.Imaging.ImageFormat]::Png)
-                [IO.File]::Move("$output.tmp", $output)
+                Save-CapturePng $report $output
             } finally { $report.Dispose() }
             if ($number -eq 3) {
-                $first = [Drawing.Image]::FromFile([IO.Path]::GetFullPath('scene-1.png'))
+                $bytes = [IO.File]::ReadAllBytes([IO.Path]::GetFullPath('scene-1.png'))
+                $stream = [IO.MemoryStream]::new($bytes, $false)
+                $first = $null
                 try {
+                    $first = [Drawing.Image]::FromStream($stream)
                     $comparison = [Drawing.Bitmap]::new(1200, 480)
                     try {
                         $draw = [Drawing.Graphics]::FromImage($comparison)
@@ -95,10 +102,12 @@ $capture.Add_Click({
                             $draw.DrawImage($bitmap, 620, 52, 560, [int](560 * $bitmap.Height / $bitmap.Width))
                         } finally { $draw.Dispose() }
                         $file = [IO.Path]::GetFullPath('comparison.png')
-                        $comparison.Save("$file.tmp", [Drawing.Imaging.ImageFormat]::Png)
-                        [IO.File]::Move("$file.tmp", $file)
+                        Save-CapturePng $comparison $file
                     } finally { $comparison.Dispose() }
-                } finally { $first.Dispose() }
+                } finally {
+                    try { if ($null -ne $first) { $first.Dispose() } }
+                    finally { $stream.Dispose() }
+                }
             }
         } finally { $bitmap.Dispose() }
     } catch {

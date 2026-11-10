@@ -12,12 +12,13 @@ from .ledger import canonical, check_path, digest
 from .mxc_host_probe import LAUNCHER_PIN, _args, _observe, _profile
 from .mxc_launcher import _known_folder, _pin, _signed_offline
 from .python_vectors import run_vectors
+from . import python_modules
 from .replica_evidence import fingerprint
 
 TOOL = "mxc-python-runtime-v1"
 MEMORY = 512 * 1024 * 1024
 HARNESS = r"""
-import errno, json, py_compile, socket, subprocess, sys
+import builtins, errno, importlib, json, py_compile, socket, subprocess, sys
 from importlib.machinery import SourcelessFileLoader
 from pathlib import Path
 
@@ -25,7 +26,9 @@ work = Path.cwd()
 root = work.parent
 output = root / "output"
 private = root / "protected" / "marker"
-spec = json.loads((work / "vectors.json").read_bytes())
+config = json.loads((work / "vectors.json").read_bytes())
+spec = config["tests"]
+graph = config.get("imports")
 if ".".join(map(str, sys.version_info[:3])) != sys.argv[2]:
     sys.exit(3)
 
@@ -59,21 +62,59 @@ if not proof["child_inherited_read_denial"]:
     print(json.dumps({"proof": proof}))
     sys.exit(3)
 rows = []
-for index, (name, test) in enumerate(sorted(spec.items())):
-    target = output / (name + "c")
-    py_compile.compile(str(work / name), cfile=str(target), doraise=True)
-    module = SourcelessFileLoader("_devorchestra_" + str(index), str(target)).load_module()
-    function = getattr(module, test["function"])
-    for value, expected in test["vectors"]:
-        rows.append({"file": name, "input": value, "expected": expected, "actual": function(value)})
-print(json.dumps({"proof": proof, "observations": rows}))
+imports, calls = set(), set()
+for name in sorted(spec):
+    py_compile.compile(str(work / name), cfile=str(output / (name + "c")), doraise=True)
+if graph is not None:
+    names = {name[:-3] for name in spec}
+    original_import = builtins.__import__
+    def observe_import(name, globals=None, locals=None, fromlist=(), level=0):
+        caller = (globals or {}).get("__name__")
+        if caller in names and name in names:
+            imports.add((caller + ".py", name + ".py"))
+        return original_import(name, globals, locals, fromlist, level)
+    def observe_call(frame, event, unused):
+        if event == "call" and frame.f_back:
+            caller = frame.f_back.f_globals.get("__name__")
+            target = frame.f_globals.get("__name__")
+            if caller in names and target in names and caller != target:
+                calls.add((caller + ".py", target + ".py"))
+    sys.path.insert(0, str(output))
+    try:
+        builtins.__import__ = observe_import
+        importlib.import_module(config["entry"][:-3])
+    finally:
+        builtins.__import__ = original_import
+    for name in names:
+        if Path(sys.modules[name].__file__) != output / (name + ".pyc"):
+            sys.exit(3)
+    sys.setprofile(observe_call)
+try:
+    for index, (name, test) in enumerate(sorted(spec.items())):
+        target = output / (name + "c")
+        module = (sys.modules[name[:-3]] if graph is not None else
+                  SourcelessFileLoader("_devorchestra_" + str(index), str(target)).load_module())
+        function = getattr(module, test["function"])
+        for value, expected in test["vectors"]:
+            rows.append({"file": name, "input": value, "expected": expected, "actual": function(value)})
+finally:
+    if graph is not None:
+        sys.setprofile(None)
+print(json.dumps({"proof": proof, "observations": rows, "imports": sorted(imports), "calls": sorted(calls)}))
 sys.exit(0 if all(type(row["actual"]) is int and row["actual"] == row["expected"] for row in rows) else 1)
 """
 
 
 def manifest(config):
-    if (type(config) is not dict or set(config) != {"kind", "launcher", "python", "python_sha256"}
-            or config["kind"] != TOOL or any(type(config[key]) is not str for key in config)):
+    common = {"kind", "launcher", "python", "python_sha256"}
+    if type(config) is not dict or not common <= config.keys() or any(type(config[key]) is not str for key in common):
+        raise Blocked("Invalid fixed MXC Python manifest")
+    if config["kind"] == python_modules.TOOL:
+        if set(config) != common | {"imports", "entry", "stdlib"} or config["stdlib"] != []:
+            raise Blocked("Only explicit project imports are allowed; the standard library list must be empty")
+        graph = config["imports"]
+        python_modules.validate_graph(graph, config["entry"], graph if type(graph) is dict else ())
+    elif config["kind"] != TOOL or set(config) != common:
         raise Blocked("Invalid fixed MXC Python manifest")
     launcher, python = Path(config["launcher"]), Path(config["python"])
     trusted = _known_folder(0x26) / "WindowsApps"
@@ -95,13 +136,20 @@ def manifest(config):
 
 def run(ledger, approved, sources, tests, check, seconds):
     config = {key: approved[key] for key in ("kind", "launcher", "python", "python_sha256")}
+    graph = None
+    if approved["kind"] == python_modules.TOOL:
+        config.update({key: approved[key] for key in ("imports", "entry", "stdlib")})
+        graph = approved["imports"]
     if manifest(config) != approved:
         raise Blocked("MXC runtime approval changed")
     # The existing AST gate validates the complete function grammar, including
     # branches not exercised by test vectors. Its values are not runtime evidence.
-    for name, source in sources.items():
-        if run_vectors(source, tests[name])["syntax"] != "PASS":
-            raise Blocked("Python source is outside the runtime harness grammar")
+    if graph is not None:
+        python_modules.validate_sources(sources, tests, graph, approved["entry"])
+    else:
+        for name, source in sources.items():
+            if run_vectors(source, tests[name])["syntax"] != "PASS":
+                raise Blocked("Python source is outside the runtime harness grammar")
     with TemporaryDirectory(prefix="mxc-python-", dir=ledger.local_directory("temp", create=True)) as directory:
         root = Path(directory)
         work, home, output, private = (root / name for name in ("work", "home", "output", "protected"))
@@ -111,7 +159,10 @@ def run(ledger, approved, sources, tests, check, seconds):
             if Path(name).name != name or not name.endswith(".py"):
                 raise Blocked("Runtime source path is outside the staged root")
             (work / name).write_bytes(source)
-        (work / "vectors.json").write_text(canonical(tests), encoding="ascii")
+        input_config = {"tests": tests}
+        if graph is not None:
+            input_config.update(imports=graph, entry=approved["entry"])
+        (work / "vectors.json").write_text(canonical(input_config), encoding="ascii")
         (private / "marker").write_bytes(b"Controller-owned boundary fixture")
         python = Path(approved["python"])
         profile = _profile(work, home, output)
@@ -166,7 +217,12 @@ def run(ledger, approved, sources, tests, check, seconds):
         artifacts = {name + "c": fingerprint(output / (name + "c"), 65536) for name in sources}
         if any(fingerprint(work / name)["sha256"] != sha256(data).hexdigest() for name, data in sources.items()):
             raise Blocked("MXC Python input changed")
+        if graph is not None:
+            edges = sorted([name, dep] for name, deps in graph.items() for dep in deps)
+            if report.get("imports") != edges or report.get("calls") != edges:
+                raise Blocked("Approved module imports and calls were not observed in CPython")
         return {"verdict": "PASS" if passed else "FAIL", "exit_code": result["exitCode"], "syntax": "PASS",
-                "observations": rows, "runtime": TOOL, "runtime_manifest_sha256": digest(approved),
+                "observations": rows, "runtime": approved["kind"], "runtime_manifest_sha256": digest(approved),
+                "observed_imports": report["imports"], "observed_calls": report["calls"],
                 "profile_sha256": sha256(profile.encode()).hexdigest(), "boundary_observations": proof,
                 "artifacts": artifacts, "job_active": 0, "owned_processes_started": result["job_total"]}

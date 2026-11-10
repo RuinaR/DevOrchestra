@@ -24,13 +24,9 @@ def validate_vectors(spec, acceptance):
         raise Blocked("Invalid approved Python vectors or acceptance binding")
 
 
-def run_vectors(source, spec):
-    """Compile for syntax and interpret only allowlisted integer AST nodes. No imports or exec."""
-    try:
-        compile(source, "<approved source>", "exec", dont_inherit=True)
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError):
-        return {"verdict": "FAIL", "exit_code": 1, "syntax": "FAIL", "observations": []}
+def checked_function(tree, spec, project_calls=None):
+    """Check the full expression and return its bounded interpreter."""
+    project_calls = project_calls or {}
     if len(tree.body) != 1 or type(tree.body[0]) is not ast.FunctionDef:
         raise Blocked("Verifier supports exactly one plain function")
     fn = tree.body[0]
@@ -49,6 +45,11 @@ def run_vectors(source, spec):
             raise Blocked("Verifier expression depth exceeded")
         if type(node) is ast.Name and node.id == argument:
             return lambda value: value
+        if (type(node) is ast.Call and type(node.func) is ast.Name and node.func.id in project_calls
+                and len(node.args) == 1 and not node.keywords):
+            operand = expression(node.args[0], depth + 1)
+            function = project_calls[node.func.id]
+            return lambda value: function(operand(value))
         if type(node) is ast.Constant and _integer(node.value):
             return lambda _value: node.value
         if type(node) is ast.UnaryOp and type(node.op) in (ast.UAdd, ast.USub):
@@ -70,7 +71,17 @@ def run_vectors(source, spec):
             return lambda value: OPS[type(node.ops[0])](left(value), right(value))
         raise Blocked("Verifier encountered an unsupported Python expression")
 
-    evaluate = expression(statements[0].value)
+    return expression(statements[0].value)
+
+
+def run_vectors(source, spec):
+    """Compile for syntax and interpret only allowlisted integer AST nodes. No imports or exec."""
+    try:
+        compile(source, "<approved source>", "exec", dont_inherit=True)
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return {"verdict": "FAIL", "exit_code": 1, "syntax": "FAIL", "observations": []}
+    evaluate = checked_function(tree, spec)
     observed = [{"input": value, "expected": expected, "actual": evaluate(value)}
                 for value, expected in spec["vectors"]]
     passed = all(type(row["actual"]) is int and row["actual"] == row["expected"] for row in observed)
