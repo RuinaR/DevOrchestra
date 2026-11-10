@@ -27,6 +27,9 @@ def main():
         manager_turn.add_argument("--" + option, required=True)
     manager_turn.add_argument("--expires", type=int, required=True, help="Review expiry as Unix seconds")
     manager_turn.add_argument("--approve", metavar="REVIEW_SHA256")
+    mxc_host = commands.add_parser("manager-mxc-offline", help="Measure MXC files and App Server stdio without login")
+    for option in ("launcher", "launcher-sha256", "candidate", "candidate-sha256", "powershell-sha256"):
+        mxc_host.add_argument("--" + option, required=True)
     gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
     gui_verify.add_argument("--registered", action="store_true")
@@ -85,6 +88,13 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "manager-mxc-offline":
+            from .mxc_host_probe import run_host_probe
+
+            receipt = run_host_probe(ledger, args.launcher, args.launcher_sha256, args.candidate,
+                                     args.candidate_sha256, args.powershell_sha256)
+            print(canonical(receipt))
+            return 0 if receipt["file_probe"]["status"] == "PASS" else 2
         if args.action == "manager-preflight":
             decision = Runner(ledger).inspect_manager_admission(args.project)
             print(canonical(decision))

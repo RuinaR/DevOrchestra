@@ -375,7 +375,7 @@ class Runner:
         from .system_powershell import hold_system_powershell
 
         with execution_slot() as abandoned, ExitStack() as resources:
-            events, tail = self._idle_gui(abandoned)
+            events, tail = self._idle_diagnostic(abandoned)
             scope = self.gui_exe_build_scope(project_id, exe_name)
             if digest(scope) != approved_scope:
                 raise Blocked("GUI build approval changed")
@@ -389,7 +389,7 @@ class Runner:
             }, admission=require_admission)
             try:
                 with TemporaryDirectory(prefix="gui-build-", dir=self.ledger.local_directory("temp", create=True)) as folder:
-                    data = compile_exe(Path(folder), compiler, lambda: self._check_gui_fence(count, fence),
+                    data = compile_exe(Path(folder), compiler, lambda: self._check_diagnostic_fence(count, fence),
                                        scope["timeout_seconds"])
             except BuildFailed as error:
                 resources.close()
@@ -398,7 +398,7 @@ class Runner:
                 self.ledger.append(count, fence, result, allow_shutdown=True)
                 return result
             resources.close()
-            self._check_gui_fence(count, fence)
+            self._check_diagnostic_fence(count, fence)
             output = Path(scope["output"])
             check_path(output)
             with output.open("xb") as stream:
@@ -409,19 +409,19 @@ class Runner:
             self.ledger.append(count, fence, result, allow_shutdown=True)
             return result
 
-    def _idle_gui(self, abandoned):
+    def _idle_diagnostic(self, abandoned):
         events, tail = self.ledger.snapshot(recover_journal=True)
         require_admission(events)
         run, development = last_run(events), session_view(events)
         if (abandoned or (run and State(run[-1]["state"]) not in TERMINAL)
                 or (development and not development["end"])):
-            raise Blocked("GUI verification requires an idle Controller")
+            raise Blocked("Diagnostic execution requires an idle Controller")
         return events, tail
 
-    def _check_gui_fence(self, count, fence):
+    def _check_diagnostic_fence(self, count, fence):
         events, actual = self.ledger.snapshot()
         if len(events) != count or actual != fence:
-            raise Blocked("GUI verification fence changed")
+            raise Blocked("Diagnostic execution fence changed")
 
     def gui_verification_receipt(self, project_id, *, role="Manager"):
         from .gui_verification import ROLES
@@ -454,7 +454,7 @@ class Runner:
         from .system_powershell import hold_system_powershell
 
         with execution_slot() as abandoned, ExitStack() as resources:
-            events, tail = self._idle_gui(abandoned)
+            events, tail = self._idle_diagnostic(abandoned)
             if cancelled():
                 raise Blocked("GUI verification was cancelled before admission")
             scope, (form, exe_data) = self._gui_verification_scope(project_id, registered, role, exe_name, events)
@@ -484,7 +484,7 @@ class Runner:
 
             temp = self.ledger.local_directory("temp", create=True)
             with TemporaryDirectory(prefix="gui-verification-", dir=temp) as staging:
-                receipt = run_fixture(scope, Path(staging), cancelled, lambda: self._check_gui_fence(count, fence),
+                receipt = run_fixture(scope, Path(staging), cancelled, lambda: self._check_diagnostic_fence(count, fence),
                                       executable, form, exe_data)
                 if exe_data is not None:
                     receipt["working_directory"] = staging
