@@ -50,7 +50,7 @@ for line in sys.stdin:
     if method == 'account/read':
         assert msg['params'] == {'refreshToken':False}
     if method == 'thread/start':
-        assert mode not in ('tools-enabled', 'api-account', 'async-feature-enabled', 'managed-requirements')
+        assert mode not in ('tools-enabled', 'api-account', 'async-feature-enabled', 'managed-conflict')
         assert msg['params']['sandbox'] == 'read-only'
         assert not msg['params'].get('dynamicTools')
         assert msg['params']['modelProvider'] == 'openai'
@@ -76,7 +76,10 @@ for line in sys.stdin:
     result = {
         'initialize': {'platformOs':'windows'},
         'config/read': {'config': config},
-        'configRequirements/read': {'requirements':{} if mode == 'managed-requirements' else None},
+        'configRequirements/read': {'requirements': {
+            'managed-compatible': {'allowedLoginMethods':['chatgpt'], 'network':None},
+            'managed-conflict': {'allowedLoginMethods':['api']},
+        }.get(mode)},
         'account/read': {'account': {'type':'apiKey' if mode == 'api-account' else 'chatgpt'},
                          'requiresOpenaiAuth': mode != 'wrong-auth-provider'},
         'thread/start': {'thread': {'id':'thr-fixture', 'ephemeral':True}, 'approvalPolicy':'never',
@@ -438,10 +441,21 @@ class NativeManagerTests(unittest.TestCase):
             self.run_fixture("duplicate-item")
         self.assertEqual("native_manager_dispatch", self.ledger.read()[-1]["kind"])
 
-    def test_managed_requirements_block_before_thread_dispatch(self):
-        with self.assertRaisesRegex(Blocked, "UNKNOWN"):
-            self.run_fixture("managed-requirements")
+    def test_compatible_managed_requirements_preserve_manager_profile(self):
+        result, _ = self.run_fixture("managed-compatible")
+        self.assertTrue(result["turn_receipt"]["configuration"]["managed_requirements_present"])
+        self.assertEqual("BLOCKED", result["next_role_admission"])
+
+    def test_conflicting_managed_requirements_block_before_thread_dispatch(self):
+        with self.assertRaisesRegex(Blocked, "UNKNOWN.*MANAGER_MANAGED_REQUIREMENTS_CONFLICT:allowedLoginMethods"):
+            self.run_fixture("managed-conflict")
         self.assertEqual(["native_manager_intent"], [event["kind"] for event in self.ledger.read()])
+
+    def test_unrecognized_managed_requirements_fail_closed_without_disclosing_values(self):
+        from devorchestra.native_manager import _verify_manager_requirements
+
+        with self.assertRaisesRegex(Blocked, "^MANAGER_MANAGED_REQUIREMENTS_UNVERIFIED$"):
+            _verify_manager_requirements({"network": {"private fixture": True}})
 
     def test_tool_request_never_dispatches_a_command(self):
         with self.assertRaisesRegex(Blocked, "UNKNOWN"):
@@ -455,7 +469,7 @@ class NativeManagerTests(unittest.TestCase):
         self.assertNotIn("fixture private error", str(self.ledger.read()))
 
     def test_timeout_remains_unknown(self):
-        with self.assertRaisesRegex(Blocked, "UNKNOWN"):
+        with self.assertRaisesRegex(Blocked, "UNKNOWN.*TIMEOUT"):
             self.run_fixture("hang")
         self.assertEqual("native_manager_dispatch", self.ledger.read()[-1]["kind"])
 

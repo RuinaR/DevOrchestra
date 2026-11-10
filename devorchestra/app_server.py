@@ -446,7 +446,7 @@ class AppServer:
         self.send({"method": "initialized"})
         return result
 
-    def inspect_policy(self, *, cwd=None, verify_config=None, experimental_api=False):
+    def inspect_policy(self, *, cwd=None, verify_config=None, verify_requirements=None, experimental_api=False):
         """Read effective config and requirements without starting a thread."""
         self.initialize(experimental_api=experimental_api)
         params = {"includeLayers": False}
@@ -459,12 +459,15 @@ class AppServer:
             raise Blocked("App Server policy response incomplete")
         if verify_config is not None:
             verify_config(values)
+        managed = requirements["requirements"]
+        if verify_requirements is not None:
+            verify_requirements(managed)
         sandbox = values.get("sandbox_mode")
         approval = values.get("approval_policy")
         return {
             "sandbox": sandbox if sandbox in ("read-only", "workspace-write") else "UNVERIFIED",
             "approval": approval if approval in ("never", "on-request") else "UNVERIFIED",
-            "managed_requirements_present": requirements["requirements"] is not None,
+            "managed_requirements_present": managed is not None,
         }
 
 

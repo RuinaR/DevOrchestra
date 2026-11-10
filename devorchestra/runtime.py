@@ -585,7 +585,8 @@ class Runner:
         """Internal one-shot planning entry; never grants another role."""
         from pathlib import Path
         from .native_manager import (
-            ManagerApproval, ROLE, prepare_manager, require_live_manager_admission, run_owned_manager,
+            ManagerApproval, ManagerTurnUnsettled, ROLE, prepare_manager, require_live_manager_admission,
+            run_owned_manager,
         )
         from .role_contract import TransitionEvidence, confirm_task_plan, decide_transition
 
@@ -667,6 +668,8 @@ class Runner:
                 )
                 if len(dispatch_events) != 2:
                     raise Blocked("Manager dispatch receipt missing")
+            except ManagerTurnUnsettled as error:
+                raise Blocked(f"Manager outcome UNKNOWN; no automatic retry ({error})") from None
             except Exception:
                 # Keep intent unresolved, including when dispatch may have reached the server.
                 raise Blocked("Manager outcome UNKNOWN; no automatic retry") from None

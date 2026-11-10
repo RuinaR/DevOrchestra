@@ -49,6 +49,45 @@ def _verify_manager_config(config):
         raise Blocked("Manager effective provider differs from the approved OpenAI provider")
 
 
+def _verify_manager_requirements(requirements):
+    """Check constraints on the selected profile without granting execution authority."""
+    if requirements is None:
+        return
+    if type(requirements) is not dict:
+        raise Blocked("MANAGER_MANAGED_REQUIREMENTS_INVALID")
+    allowlists = {
+        "allowedLoginMethods": "chatgpt",
+        "allowedApprovalPolicies": "never",
+        "allowedSandboxModes": "read-only",
+        "allowedApprovalsReviewers": "user",
+        "allowedWebSearchModes": "disabled",
+    }
+    for key, value in requirements.items():
+        if value is None:
+            continue
+        if key in allowlists:
+            if type(value) is not list or any(type(item) is not str for item in value):
+                raise Blocked(f"MANAGER_MANAGED_REQUIREMENTS_INVALID:{key}")
+            if allowlists[key] not in value:
+                raise Blocked(f"MANAGER_MANAGED_REQUIREMENTS_CONFLICT:{key}")
+        elif key == "modelProvider":
+            if value != "openai":
+                raise Blocked("MANAGER_MANAGED_REQUIREMENTS_CONFLICT:modelProvider")
+        elif key == "cliAuthCredentialsStore":
+            if value != "file":
+                raise Blocked("MANAGER_MANAGED_REQUIREMENTS_CONFLICT:cliAuthCredentialsStore")
+        elif key == "featureRequirements":
+            if type(value) is not dict or any(type(flag) is not bool for flag in value.values()):
+                raise Blocked("MANAGER_MANAGED_REQUIREMENTS_INVALID:featureRequirements")
+            if any(flag and name in DISABLED_FEATURES for name, flag in value.items()):
+                raise Blocked("MANAGER_MANAGED_REQUIREMENTS_CONFLICT:featureRequirements")
+            if any(flag or name not in (*DISABLED_FEATURES, "unified_exec") for name, flag in value.items()):
+                raise Blocked("MANAGER_MANAGED_REQUIREMENTS_UNVERIFIED:featureRequirements")
+        else:
+            # Field names and values from unknown policy are never emitted to logs.
+            raise Blocked("MANAGER_MANAGED_REQUIREMENTS_UNVERIFIED")
+
+
 @dataclass(frozen=True)
 class ManagerApproval:
     request_id: str
@@ -82,6 +121,10 @@ class ManagerPolicyApproval:
     inspection: NativeInspectionApproval
 
 
+class ManagerTurnUnsettled(Blocked):
+    """The owned connection ended without a result safe to settle."""
+
+
 def manager_request_hash(request, layers, candidate_cli_sha256=None):
     binding = bind_instructions(request, layers)
     if candidate_cli_sha256 is None:
@@ -91,10 +134,9 @@ def manager_request_hash(request, layers, candidate_cli_sha256=None):
 
 def inspect_manager_policy(server, replica, *, experimental_api=False):
     policy = server.inspect_policy(cwd=replica, verify_config=_verify_manager_config,
+                                   verify_requirements=_verify_manager_requirements,
                                    experimental_api=experimental_api)
-    if policy["managed_requirements_present"]:
-        raise Blocked("MANAGER_MANAGED_REQUIREMENTS_UNVERIFIED")
-    if policy != {"sandbox": "read-only", "approval": "never", "managed_requirements_present": False}:
+    if policy["sandbox"] != "read-only" or policy["approval"] != "never":
         raise Blocked("Manager App Server policy is not the approved profile")
     return policy
 
@@ -329,7 +371,7 @@ def inspect_manager_thread_only(server, request, replica, expected_sources, befo
 
 
 def _collect_plan(server, request, replica, messages, expected_sources, before_thread, before_send):
-    inspect_manager_policy(server, replica, experimental_api=True)
+    policy = inspect_manager_policy(server, replica, experimental_api=True)
     identity = server.request(9, "account/read", {"refreshToken": False})
     account = identity.get("account")
     if (type(account) is not dict or account.get("type") != "chatgpt"
@@ -371,7 +413,7 @@ def _collect_plan(server, request, replica, messages, expected_sources, before_t
                 return reply, {"authentication": "CHATGPT_ACCOUNT_CONFIRMED",
                                "thread_sha256": digest(thread_id), "turn_sha256": digest(turn_id),
                                "terminal_status": "completed", "completed_items": len(completed),
-                               "instruction_sources": "CONFIRMED"}
+                               "instruction_sources": "CONFIRMED", "configuration": policy}
             if turn_started or params["turn"]["status"] != "inProgress":
                 raise Blocked("Duplicate or invalid Manager turn start")
             turn_started = True
@@ -410,11 +452,21 @@ def _collect_plan(server, request, replica, messages, expected_sources, before_t
 def run_owned_manager(ledger, approval, request, before_thread, before_send, cancelled, **context):
     messages, env = prepare_manager(ledger, approval, request, **context)
     timeout = min(request.budget.seconds, request.deadline_utc_epoch - time())
-    with open_app_server(approval.binary, approval.replica, env, timeout, cancelled,
-                         explicit_mxc=True, **approval.binary_options()) as server:
-        expected_sources = (approval.home / "AGENTS.md", selected_source(approval.replica)[0])
-        proposal, receipt = _collect_plan(server, request, approval.replica, messages, expected_sources,
-                                          before_thread, before_send)
+    server = None
+    try:
+        with open_app_server(approval.binary, approval.replica, env, timeout, cancelled,
+                             explicit_mxc=True, **approval.binary_options()) as server:
+            expected_sources = (approval.home / "AGENTS.md", selected_source(approval.replica)[0])
+            proposal, receipt = _collect_plan(server, request, approval.replica, messages, expected_sources,
+                                              before_thread, before_send)
+    except Blocked as error:
+        failure = server.failure_code if server is not None else None
+        if failure in ("CANCELLED", "TIMEOUT", "EOF"):
+            raise ManagerTurnUnsettled(failure) from None
+        if re.fullmatch(r"MANAGER_MANAGED_REQUIREMENTS_(?:UNVERIFIED|INVALID|CONFLICT)(?::[A-Za-z]+)?",
+                        str(error)):
+            raise ManagerTurnUnsettled(str(error)) from None
+        raise
     cleanup = dict(server.cleanup_receipt)
     if cleanup != {"job": "DRAINED_NORMALLY", "pipes": "CLOSED"}:
         raise Blocked("Manager cleanup receipt is incomplete")
