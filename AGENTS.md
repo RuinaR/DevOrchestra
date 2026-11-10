@@ -32,6 +32,7 @@
 
 ## Role-specific immutable privileges
 - General development uses the verified official Codex sandbox and scoped owner approval. Enhanced isolation separately requires P2 A/B/C. A missing sandbox, unsupported operation or unverifiable ownership blocks execution without fallback. Keep role budgets, durable dispatch intent and explicit recovery for ambiguous outcomes.
+- Bind the selected official model backend to the owner approval. Verify its specific transport and tool boundaries before use. Keep the deterministic GUI Verifier independent of the model backend.
 - MANAGER: goal and scope planning, read-only project inspection, prioritization, acceptance criteria. Cannot modify source, merge, commit, push, change permissions or self-approve.
 - DEVELOPER: limited write access to approved isolated project worktree only for the current task. Cannot modify approval engine, audit logs or protected guard files; cannot push or grant itself more permissions.
 - REVIEWER: independent context; read-only diff/requirements/verification evidence; may propose changes but cannot edit code or approve a higher privilege.

@@ -411,6 +411,7 @@ class NativeManagerTests(unittest.TestCase):
         fields = ("sample", self.approval.binary, "a" * 64, self.approval.home, int(time()) + 120)
         with patch("devorchestra.app_server.verify_app_server_binary"):
             review = self.runner.review_native_manager(*fields)
+            self.assertEqual("codex-app-server", review["backend"])
             self.assertEqual([], review["tools"])
             self.assertEqual([], review["writable"])
             self.assertEqual(1, review["generation"])
@@ -420,6 +421,21 @@ class NativeManagerTests(unittest.TestCase):
             self.role_file.write_text("Changed Manager scope")
             with self.assertRaisesRegex(Blocked, "review changed"):
                 self.runner.run_reviewed_native_manager(*fields, digest(review))
+        self.assertEqual([], self.ledger.read())
+
+    def test_unadmitted_backend_cannot_fall_back_to_app_server(self):
+        from devorchestra.adapter import ModelBackend
+
+        for backend in (ModelBackend.SDK, ModelBackend.EXEC, ModelBackend.CHATGPT_TEXT):
+            with self.subTest(backend=backend):
+                preview = self.runner.inspect_manager_admission("missing", backend)
+                self.assertEqual(("BLOCKED", backend.value), (preview["state"], preview["backend"]))
+                with patch("devorchestra.app_server.verify_app_server_binary",
+                           side_effect=AssertionError("unexpected App Server fallback")):
+                    with self.assertRaisesRegex(Blocked, preview["reason"]):
+                        self.runner.run_reviewed_native_manager(
+                            "missing", None, None, None, 0, "unusable", backend=backend,
+                        )
         self.assertEqual([], self.ledger.read())
 
     def test_valid_turn_drains_commits_and_does_not_admit_developer(self):

@@ -7,6 +7,36 @@ from .lease import Blocked
 from .policy import ExecutionBackend, live_preflight
 
 
+class ModelBackend(str, Enum):
+    SDK = "codex-sdk"
+    APP_SERVER = "codex-app-server"
+    EXEC = "codex-exec"
+    CHATGPT_TEXT = "chatgpt-subscription-text"
+
+
+def manager_backend_status(backend: ModelBackend) -> dict:
+    """Classify the selected model transport before touching a project or launching a process."""
+    backend = ModelBackend(backend)
+    if backend is ModelBackend.APP_SERVER:
+        from .native_manager import manager_admission
+
+        decision = manager_admission()
+    else:
+        reason, message = {
+            ModelBackend.SDK: ("SDK_TRANSPORT_UNADMITTED", "SDK의 하위 Codex 실행 경계가 입증되지 않았습니다."),
+            ModelBackend.EXEC: ("EXEC_TRANSPORT_UNADMITTED", "CLI 실행의 송신 및 내장 도구 경계가 입증되지 않았습니다."),
+            ModelBackend.CHATGPT_TEXT: ("TEXT_TRANSPORT_NOT_CONFIGURED",
+                                        "전용 OAuth 동의와 텍스트 전송 어댑터가 준비되지 않았습니다."),
+        }[backend]
+        decision = {"state": "BLOCKED", "reason": reason, "message": message}
+    return {"backend": backend.value, **decision}
+
+
+def require_manager_backend(backend: ModelBackend) -> None:
+    if backend != ModelBackend.APP_SERVER:
+        raise Blocked(manager_backend_status(backend)["reason"])
+
+
 class Outcome(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"

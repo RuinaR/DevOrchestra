@@ -6,8 +6,8 @@ import re
 from time import monotonic, time
 from uuid import uuid4
 
-from .adapter import (Budget, MockAdapter, NativeReceipt, Outcome, RoleRequest, Scope,
-                      WindowsNativeCodexAdapter, normalize_mock)
+from .adapter import (Budget, MockAdapter, ModelBackend, NativeReceipt, Outcome, RoleRequest, Scope,
+                      WindowsNativeCodexAdapter, manager_backend_status, normalize_mock, require_manager_backend)
 from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .development import session_view, usage_totals, validate_proposal
 from .event_audit import Binding, FIXTURE_USAGE, Packet
@@ -616,29 +616,32 @@ class Runner:
             ],
         }
 
-    def inspect_manager_admission(self, project_id):
+    def inspect_manager_admission(self, project_id, backend=ModelBackend.APP_SERVER):
         """Read-only preview for the project picker. It cannot grant a turn."""
-        from .native_manager import manager_admission
+        decision = manager_backend_status(backend)
+        if backend != ModelBackend.APP_SERVER:
+            return {**decision, "summary": None}
 
         try:
             context = self.native_manager_context(project_id)
         except (Blocked, OSError, ValueError):
-            return {"state": "BLOCKED", "reason": "REQUIREMENTS_UNAVAILABLE",
+            return {"backend": decision["backend"], "state": "BLOCKED", "reason": "REQUIREMENTS_UNAVAILABLE",
                     "message": "프로젝트에 현재 내용과 일치하는 요구사항을 등록하세요.", "summary": None}
-        decision = manager_admission()
         return {**decision, "summary": {
             "model": context["model"], "reasoning": context["reasoning"],
             "requirements": len(context["requirements"]), "input_sha256": digest(context),
             "budget_ceiling": context["budget_ceiling"],
         }}
 
-    def review_native_manager(self, project_id, binary, cli_sha256, home, expires):
+    def review_native_manager(self, project_id, binary, cli_sha256, home, expires, *,
+                              backend=ModelBackend.APP_SERVER):
         """Freeze an owner-reviewable, expiring one-shot request without starting Codex."""
         from pathlib import Path
 
         from .app_server import verify_app_server_binary
         from .native_manager import MANAGER_CONFIG, review_manager_layers
 
+        require_manager_backend(backend)
         if type(expires) is not int or not time() < expires <= time() + 300:
             raise Blocked("Manager review expiry must be within the next five minutes")
         events, head = self.ledger.snapshot()
@@ -656,7 +659,8 @@ class Runner:
         budget = {**baseline["budget_ceiling"], "seconds": min(60, baseline["budget_ceiling"]["seconds"]),
                   "cost_microunits": 0}
         return {
-            "contract": "manager-owner-turn-v1", "role": "Manager", "project_id": project_id,
+            "contract": "manager-owner-turn-v2", "backend": ModelBackend(backend).value,
+            "role": "Manager", "project_id": project_id,
             "generation": len(events) + 1, "ledger_head": head, "input_sha256": digest(baseline),
             "project_revision": baseline["project_revision"], "registered_git_sha": baseline["registered_git_sha"],
             "binary": str(binary), "cli_sha256": cli_sha256, "replica": str(replica), "home": str(home),
@@ -666,13 +670,14 @@ class Runner:
             "authentication": "CHATGPT_SUBSCRIPTION_ONLY",
         }
 
-    def run_reviewed_native_manager(self, project_id, binary, cli_sha256, home, expires, approved_sha256):
+    def run_reviewed_native_manager(self, project_id, binary, cli_sha256, home, expires, approved_sha256, *,
+                                    backend=ModelBackend.APP_SERVER):
         """Materialize a reviewed request and defer all authority to native admission."""
         from pathlib import Path
 
         from .native_manager import ManagerApproval, manager_request_hash
 
-        review = self.review_native_manager(project_id, binary, cli_sha256, home, expires)
+        review = self.review_native_manager(project_id, binary, cli_sha256, home, expires, backend=backend)
         if digest(review) != approved_sha256:
             raise Blocked("Manager review changed; review the current request again")
         baseline = self.native_manager_context(project_id)

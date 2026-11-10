@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+다음 자동 개발 검증은 [공식 Codex 백엔드 비교](ARCHITECTURE-ROADMAP.md#공식-codex-백엔드)에서 시작한다. Windows SDK의 설치 CLI 시작은 확인했고, 실제 구독 Manager 턴은 여전히 차단 상태다. 기존 App Server 검토 명령과 감독형 경로를 유지한다.
+
 개발 노트북에서는 [공개 지침](../defaults/global/AGENTS.md)과 감독형 요청 바인딩부터 확인한다. 이전 요청의 계약 해시가 다르면 결과를 가져오기 전에 지시를 다시 발행한다. 직접 GUI 검증에는 운영 원장과 분리된 테스트 데이터를 사용한다. 자동 역할 실행의 다음 관문은 [GUI 도구 입장 조건](ARCHITECTURE-ROADMAP.md#개발-노트북-gui-도구-입장-조건)이다.
 
 P2.32 기본 실행 후보는 Windows Native Codex다. VirtualBox 및 명시적 MXC 진단은 선택 후보이며 자동 폴백은 없다. 실운영 연결은 차단된 상태다. [네이티브 계약과 다음 승인 범위](ARCHITECTURE-ROADMAP.md#p232-windows-native-codex)

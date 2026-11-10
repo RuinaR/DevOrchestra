@@ -5,6 +5,7 @@ import sqlite3
 from time import sleep
 import sys
 
+from .adapter import ModelBackend
 from .catalog import Catalog, new_project
 from .dashboard import project_view, render
 from .development import session_view
@@ -19,14 +20,17 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("init")
     commands.add_parser("local-status", help="Inspect project-local storage without creating it")
-    commands.add_parser("manager-preflight", help="Inspect native Manager admission without starting Codex").add_argument(
-        "--project", required=True,
-    )
+    manager_check = commands.add_parser("manager-preflight", help="Inspect Manager backend admission without starting Codex")
+    manager_check.add_argument("--project", required=True)
     manager_turn = commands.add_parser("manager-turn", help="Review or approve one registered Manager turn")
     for option in ("project", "binary", "cli-sha256", "home"):
         manager_turn.add_argument("--" + option, required=True)
     manager_turn.add_argument("--expires", type=int, required=True, help="Review expiry as Unix seconds")
     manager_turn.add_argument("--approve", metavar="REVIEW_SHA256")
+    for command in (manager_check, manager_turn):
+        command.add_argument("--backend", type=ModelBackend, choices=list(ModelBackend),
+                             default=ModelBackend.APP_SERVER, metavar="BACKEND",
+                             help=", ".join(item.value for item in ModelBackend))
     mxc_host = commands.add_parser("manager-mxc-offline", help="Measure MXC files and App Server stdio without login")
     for option in ("launcher", "launcher-sha256", "candidate", "candidate-sha256", "powershell-sha256"):
         mxc_host.add_argument("--" + option, required=True)
@@ -100,17 +104,17 @@ def main():
                 return 2 if receipt["loopback"]["status"] == "INCONCLUSIVE" else 0
             return 0 if receipt["file_probe"]["status"] == "PASS" else 2
         if args.action == "manager-preflight":
-            decision = Runner(ledger).inspect_manager_admission(args.project)
+            decision = Runner(ledger).inspect_manager_admission(args.project, args.backend)
             print(canonical(decision))
             return 2 if decision["state"] == "BLOCKED" else 0
         if args.action == "manager-turn":
             runner = Runner(ledger)
             fields = (args.project, args.binary, args.cli_sha256, args.home, args.expires)
             if args.approve is None:
-                review = runner.review_native_manager(*fields)
+                review = runner.review_native_manager(*fields, backend=args.backend)
                 print(canonical({"review": review, "review_sha256": digest(review)}))
                 return
-            receipt, _proposal = runner.run_reviewed_native_manager(*fields, args.approve)
+            receipt, _proposal = runner.run_reviewed_native_manager(*fields, args.approve, backend=args.backend)
             print(canonical(receipt))
             return
         if args.action == "gui-build-exe":

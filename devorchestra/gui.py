@@ -1444,6 +1444,8 @@ class CommandCenter:
             status.set("원장이 준비되지 않았습니다.")
 
     def development_start(self):
+        from .adapter import ModelBackend, manager_backend_status
+
         if not self.view or not self.view["registration"]:
             return
         project_id = self.view["project_id"]
@@ -1455,14 +1457,18 @@ class CommandCenter:
         panel.title("개발 시작 · Manager 준비")
         state = {"BLOCKED": "자동 Manager 준비 차단", "NEEDS_OWNER_APPROVAL": "사용자 승인 필요",
                  "READY": "실행 전 검사 준비"}[decision["state"]]
-        label(panel, state, size=13, bold=True, bg=BG).pack(fill="x")
+        label(panel, f"{state} · App Server", size=13, bold=True, bg=BG).pack(fill="x")
         label(panel, decision["message"], bg=BG, wraplength=520).pack(fill="x", pady=8)
         for boundary in decision.get("missing_boundaries", ())[1:]:
             label(panel, boundary["message"], bg=BG, wraplength=520).pack(fill="x", pady=(0, 8))
         label(panel, "지금 사용 가능 · 기존 Codex에 지시를 직접 전달하는 감독형 개발\n"
-              "등록 프로젝트 QA · 역할별 소유 창 검증 범위를 한 번 승인해 반복 실행\n"
-              "자동 모델 후보 · 공식 App Server (실행 경계 확인 전 차단)",
+              "등록 프로젝트 QA · 역할별 소유 창 검증 범위를 한 번 승인해 반복 실행",
               bg=BG, fg=MUTED, wraplength=520).pack(fill="x", pady=(0, 8))
+        for backend in ModelBackend:
+            if backend is not ModelBackend.APP_SERVER:
+                candidate = manager_backend_status(backend)
+                label(panel, f"{backend.value} · {candidate['message']}", bg=BG, fg=MUTED,
+                      wraplength=520).pack(fill="x", pady=(0, 4))
         if summary := decision["summary"]:
             budget = summary["budget_ceiling"]
             model = ("등록된 실제 모델 없음" if summary["model"] == "mock-v1" else summary["model"])
