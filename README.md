@@ -20,6 +20,8 @@ CLI에서는 `python -B -m devorchestra gui-verify --project fixture-a`로 범�
 
 등록 프로젝트는 별도 작업 복제본의 루트에 [선언형 예제](examples/native-form/gui-test.json)를 참고해 `gui-test.json`을 둡니다. 프로젝트가 고른 컨트롤 이름, 클릭·텍스트·스크롤·리사이즈 단계와 세 장면의 기대 상태를 지정할 수 있습니다. Controller가 서명·해시를 검증한 시스템 PowerShell에서 신뢰된 WinForms 호스트를 띄우고, 승인한 합성 데이터 사본으로 검증합니다. CLI에서는 `--project <ID> --registered --role Verifier`로 범위를 확인합니다. Developer와 Reviewer도 소유자 승인으로 독립 검증을 실행할 수 있으며 Manager는 `--receipt`로 영수증을 읽습니다. 모델 호출, 임의 EXE, 빌드 명령과 다른 UI 프레임워크의 실행은 현재 지원 범위 밖입니다.
 
+독립 x64 테스트 EXE를 검증하려면 `python -B -m devorchestra gui-build-exe --project <ID> --exe InventoryQa.exe`로 빌드 범위를 확인하고, 동일 명령에 `--approve <SCOPE_SHA256>`를 추가합니다. Controller가 검토된 C# 소스를 고정 빌드하고 복제본에 새 EXE와 원장 출처를 기록합니다. **GUI 검증 보고서**의 EXE 입력란에 파일명을 지정하거나 `gui-verify --project <ID> --exe InventoryQa.exe`로 새 실행 승인을 확인합니다. EXE 시나리오는 `{"op":"menu","path":["Actions","Browse stock"]}`처럼 소유 창의 네이티브 메뉴를 이름으로 지정할 수 있습니다. 출처를 확인할 수 없는 EXE는 별도의 파일·네트워크 격리 검증이 필요합니다.
+
 1. Command Center에서 프로젝트와 요구사항 문서를 등록합니다.
 2. **감독형 Codex 작업**에서 Manager가 제안할 수 있는 프로젝트 상대 파일을 적고 **Manager 시작**을 누릅니다.
 3. 지시를 검토한 뒤 **지시 복사**로 기존 Codex에 직접 전달합니다. JSON 봉투를 붙여넣거나 로컬 JSON 파일로 가져옵니다.

@@ -1279,9 +1279,12 @@ class CommandCenter:
         controls = ttk.Frame(panel)
         controls.pack(fill="x")
         role = tk.StringVar(value="Verifier")
+        exe_name = tk.StringVar()
         if registered:
             ttk.Combobox(controls, textvariable=role, values=("Verifier", "Developer", "Reviewer"),
                          state="readonly", width=12).pack(side="left", padx=(0, 5))
+            ttk.Label(controls, text="검증 EXE (선택)").pack(side="left", padx=(0, 4))
+            ttk.Entry(controls, textvariable=exe_name, width=23).pack(side="left", padx=(0, 5))
         gallery = ttk.Frame(panel)
         gallery.pack(fill="both", expand=True)
         thumbnails = []
@@ -1356,7 +1359,9 @@ class CommandCenter:
                 return
             try:
                 selected_role = role.get()
-                scope = self.controller.gui_verification_scope(project_id, registered=registered, role=selected_role)
+                filename = exe_name.get().strip() or None
+                scope = self.controller.gui_verification_scope(project_id, registered=registered,
+                                                               role=selected_role, exe_name=filename)
             except Blocked as error:
                 status.set(str(error))
                 return
@@ -1382,9 +1387,15 @@ class CommandCenter:
 
             def work():
                 try:
-                    future.set_result(self.controller.verify_gui_fixture(
-                        project_id, digest(scope), cancellation.is_set, registered=registered, role=selected_role,
-                    ))
+                    if filename:
+                        from .gui_exe import tool_request
+
+                        result = self.controller.dispatch_gui_tool(tool_request(scope), digest(scope), cancellation.is_set)
+                    else:
+                        result = self.controller.verify_gui_fixture(
+                            project_id, digest(scope), cancellation.is_set, registered=registered, role=selected_role,
+                        )
+                    future.set_result(result)
                 except Exception as error:
                     future.set_exception(error)
 

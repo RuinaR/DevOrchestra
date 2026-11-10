@@ -103,6 +103,11 @@ class _Window:
         self.size = signature(user, "GetWindowRect", w.BOOL, w.HWND, c.POINTER(w.RECT))
         self.place = signature(user, "SetWindowPos", w.BOOL, w.HWND, w.HWND, c.c_int, c.c_int,
                                c.c_int, c.c_int, w.UINT)
+        self.menu = signature(user, "GetMenu", w.HMENU, w.HWND)
+        self.submenu = signature(user, "GetSubMenu", w.HMENU, w.HMENU, c.c_int)
+        self.menu_count = signature(user, "GetMenuItemCount", c.c_int, w.HMENU)
+        self.menu_text = signature(user, "GetMenuStringW", c.c_int, w.HMENU, w.UINT, w.LPWSTR, c.c_int, w.UINT)
+        self.menu_id = signature(user, "GetMenuItemID", w.UINT, w.HMENU, c.c_int)
         self.pid, self.handles, self.check, self.alive = pid, handles, check, alive
         self.thread = self._owner_thread(handles["root"])
         for name in handles:
@@ -130,6 +135,29 @@ class _Window:
 
     def click(self, name):
         self.message(name, 0x00F5)  # BM_CLICK, no desktop input
+
+    def click_menu(self, captions):
+        self.check()
+        menu = self.menu(self.owned("root"))
+        for level, caption in enumerate(captions):
+            count = self.menu_count(menu) if menu else -1
+            if not 1 <= count <= 32:
+                raise Blocked("Owned native menu unavailable")
+            matches = []
+            for index in range(count):
+                text = c.create_unicode_buffer(128)
+                self.menu_text(menu, index, text, len(text), 0x400)
+                if text.value == caption:
+                    matches.append(index)
+            if len(matches) != 1:
+                raise Blocked("Owned native menu caption is missing or ambiguous")
+            index = matches[0]
+            if level < len(captions) - 1:
+                menu = self.submenu(menu, index)
+        command = self.menu_id(menu, index)
+        if not 0 < command < 65536:
+            raise Blocked("Owned menu item has no native command")
+        self.message("root", 0x0111, command)
 
     def text(self, name):
         buffer = c.create_unicode_buffer(128)
@@ -174,6 +202,9 @@ def _exercise(window, directory, wait_for, observed, scenes, form):
 
 def _perform(window, step, wait_for, observed):
     operation = step["op"]
+    if operation == "menu":
+        window.click_menu(step["path"])
+        return "Menu " + " › ".join(step["path"])
     if operation == "resize":
         dimensions = (step["width"], step["height"])
         before = window.dimensions()
@@ -201,15 +232,24 @@ def _perform(window, step, wait_for, observed):
     return f"{operation.capitalize()} {target}"
 
 
-def run_fixture(approved, directory, cancelled, admission, locked_executable, form=None):
+def run_fixture(approved, directory, cancelled, admission, locked_executable, form=None, exe_data=None):
     """Return observations only after the Job, handles and app have been accounted for."""
     expected = ("fixed-gui-scenario", SCENARIO) if form is None else ("registered-gui-scenario", PROJECT_SCENARIO)
+    from .gui_exe import EXE_MEMORY, SOURCE_SHA256
+
+    executable_fixture = exe_data is not None
+    expected_source = SOURCE_SHA256 if executable_fixture else FIXTURE_SHA256
     if ((approved["tool"], approved["scenario"]) != expected
             or approved["tool"] not in ROLES.get(approved["role"], ())
-            or approved["fixture_sha256"] != FIXTURE_SHA256
+            or approved["fixture_sha256"] != expected_source
             or (form is not None and approved.get("form_sha256") != digest(form))
             or not 1 <= approved["timeout_seconds"] <= 20):
         raise Blocked("GUI role or scenario outside the approved scope")
+    if executable_fixture and (form is None or approved.get("trust") != "CONTROLLER_BUILT_TEST_EXE"
+                               or approved.get("arguments") != [] or approved.get("cwd") != "PRIVATE_STAGING"
+                               or approved.get("memory_bytes") != EXE_MEMORY
+                               or sha256(exe_data).hexdigest() != approved["exe_sha256"]):
+        raise Blocked("Trusted EXE launch does not match approval")
     api = _api()
     info = ProcessInfo()
     exit_code = w.DWORD()
@@ -238,9 +278,10 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
                 raise Blocked("Fixture exited before UI observation")
             sleep(0.03)
 
-    exe, recheck = locked_executable
-    if str(exe) != approved["exe"]:
-        raise Blocked("GUI executable path changed")
+    if not executable_fixture:
+        exe, recheck = locked_executable
+        if str(exe) != approved["exe"]:
+            raise Blocked("GUI executable path changed")
 
     def alive():
         return api.WaitForSingleObject(info.process, 0) == 258
@@ -257,18 +298,29 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
         limits.basic.flags = (JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_JOB_MEMORY
                               | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
         limits.basic.active_limit = 2
-        limits.job_memory = 256 * 1024 * 1024
+        limits.job_memory = EXE_MEMORY
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
         check()
         if form is not None:
             with (directory / "approved-form.json").open("x", encoding="utf-8") as stream:
                 json.dump(form, stream, ensure_ascii=True)
-        recheck()
-        argv = ["-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand",
-                b64encode(SCRIPT.encode("utf-16-le")).decode("ascii")]
-        _create_owned(api, job, exe, argv, directory,
-                      {"SystemRoot": str(_known_folder(0x24)), "TEMP": str(directory),
-                       "TMP": str(directory)}, info)
+        if executable_fixture:
+            exe = directory / "approved-app.exe"
+            with exe.open("xb") as stream:
+                stream.write(exe_data)
+            argv = []
+        else:
+            recheck()
+            argv = ["-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand",
+                    b64encode(SCRIPT.encode("utf-16-le")).decode("ascii")]
+        check()
+        if executable_fixture:
+            with _open_locked(exe) as (stream, _handle):
+                if sha256(stream.read(len(exe_data) + 1)).hexdigest() != approved["exe_sha256"]:
+                    raise Blocked("Staged GUI executable changed")
+                _launch(api, job, exe, argv, directory, info)
+        else:
+            _launch(api, job, exe, argv, directory, info)
         if _account(api, job).active != 1 or api.ResumeThread(info.thread) != 1:
             raise Blocked("Owned GUI process admission unverified")
         wait_for(manifest.exists)
@@ -309,3 +361,8 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
             "comparison": comparison,
             "exit_code": exit_code.value if drained else None, "job_active": active, "job_total": total,
             "job_handles": "CLOSED", "pipes": "NONE_CREATED", "graceful_close": graceful}
+
+
+def _launch(api, job, exe, argv, directory, info):
+    _create_owned(api, job, exe, argv, directory,
+                  {"SystemRoot": str(_known_folder(0x24)), "TEMP": str(directory), "TMP": str(directory)}, info)

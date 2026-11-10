@@ -64,6 +64,7 @@ def _validate_step(step, controls):
         raise Blocked("Invalid GUI step")
     operation = step.get("op")
     fields = {"click": {"op", "target"}, "text": {"op", "target", "value"},
+              "menu": {"op", "path"},
               "scroll": {"op", "target", "value"}, "resize": {"op", "width", "height"}}
     if not isinstance(operation, str) or operation not in fields or set(step) != fields[operation]:
         raise Blocked("Unsupported GUI step")
@@ -73,6 +74,12 @@ def _validate_step(step, controls):
         raise Blocked("GUI step target does not support the operation")
     if operation == "text":
         _text(step["value"], 60)
+    if operation == "menu":
+        path = step["path"]
+        if not isinstance(path, list) or not 1 <= len(path) <= 4:
+            raise Blocked("Specify a bounded native menu path")
+        for caption in path:
+            _text(caption, 50)
     if operation == "scroll" and (type(step["value"]) is not int or not 1 <= step["value"] <= 40):
         raise Blocked("Scroll index outside fixture range")
     if operation == "resize" and (type(step["width"]) is not int or type(step["height"]) is not int

@@ -22,9 +22,14 @@ def main():
     gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
     gui_verify.add_argument("--registered", action="store_true")
+    gui_verify.add_argument("--exe", metavar="FILENAME", help="Controller-built EXE in the registered replica")
     gui_verify.add_argument("--role", choices=("Manager", "Developer", "Reviewer", "Verifier"), default="Verifier")
     gui_verify.add_argument("--receipt", action="store_true")
     gui_verify.add_argument("--approve", metavar="SCOPE_SHA256")
+    gui_build = commands.add_parser("gui-build-exe", help="Build the reviewed standalone GUI test app")
+    gui_build.add_argument("--project", required=True)
+    gui_build.add_argument("--exe", default="DevOrchestraQa.exe")
+    gui_build.add_argument("--approve", metavar="SCOPE_SHA256")
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -72,9 +77,18 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "gui-build-exe":
+            runner = Runner(ledger)
+            if args.approve is None:
+                scope = runner.gui_exe_build_scope(args.project, args.exe)
+                print(canonical({"scope": scope, "scope_sha256": digest(scope)}))
+                return
+            result = runner.build_gui_exe(args.project, args.exe, args.approve)
+            print(canonical(result))
+            return 0 if result["result"] == "PASS" else 2
         if args.action == "gui-verify":
             runner = Runner(ledger)
-            options = {"registered": args.registered, "role": args.role}
+            options = {"registered": args.registered or args.exe is not None, "role": args.role, "exe_name": args.exe}
             if args.receipt:
                 if args.approve is not None:
                     raise Blocked("Receipt lookup cannot approve an execution")

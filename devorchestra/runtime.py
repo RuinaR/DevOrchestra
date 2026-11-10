@@ -101,7 +101,7 @@ def last_run(events):
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
                                                  "native_inspection_", "native_manager_", "supervised_",
-                                                 "gui_validation_"))]
+                                                 "gui_validation_", "gui_build_"))]
     return []
 
 
@@ -124,6 +124,10 @@ def native_unresolved(events):
             pending.add(("gui", event["approval_id"]))
         elif event["kind"] == "gui_validation_result":
             pending.discard(("gui", event["approval_id"]))
+        elif event["kind"] == "gui_build_intent":
+            pending.add(("gui-build", event["approval_id"]))
+        elif event["kind"] == "gui_build_result":
+            pending.discard(("gui-build", event["approval_id"]))
     return bool(pending)
 
 
@@ -301,10 +305,10 @@ class Runner:
     def supervised_handoff(self, action, project_id, **arguments):
         return handoff(self, action, project_id, **arguments)
 
-    def gui_verification_scope(self, project_id, *, registered=False, role="Verifier"):
-        return self._gui_verification_scope(project_id, registered, role)[0]
+    def gui_verification_scope(self, project_id, *, registered=False, role="Verifier", exe_name=None):
+        return self._gui_verification_scope(project_id, registered, role, exe_name)[0]
 
-    def _gui_verification_scope(self, project_id, registered, role):
+    def _gui_verification_scope(self, project_id, registered, role, exe_name=None, events=None):
         from .gui_verification import scenario_tool, scope
         from .gui_project import load
 
@@ -319,8 +323,105 @@ class Runner:
             if role not in data["roles"]:
                 raise Blocked("Unknown GUI role")
             seconds = min(seconds, data["budget"]["seconds"], data["roles"][role]["budget"]["seconds"])
+        if exe_name is not None and not registered:
+            raise Blocked("An EXE requires a registered GUI scenario")
         form, descriptor = load(catalog, project_id, self.ledger.state_boundary) if registered else (None, None)
-        return scope(project_id, record["revision"] if record else None, seconds, role, descriptor), form
+        approved = scope(project_id, record["revision"] if record else None, seconds, role, descriptor)
+        if exe_name is not None:
+            from .gui_exe import BUILD_SHA256, EXE_MEMORY, SOURCE_SHA256, read_exe, target
+            from hashlib import sha256
+
+            if events is None:
+                events = self.ledger.read()
+            path = target(approved["replica"], exe_name)
+            build = next((event for event in reversed(events)
+                          if event["kind"] == "gui_build_result" and event["project_id"] == project_id
+                          and event["result"] == "PASS" and event["exe"] == str(path)), None)
+            if (not build or build["scope"]["build_sha256"] != BUILD_SHA256
+                    or build["scope"]["project_revision"] != record["revision"]):
+                raise Blocked("BLOCKED: EXE has no current Controller build provenance or verified OS isolation")
+            data = read_exe(path)
+            checksum = sha256(data).hexdigest()
+            if checksum != build["exe_sha256"]:
+                raise Blocked("Trusted project EXE hash changed")
+            generation = len(events) + 1
+            identity = digest([project_id, generation, build["approval_id"], checksum, approved["descriptor_sha256"]])
+            approved.update(exe=str(path), exe_sha256=checksum, fixture_sha256=SOURCE_SHA256,
+                            trust="CONTROLLER_BUILT_TEST_EXE", build_id=build["approval_id"],
+                            arguments=[], cwd="PRIVATE_STAGING", memory_bytes=EXE_MEMORY,
+                            generation=generation, task_id=identity[:32], session_id=identity[32:],
+                            cancel_token=digest(["gui-cancel", identity]))
+            return approved, (form, data)
+        return approved, (form, None)
+
+    def gui_exe_build_scope(self, project_id, exe_name):
+        from .gui_exe import BUILD_MEMORY, BUILD_SHA256, SOURCE_SHA256, target
+
+        approved = self.gui_verification_scope(project_id, registered=True)
+        path = target(approved["replica"], exe_name)
+        if path.exists():
+            raise Blocked("The GUI build target already exists")
+        return {**approved, "output": str(path), "build_sha256": BUILD_SHA256,
+                "source_sha256": SOURCE_SHA256, "tool": "build-reviewed-gui-test-exe",
+                "cwd": "PRIVATE_STAGING", "memory_bytes": BUILD_MEMORY}
+
+    def build_gui_exe(self, project_id, exe_name, approved_scope):
+        from contextlib import ExitStack
+        from hashlib import sha256
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from .gui_exe import BuildFailed, compile_exe
+        from .system_powershell import hold_system_powershell
+
+        with execution_slot() as abandoned, ExitStack() as resources:
+            events, tail = self._idle_gui(abandoned)
+            scope = self.gui_exe_build_scope(project_id, exe_name)
+            if digest(scope) != approved_scope:
+                raise Blocked("GUI build approval changed")
+            compiler = resources.enter_context(hold_system_powershell(scope["exe_sha256"]))
+            run_id = uuid4().hex
+            binding = {"project_id": project_id, "run_id": run_id, "task_id": run_id, "role": "Verifier",
+                       "approval_id": uuid4().hex, "generation": len(events) + 1, "state": "DIAGNOSTIC",
+                       "source": "WINDOWS_TRUSTED_GUI_BUILD", "scope": scope, "scope_sha256": approved_scope}
+            count, fence = self.ledger.append(len(events), tail, {
+                **binding, "kind": "gui_build_intent", "timestamp": datetime.now(timezone.utc).isoformat(),
+            }, admission=require_admission)
+            try:
+                with TemporaryDirectory(prefix="gui-build-", dir=self.ledger.local_directory("temp", create=True)) as folder:
+                    data = compile_exe(Path(folder), compiler, lambda: self._check_gui_fence(count, fence),
+                                       scope["timeout_seconds"])
+            except BuildFailed as error:
+                resources.close()
+                result = {**binding, "kind": "gui_build_result", "result": "FAIL", "reason": str(error),
+                          "job_active": 0, "timestamp": datetime.now(timezone.utc).isoformat()}
+                self.ledger.append(count, fence, result, allow_shutdown=True)
+                return result
+            resources.close()
+            self._check_gui_fence(count, fence)
+            output = Path(scope["output"])
+            check_path(output)
+            with output.open("xb") as stream:
+                stream.write(data)
+            result = {**binding, "kind": "gui_build_result", "result": "PASS", "exe": str(output),
+                      "exe_sha256": sha256(data).hexdigest(), "job_active": 0,
+                      "timestamp": datetime.now(timezone.utc).isoformat()}
+            self.ledger.append(count, fence, result, allow_shutdown=True)
+            return result
+
+    def _idle_gui(self, abandoned):
+        events, tail = self.ledger.snapshot(recover_journal=True)
+        require_admission(events)
+        run, development = last_run(events), session_view(events)
+        if (abandoned or (run and State(run[-1]["state"]) not in TERMINAL)
+                or (development and not development["end"])):
+            raise Blocked("GUI verification requires an idle Controller")
+        return events, tail
+
+    def _check_gui_fence(self, count, fence):
+        events, actual = self.ledger.snapshot()
+        if len(events) != count or actual != fence:
+            raise Blocked("GUI verification fence changed")
 
     def gui_verification_receipt(self, project_id, *, role="Manager"):
         from .gui_verification import ROLES
@@ -331,8 +432,19 @@ class Runner:
                      if event["project_id"] == project_id and event["kind"] in
                      ("gui_validation_intent", "gui_validation_result")), None)
 
+    def dispatch_gui_tool(self, request, owner_scope_sha256, cancelled=lambda: False):
+        """Client tool request. The approval and cancellation source come from the owner channel."""
+        keys = {"tool", "project_id", "role", "generation", "task_id", "session_id", "cancel_token", "exe_name"}
+        if (type(request) is not dict or set(request) != keys or type(request["generation"]) is not int
+                or any(type(request[key]) is not str for key in keys - {"generation"})
+                or request["tool"] != "gui_verify_registered_exe"):
+            raise Blocked("Unrecognized GUI tool request")
+        return self.verify_gui_fixture(request["project_id"], owner_scope_sha256, cancelled,
+                                       registered=True, role=request["role"], exe_name=request["exe_name"],
+                                       tool_request_binding=request)
+
     def verify_gui_fixture(self, project_id, approved_scope, cancelled=lambda: False, *,
-                           registered=False, role="Verifier"):
+                           registered=False, role="Verifier", exe_name=None, tool_request_binding=None):
         """Run the approved deterministic GUI scenario in an owner-driven slot."""
         from contextlib import ExitStack
         from pathlib import Path
@@ -342,36 +454,40 @@ class Runner:
         from .system_powershell import hold_system_powershell
 
         with execution_slot() as abandoned, ExitStack() as resources:
-            events, tail = self.ledger.snapshot(recover_journal=True)
-            require_admission(events)
-            run = last_run(events)
-            development = session_view(events)
-            if (abandoned or (run and State(run[-1]["state"]) not in TERMINAL)
-                    or (development and not development["end"]) or cancelled()):
-                raise Blocked("GUI verification requires an idle Controller")
-            scope, form = self._gui_verification_scope(project_id, registered, role)
+            events, tail = self._idle_gui(abandoned)
+            if cancelled():
+                raise Blocked("GUI verification was cancelled before admission")
+            scope, (form, exe_data) = self._gui_verification_scope(project_id, registered, role, exe_name, events)
+            if form is not None and exe_data is None and any(
+                    step["op"] == "menu" for scene in form["scenes"] for step in scene["steps"]):
+                raise Blocked("NOT_VERIFIED: native menu requires the Controller-built EXE")
             if digest(scope) != approved_scope:
                 raise Blocked("GUI verification scope changed; review it again")
-            executable = resources.enter_context(hold_system_powershell(scope["exe_sha256"]))
+            if tool_request_binding is not None:
+                from .gui_exe import tool_request
+
+                if exe_data is None or tool_request(scope) != tool_request_binding:
+                    raise Blocked("GUI tool request does not match the current execution binding")
+            executable = (resources.enter_context(hold_system_powershell(scope["exe_sha256"]))
+                          if exe_data is None else None)
             identifier = uuid4().hex
-            binding = {"project_id": project_id, "run_id": identifier, "task_id": identifier,
+            binding = {"project_id": project_id, "run_id": identifier, "task_id": scope.get("task_id", identifier),
                        "agent_run_id": identifier, "approval_id": uuid4().hex,
                        "generation": len(events) + 1, "role": scope["role"], "state": "DIAGNOSTIC",
-                       "source": ("WINDOWS_OWNED_PROJECT_FORM" if registered else "WINDOWS_OWNED_GUI_FIXTURE"),
+                       "source": ("WINDOWS_TRUSTED_PROJECT_EXE" if exe_data is not None else
+                                  "WINDOWS_OWNED_PROJECT_FORM" if registered else "WINDOWS_OWNED_GUI_FIXTURE"),
                        "scope": scope,
                        "scope_sha256": approved_scope}
             count, fence = self.ledger.append(len(events), tail, {
                 **binding, "kind": "gui_validation_intent", "timestamp": datetime.now(timezone.utc).isoformat(),
             }, admission=require_admission)
 
-            def check():
-                current, actual = self.ledger.snapshot()
-                if len(current) != count or actual != fence:
-                    raise Blocked("GUI verification fence changed")
-
             temp = self.ledger.local_directory("temp", create=True)
             with TemporaryDirectory(prefix="gui-verification-", dir=temp) as staging:
-                receipt = run_fixture(scope, Path(staging), cancelled, check, executable, form)
+                receipt = run_fixture(scope, Path(staging), cancelled, lambda: self._check_gui_fence(count, fence),
+                                      executable, form, exe_data)
+                if exe_data is not None:
+                    receipt["working_directory"] = staging
                 if receipt["scenes"]:
                     artifacts = self.ledger.local_directory("logs", create=True) / f"gui-{identifier}"
                     check_path(artifacts)

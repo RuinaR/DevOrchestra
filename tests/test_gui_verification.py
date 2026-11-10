@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import os
 from tempfile import TemporaryDirectory
@@ -47,6 +48,57 @@ class GuiVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "NOT_VERIFIED"):
             self.runner.gui_verification_scope("inventory", registered=True)
         self.assertEqual([], self.ledger.read())
+
+    @unittest.skipUnless(os.environ.get("DEVORCHESTRA_GUI_E2E") == "1", "Interactive Windows GUI opt-in")
+    def test_build_registered_exe_and_dispatch_bound_tool(self):
+        from devorchestra.gui_exe import dynamic_gui_call, tool_request
+
+        descriptor = self.register_form()
+        name = "InventoryQa.exe"
+        form = json.loads(descriptor.read_text(encoding="utf-8"))
+        form["scenes"][1]["steps"] = [{"op": "menu", "path": ["Actions", "Browse stock"]}]
+        descriptor.write_text(json.dumps(form), encoding="utf-8")
+        options = {"registered": True, "exe_name": name}
+        with self.assertRaisesRegex(Blocked, "build provenance"):
+            self.runner.gui_verification_scope("inventory", **options)
+        build = self.runner.gui_exe_build_scope("inventory", name)
+        built = self.runner.build_gui_exe("inventory", name, digest(build))
+        self.assertEqual("PASS", built["result"])
+        scope = self.runner.gui_verification_scope("inventory", **options)
+        request = tool_request(scope)
+        with self.assertRaisesRegex(Blocked, "execution binding"):
+            self.runner.dispatch_gui_tool({**request, "generation": request["generation"] + 1}, digest(scope))
+        context = {"thread_id": "thread1", "turn_id": "turn1", "request": request,
+                   "owner_scope_sha256": digest(scope), "runner": self.runner, "cancelled": lambda: False}
+        params = {"threadId": "thread1", "turnId": "turn1", "callId": "call1",
+                  "tool": request["tool"], "arguments": {}}
+        with self.assertRaisesRegex(Blocked, "outside the bound turn"):
+            dynamic_gui_call({**params, "turnId": "turn2"}, **context)
+        reply = dynamic_gui_call(params, **context)
+        receipt = self.runner.gui_verification_receipt("inventory")
+        self.assertTrue(reply["success"])
+        self.assertEqual("WINDOWS_TRUSTED_PROJECT_EXE", receipt["source"])
+        self.assertEqual((0, 0, 1), (receipt["exit_code"], receipt["job_active"], receipt["job_total"]))
+        self.assertEqual("Selected: QA-024", receipt["observed"]["Selection confirmed"])
+        self.assertEqual(3, len(receipt["scenes"]))
+        self.assertEqual("Menu Actions › Browse stock", receipt["scenes"][1]["input"])
+        self.assertEqual(built["exe_sha256"], receipt["scope"]["exe_sha256"])
+        with self.assertRaisesRegex(Blocked, "scope changed"):
+            self.runner.dispatch_gui_tool(request, digest(scope))
+
+        fresh = self.runner.gui_verification_scope("inventory", **options)
+
+        def cancel_after_launch():
+            return any(self.ledger.local_directory("temp").glob("gui-verification-*/windows.json"))
+
+        stopped = self.runner.dispatch_gui_tool(tool_request(fresh), digest(fresh), cancel_after_launch)
+        self.assertEqual(("NOT_VERIFIED", "CANCELLED", 0),
+                         (stopped["result"], stopped["reason"], stopped["job_active"]))
+        exe = descriptor.parent / name
+        exe.write_bytes(exe.read_bytes() + b"changed")
+        with self.assertRaisesRegex(Blocked, "hash changed"):
+            self.runner.gui_verification_scope("inventory", **options)
+        self.assertFalse(native_unresolved(self.ledger.read()))
 
     def test_wrong_approval_and_unresolved_job_block_admission(self):
         with self.assertRaisesRegex(Blocked, "scope changed"):
