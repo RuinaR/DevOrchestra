@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from devorchestra.catalog import Catalog, new_project
+from devorchestra.default_instructions import COMMON, PROJECT, ROLES, public_instruction
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger
 from devorchestra.instructions import InstructionStore
@@ -40,6 +41,18 @@ class RequirementWorkflowTests(unittest.TestCase):
         )
         envelope["result"].update(changes)
         return envelope
+
+    def test_new_project_uses_public_layers_without_modifying_project_files(self):
+        self.catalog.register_requirement("sample", "goal.md", "GOAL")
+        before = self.catalog.read()["projects"]["sample"]
+        prompt = self.runner.supervised_handoff("start", "sample", paths=["src/main.py"])
+        header, envelope = prompt.split("\n\n", 1)
+        for layer in (COMMON, PROJECT, ROLES["manager-planning"]):
+            self.assertIn(" ".join(layer.split()), header)
+        self.assertEqual(["", "", ""], json.loads(envelope)["approved_local_instructions"])
+        self.assertEqual(before, self.catalog.read()["projects"]["sample"])
+        self.assertEqual([self.document], list(self.source.iterdir()))
+        self.assertEqual("public-v1", public_instruction("manager-planning")["version"])
 
     def test_supervised_manager_import_and_developer_handoff_after_restart(self):
         envelope = self.supervised_result()

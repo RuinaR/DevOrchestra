@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+개발 노트북에서는 [공개 지침](../defaults/global/AGENTS.md)과 감독형 요청 바인딩부터 확인한다. 이전 요청의 계약 해시가 다르면 결과를 가져오기 전에 지시를 다시 발행한다. 직접 GUI 검증에는 운영 원장과 분리된 테스트 데이터를 사용한다. 자동 역할 실행의 다음 관문은 [GUI 도구 입장 조건](ARCHITECTURE-ROADMAP.md#개발-노트북-gui-도구-입장-조건)이다.
+
 P2.32 기본 실행 후보는 Windows Native Codex다. VirtualBox 및 명시적 MXC 진단은 선택 후보이며 자동 폴백은 없다. 실운영 연결은 차단된 상태다. [네이티브 계약과 다음 승인 범위](ARCHITECTURE-ROADMAP.md#p232-windows-native-codex)
 
 P2.8 기준 `ac306f4`. 명시적 MXC 시작 진단은 별도 승인 하에 PASS했다. [합성 파일 시험](P2-MXC-FILE-TEST.md)의 호스트 양성 대조 및 MXC 1회는 새 승인이 필요하다. 기존 안전 계약은 유지하며 실제 Codex 및 P3는 BLOCKED다.

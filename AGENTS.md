@@ -1,4 +1,4 @@
-# DevOrchestra — global safety and execution policy (repository contract)
+# DevOrchestra — project instructions and execution policy
 # This file only affects agents working inside this repository.
 # Parent/orchestrator MUST independently enforce the same limits on registered projects.
 # Authoritative detailed rules: docs/GLOBAL-SAFETY-POLICY.md
@@ -19,7 +19,7 @@
 
 ## User PC and noninterference
 - No interaction with unrelated user apps or processes, including MapleStory and anti-cheat. Do NOT enumerate, open handles to, inject DLL into, hook, debug, read/write memory of, monitor, intercept traffic of, or examine their files/windows/processes.
-- Do not use global mouse/keyboard automation, SendInput, OS accessibility to manipulate other apps, clipboard capture, focus stealing, desktop/screen recording, screenshots or foreground switching. GUI testing only in explicitly isolated owned environment with owner approval; never capture a mixed desktop.
+- Direct development QA may use scoped input and window capture on the approved owned test app. Keep unrelated windows, global input, mixed-desktop capture and clipboard out of scope. Controller GUI execution requires a verified capability grant and cleanup evidence before the next role starts.
 - No privilege escalation, admin/UAC, drivers, scheduled tasks, startup registration, services, firewall/registry/system settings alteration, shell profiles or machine-wide package installs without separate explicit approval; risky/irreversible changes remain approval-gated even when requested by an agent.
 - Never end/suspend/throttle/reprioritize another app to free resources. Use resource limits on **owned** child processes; cancel or defer work if RAM, VRAM, commit, disk, temperature or load headroom is insufficient. Job Objects do NOT isolate filesystem or network.
 - No unbounded scanning of home drives or other repositories. All filesystem paths must be canonicalized and checked against approved roots, including symlinks, junctions and reparse points; fail closed on ambiguous paths.

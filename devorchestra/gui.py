@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .catalog import Catalog, REQUIREMENT_ROLES, new_project, read_frozen_requirements
 from .build_info import build_label
-from .default_instructions import defaults_text
+from .default_instructions import defaults_text, public_instruction
 from .lease import Blocked
 from .instructions import InstructionStore, selected_source, source_ref
 from .ledger import Ledger, check_path
@@ -1045,10 +1045,13 @@ class CommandCenter:
         project_id = self.project_ids[self.project.current()]
         status = tk.StringVar(value="원본과 개선본은 이 PC에만 보관됩니다.")
         ttk.Label(panel, textvariable=status, wraplength=640).pack(fill="x")
+        ttk.Label(panel, text="감독형 적용 순서 · 프로젝트 승인 재정의 → 개인 기본 → 공개 역할 → 프로젝트 공통 → 공개 전역",
+                  wraplength=740).pack(fill="x")
         selected = ttk.Combobox(panel, state="readonly", width=42)
         selected.pack(fill="x")
         sections = {"global": "전역 개발지침", "manager-planning": "계획 지침", "developer": "구현 지침",
-                    "reviewer": "검토 지침", "verifier": "검증 지침", "project": "프로젝트 추가 지침",
+                    "reviewer": "검토 지침", "verifier": "검증 지침", "manager-final": "최종 판정 지침",
+                    "project": "프로젝트 추가 지침",
                     "original": "전역 원본 (보존용)"}
         category = ttk.Combobox(panel, values=tuple(sections.values()), state="readonly")
         category.current(0)
@@ -1082,10 +1085,7 @@ class CommandCenter:
                         from hashlib import sha256
                         status.set(f"적용 중 · {relative}\nSHA-256 {sha256(data).hexdigest()}")
                         show(data.decode("utf-8-sig"))
-                    else:
-                        status.set("프로젝트 추가 지침 미지정 · 프로젝트 편집에서 지정 가능")
-                        show("")
-                    return
+                        return
                 active = store.active(project_id)
                 if role == "global" and active:
                     if not setup:
@@ -1095,16 +1095,25 @@ class CommandCenter:
                     return
                 drafts = store.active_role_drafts(project_id)
                 if role in drafts:
+                    from hashlib import sha256
+                    name = "verifier-contract" if role == "verifier" else role
+                    source = store.ledger.path.parent / "roles" / f"{name}.md"
                     show(drafts[role])
-                    status.set("프로젝트에서 승인한 역할 초안 적용 중")
+                    status.set(f"프로젝트 승인 역할 초안 · 내용 기준 SHA-256 {sha256(drafts[role].encode()).hexdigest()}"
+                               f"\n출처 · {source}")
                 elif role in defaults:
                     item = defaults[role]
                     status.set(f"{'보존용' if role == 'original' else '개인 기본 지침 적용 중'} · {item['version']}"
                                f"\n출처 · {Path(pin['manifest']).parent / item['path']}\nSHA-256 {item['sha256']}")
                     show(item["text"])
+                elif role != "original":
+                    item = public_instruction(role)
+                    state = "정책 참조" if role == "manager-final" else "공개 기본 지침"
+                    status.set(f"{state} · {item['version']}\n출처 · {item['path']}\nSHA-256 {item['sha256']}")
+                    show(item["text"])
                 else:
-                    status.set("개인 기본 지침 미연결 · 공개 기본 지침 사용 중")
-                    show(defaults_text())
+                    status.set("보존용 원본 미연결")
+                    show("")
             except (Blocked, OSError, ValueError, sqlite3.Error, KeyError, TypeError):
                 status.set("변경됨 또는 확인 필요 · 지침을 다시 확인하고 연결하세요.")
                 show("")
@@ -1234,14 +1243,16 @@ class CommandCenter:
                 status.set("역할 초안을 연결할 수 없습니다.")
 
         controls = ttk.Frame(panel)
-        controls.pack(fill="x")
+        controls.pack(fill="x", before=preview.master)
+        version_controls = ttk.Frame(panel)
+        version_controls.pack(fill="x", before=preview.master)
         ttk.Button(controls, text="적용 지침 보기", command=show_applied).pack(side="left")
         ttk.Button(controls, text="개인 기본 지침 연결", command=connect_defaults).pack(side="left")
         ttk.Button(controls, text="로컬 역할 초안 연결", command=local_roles).pack(side="left")
         ttk.Button(controls, text="개인 지침 선택 및 백업", command=backup).pack(side="left")
-        ttk.Button(controls, text="상태 다시 확인", command=refresh).pack(side="left")
-        ttk.Button(controls, text="개선본 전체 보기", command=full_preview).pack(side="left")
-        approve_button = ttk.Button(controls, text="선택 버전 승인 / 복원", command=approve)
+        ttk.Button(version_controls, text="상태 다시 확인", command=refresh).pack(side="left")
+        ttk.Button(version_controls, text="개선본 전체 보기", command=full_preview).pack(side="left")
+        approve_button = ttk.Button(version_controls, text="선택 버전 승인 / 복원", command=approve)
         approve_button.pack(side="left")
         selected.bind("<<ComboboxSelected>>", refresh)
         category.bind("<<ComboboxSelected>>", show_applied)

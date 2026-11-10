@@ -103,7 +103,8 @@ def main():
             "-m", "PyInstaller", "--onefile", "--windowed", "--noupx",
             "--name", "DevOrchestra", "--paths", str(root), "--specpath", str(output),
             "--workpath", str(output / "work"), "--distpath", str(output / "dist"),
-            "--add-data", f"{metadata};devorchestra", "--version-file", str(resource), str(launcher),
+            "--add-data", f"{metadata};devorchestra", "--add-data", f"{root / 'defaults'};defaults",
+            "--version-file", str(resource), str(launcher),
         ])
         if git("rev-parse", "HEAD") != sha or git("status", "--porcelain", "--untracked-files=normal"):
             raise SystemExit("SOURCE_CHANGED_DURING_BUILD")
@@ -126,7 +127,9 @@ def main():
         from PyInstaller.archive.readers import CArchiveReader
         archive = CArchiveReader(str(executable))
         names = {name.replace("\\", "/") for name in archive.toc}
-        if ("devorchestra/release.json" not in names or not any(name.startswith("_tcl_data/") for name in names)
+        from devorchestra.default_instructions import SOURCES
+        if ("devorchestra/release.json" not in names or not {f"defaults/{path}" for path in SOURCES.values()} <= names
+                or not any(name.startswith("_tcl_data/") for name in names)
                 or not any(name.startswith("_tk_data/") for name in names)):
             raise SystemExit("BUNDLED_RESOURCES_UNVERIFIED")
         info.update(sha256=checksum.hexdigest(), bytes=executable.stat().st_size, gui_runtime="NOT_VERIFIED")

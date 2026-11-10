@@ -1,3 +1,4 @@
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import time
@@ -70,7 +71,7 @@ class InstructionTests(unittest.TestCase):
 
     def test_damaged_backup_is_not_accepted(self):
         pin = self.approve()
-        with self.store.ledger.connect("rw") as db:
+        with closing(self.store.ledger.connect("rw")) as db, db:
             db.execute("UPDATE events SET hash = 'corrupt' WHERE seq = 1")
         with self.assertRaisesRegex(Blocked, "verification failed"):
             self.store.verify(pin, self.replica)
