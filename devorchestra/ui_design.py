@@ -6,11 +6,11 @@ import tkinter as tk
 from tkinter import font, ttk
 from xml.etree import ElementTree
 
-BG, PANEL, TILE, EDGE = "#0c111b", "#141d2b", "#1c293b", "#374862"
-RAIL, HERO = "#101827", "#172742"
-INK, MUTED, CYAN = "#f2f6ff", "#aabbd3", "#9dc8ff"
+BG, PANEL, TILE, EDGE = "#121212", "#1c1c1c", "#272727", "#505050"
+RAIL, HERO, HOVER = "#171717", "#303030", "#383838"
+INK, MUTED, CYAN = "#f5f5f5", "#bcbcbc", "#a8ceff"
 TEAL, AMBER, RED = "#75e2c0", "#ffd18a", "#ff9eae"
-ACCENT, ACCENT_HOVER = "#365eaf", "#4775ca"
+ACCENT, ACCENT_HOVER = "#354b67", "#405a7b"
 GAP, CARD_PAD, RADIUS = 12, 16, 8
 ASSETS = Path(__file__).resolve().parent / "ui_assets"
 ASSET_FILES = ("Pretendard-Regular.otf", "Pretendard-OFL.txt", "terminal.svg",
@@ -88,11 +88,11 @@ def install(root):
     style.configure(".", background=PANEL, foreground=INK, fieldbackground=TILE, bordercolor=EDGE,
                     lightcolor=PANEL, darkcolor=PANEL, troughcolor=BG, font=(family, 10))
     scale = min(2, max(1, float(root.tk.call("tk", "scaling")) / (96 / 72)))
-    for name, fill, hover, surface in (("TButton", TILE, "#283b55", PANEL),
+    for name, fill, hover, surface in (("TButton", TILE, HOVER, PANEL),
                                        ("Primary.TButton", ACCENT, ACCENT_HOVER, PANEL),
-                                       ("Hero.TButton", TILE, "#283b55", HERO),
+                                       ("Hero.TButton", TILE, HOVER, HERO),
                                        ("Rail.TButton", RAIL, HERO, RAIL),
-                                       ("RailActive.TButton", HERO, "#23395b", RAIL)):
+                                       ("RailActive.TButton", HERO, HOVER, RAIL)):
         element = name.replace(".", "") + ".skin"
         frames = [_rounded_image(root, color, border, scale, surface) for color, border in (
             (fill, EDGE), (PANEL, EDGE), (ACCENT, CYAN), (hover, CYAN), (hover, EDGE),

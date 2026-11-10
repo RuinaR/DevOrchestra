@@ -371,8 +371,12 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
                 if counts.active:
                     graceful = False
                     _require(api.TerminateJobObject(job, KILL_EXIT))
-                    counts = _wait_empty(api, job, monotonic() + 3)
-                if counts.active or api.WaitForSingleObject(info.process, 1000) != 0:
+                # Termination is asynchronous. Wait for the root handle before checking Job accounting.
+                cleanup_deadline = monotonic() + 10
+                if api.WaitForSingleObject(info.process, 10_000) != 0:
+                    raise Blocked("Owned GUI process exit unverified")
+                counts = _wait_empty(api, job, cleanup_deadline)
+                if counts.active:
                     raise Blocked("Owned GUI Job drain unverified")
                 _require(api.GetExitCodeProcess(info.process, c.byref(exit_code)))
                 active, total = counts.active, counts.total

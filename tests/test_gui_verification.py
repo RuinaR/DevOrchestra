@@ -11,6 +11,7 @@ from devorchestra.catalog import Catalog, DEFAULT_BUDGET, new_project
 from devorchestra.gui_verification import _Window, verified_image
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger, digest
+from devorchestra.owned_artifacts import review
 from devorchestra.runtime import Runner, native_unresolved
 
 
@@ -112,6 +113,21 @@ class GuiVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "ownership requires recovery"):
             self.runner.verify_gui_fixture("fixture-a", approval)
         self.assertTrue(native_unresolved(self.ledger.read()))
+
+    def test_unconfirmed_job_preserves_staging_and_original_error(self):
+        def unresolved(_scope, staging, *_args):
+            (staging / "capture.png").write_bytes(b"partial")
+            raise Blocked("Owned GUI Job drain unverified")
+
+        approval = digest(self.runner.gui_verification_scope("fixture-a"))
+        with patch("devorchestra.gui_verification.run_fixture", side_effect=unresolved):
+            with self.assertRaisesRegex(Blocked, "Owned GUI Job drain unverified"):
+                self.runner.verify_gui_fixture("fixture-a", approval)
+        intent = self.ledger.read()[-1]
+        staging = self.ledger.local_directory("temp") / intent["workspace"]
+        self.assertEqual(b"partial", (staging / "capture.png").read_bytes())
+        self.assertTrue(native_unresolved(self.ledger.read()))
+        self.assertEqual("PROTECTED", review(self.ledger, 2)["entries"][0]["classification"])
 
     def test_gui_session_rejects_role_descriptor_and_expiry_changes(self):
         descriptor = self.register_form()
@@ -254,6 +270,7 @@ class GuiVerificationTests(unittest.TestCase):
         self.assertEqual("PASS", receipt["result"], receipt["reason"])
         self.assertEqual(("CLOSED", 0, 0, True), (receipt["job_handles"], receipt["job_active"],
                                                     receipt["exit_code"], receipt["graceful_close"]))
+        self.assertEqual("REMOVED", receipt["cleanup"]["status"])
         self.assertEqual(3, len(receipt["scenes"]))
         self.assertEqual(30, receipt["observed"]["list_top_index"])
         directory = self.ledger.local_directory("logs") / receipt["artifact_dir"]

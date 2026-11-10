@@ -23,7 +23,7 @@ from .runtime import PROJECTS, Runner
 from .setup import create_work_copy, validate_setup
 from .supervised import MAX_HANDOFF_BYTES, latest_handoff
 from . import ui_design
-from .ui_design import BG, PANEL, TILE, EDGE, INK, MUTED, CYAN, TEAL, AMBER, RED
+from .ui_design import BG, PANEL, TILE, EDGE, INK, MUTED, CYAN, TEAL, AMBER, RED, ACCENT
 
 ROLE_MARKS = {"Manager": "01 / CMD", "Developer": "02 / DEV",
               "Reviewer": "03 / REV", "Verifier": "04 / VFY"}
@@ -411,7 +411,13 @@ class CommandCenter:
         matches.bind("<Double-Button-1>", choose)
         matches.bind("<Return>", choose)
         entry.bind("<Return>", choose)
-        entry.bind("<Down>", lambda _event: matches.focus_set())
+        def focus_matches(_event):
+            if found:
+                matches.activate(0)
+                matches.focus_set()
+            return "break"
+
+        entry.bind("<Down>", focus_matches)
         ttk.Button(dialog, text="프로젝트 열기", command=choose, style="Primary.TButton").pack(anchor="e")
         entry.focus_set()
 
@@ -525,7 +531,10 @@ class CommandCenter:
         split.pack(fill="both", expand=True)
         left, right = tk.Frame(split, bg=PANEL), tk.Frame(split, bg=PANEL)
         split.add(left, weight=3)
-        split.add(right, weight=2)
+        self.audit_split, self.audit_detail = split, right
+        self.audit_detail_button = ttk.Button(audit, text="선택 기록 상세 보기",
+                                              command=self.toggle_audit_detail)
+        self.audit_detail_button.pack(anchor="e", pady=(6, 0))
         columns = ("seq", "role", "event", "state")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", height=10)
         for key, title, width in zip(columns, ("SEQ", "ACTOR", "EVENT", "STATE"), (52, 95, 152, 115)):
@@ -539,6 +548,14 @@ class CommandCenter:
                                 highlightcolor=CYAN, state="disabled")
         self.scrollable(right, self.evidence)
         return audit
+
+    def toggle_audit_detail(self):
+        if self.audit_detail.winfo_manager():
+            self.audit_split.forget(self.audit_detail)
+            self.audit_detail_button.configure(text="선택 기록 상세 보기")
+        else:
+            self.audit_split.add(self.audit_detail, weight=2)
+            self.audit_detail_button.configure(text="선택 기록 상세 닫기")
 
     @staticmethod
     def scrollable(parent, widget):
@@ -2180,7 +2197,7 @@ class CommandCenter:
                 next_step = "기존 요청이 만료되었습니다. 새 계획 지시를 만드세요."
             for position, (name, badge) in enumerate(steps):
                 current = position == index
-                badge.configure(text=f"{position + 1:02d}  {name}", bg="#385ba0" if current else TILE,
+                badge.configure(text=f"{position + 1:02d}  {name}", bg=ACCENT if current else TILE,
                                 fg=INK if current else MUTED)
             guide.configure(text=f"현재 · {title}\n다음 · {next_step}")
             enabled = {"start": not waiting, "prompt": accepts,

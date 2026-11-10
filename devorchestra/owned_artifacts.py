@@ -84,6 +84,10 @@ def review(ledger, retain):
     settled_installs = {event["run_id"] for event in events if event["kind"] == "sdk_install_result"}
     pending.update(event["workspace"] for event in events if event["kind"] == "sdk_install_intent"
                    and event["run_id"] not in settled_installs)
+    settled_gui = {event["run_id"] for event in events if event["kind"] == "gui_validation_result"}
+    pending.update(event["workspace"] for event in events
+                   if event["kind"] == "gui_validation_intent" and "workspace" in event
+                   and event["run_id"] not in settled_gui)
     settled_cycles = {event["run_id"] for event in events if event["kind"] == "subscription_cycle_result"}
     pending.update(event["cleanup_plan"]["workspace"] for event in events
                    if event["kind"] == "subscription_cycle_intent" and "cleanup_plan" in event

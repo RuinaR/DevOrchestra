@@ -687,10 +687,9 @@ class Runner:
                            gui_session_id=None):
         """Run the approved deterministic GUI scenario in an owner-driven slot."""
         from contextlib import ExitStack
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
 
         from .gui_verification import run_fixture
+        from .owned_artifacts import _remove_owned_tree
         from .system_powershell import hold_system_powershell
 
         with execution_slot() as abandoned, ExitStack() as resources:
@@ -726,27 +725,34 @@ class Runner:
                        "scope_sha256": digest(scope)}
             if gui_session_id is not None:
                 binding["gui_session_id"] = gui_session_id
+            staging = self.ledger.local_directory("temp", create=True) / f"gui-verification-{identifier}"
+            check_path(staging)
             count, fence = self.ledger.append(len(events), tail, {
                 **binding, "kind": "gui_validation_intent", "timestamp": datetime.now(timezone.utc).isoformat(),
+                "workspace": staging.name,
             }, admission=require_admission)
 
-            temp = self.ledger.local_directory("temp", create=True)
-            with TemporaryDirectory(prefix="gui-verification-", dir=temp) as staging:
-                receipt = run_fixture(scope, Path(staging), cancelled, lambda: self._check_diagnostic_fence(count, fence),
-                                      executable, form, exe_data)
-                if exe_data is not None:
-                    receipt["working_directory"] = staging
-                if receipt["scenes"]:
-                    artifacts = self.ledger.local_directory("logs", create=True) / f"gui-{identifier}"
-                    check_path(artifacts)
-                    artifacts.mkdir()
-                    images = [scene[key] for scene in receipt["scenes"] for key in ("original", "processed")]
-                    if receipt["comparison"]:
-                        images.append(receipt["comparison"])
-                    for image in images:
-                        name = image["file"]
-                        (Path(staging) / name).replace(artifacts / name)
-                    receipt["artifact_dir"] = artifacts.name
+            staging.mkdir()
+            identity = staging.stat().st_ino
+            # A runner exception leaves the workspace tied to the unresolved intent for recovery.
+            receipt = run_fixture(scope, staging, cancelled, lambda: self._check_diagnostic_fence(count, fence),
+                                  executable, form, exe_data)
+            if exe_data is not None:
+                receipt["working_directory"] = str(staging)
+            if receipt["scenes"]:
+                artifacts = self.ledger.local_directory("logs", create=True) / f"gui-{identifier}"
+                check_path(artifacts)
+                artifacts.mkdir()
+                images = [scene[key] for scene in receipt["scenes"] for key in ("original", "processed")]
+                if receipt["comparison"]:
+                    images.append(receipt["comparison"])
+                for image in images:
+                    name = image["file"]
+                    (staging / name).replace(artifacts / name)
+                receipt["artifact_dir"] = artifacts.name
+            receipt["cleanup"] = _remove_owned_tree(staging, identity)
+            if receipt["cleanup"]["status"] != "REMOVED" and receipt["result"] == "PASS":
+                receipt.update(result="NOT_VERIFIED", reason="GUI workspace cleanup unconfirmed")
             resources.close()
             result = {**binding, **receipt, "kind": "gui_validation_result",
                       "timestamp": datetime.now(timezone.utc).isoformat()}
