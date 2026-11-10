@@ -17,6 +17,7 @@ from .mxc_launcher import _known_folder, _signed_offline
 from .replica_evidence import fingerprint, snapshot
 
 KIND = "mxc-dotnet-console-v1"
+ONBOARDED_KIND = "mxc-dotnet-onboarded-v1"
 PROGRAM = b"""using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -87,12 +88,15 @@ def _toolchain(replica, root=None):
     return root, tool, compiler / "csc.dll", libraries, identity, selected
 
 
-def review(replica, launcher, source_names, vectors, seconds, tool_root=None, *, arithmetic=False):
+def review(replica, launcher, source_names, vectors, seconds, tool_root=None, *, arithmetic=False, nested=False):
+    pattern = (r"(?:[A-Za-z0-9_-]{1,64}/){0,6}[A-Za-z][A-Za-z0-9_]{0,63}\.cs"
+               if nested else r"[A-Za-z][A-Za-z0-9_]{0,63}\.cs")
     if (type(source_names) is not list or len(source_names) != 2
-            or any(type(name) is not str or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}\.cs", name)
+            or any(type(name) is not str or not re.fullmatch(pattern, name)
                    for name in source_names)
-            or len({name.casefold() for name in source_names}) != 2):
-        raise Blocked("Expected two explicit root C# source paths")
+            or len({Path(name).name.casefold() for name in source_names}) != 2):
+        raise Blocked("Expected two unambiguous approved C# source paths" if nested
+                      else "Expected two explicit root C# source paths")
     if (type(vectors) is not list or not 1 <= len(vectors) <= 4
             or any(type(pair) is not list or len(pair) != 2
                    or any(type(value) is not int or abs(value) > 1000000 for value in pair) for pair in vectors)
@@ -108,7 +112,7 @@ def review(replica, launcher, source_names, vectors, seconds, tool_root=None, *,
 
         if not all(sources.values()):
             raise Blocked("Approved arithmetic source is missing")
-        validate({name: (replica / name).read_bytes() for name in source_names})
+        validate({Path(name).name: (replica / name).read_bytes() for name in source_names})
     elif sorted(filter(None, sources.values())) != sorted(sha256(data).hexdigest() for data in (PROGRAM, CALCULATION)):
         raise Blocked("Only the reviewed .NET console sources are admitted")
     if not image["git"]:
@@ -122,7 +126,8 @@ def review(replica, launcher, source_names, vectors, seconds, tool_root=None, *,
     config = {"runtimeOptions": {"tfm": selected["target"], "rollForward": "Disable",
                                  "framework": {"name": "Microsoft.NETCore.App", "version": runtime}}}
     compiler_command = ["exec", "--fx-version", runtime, str(compiler)]
-    return {"kind": KIND, "arithmetic": arithmetic, "harness_sha256": sha256(PROGRAM).hexdigest(),
+    return {"kind": ONBOARDED_KIND if nested else KIND, "arithmetic": arithmetic,
+            "harness_sha256": sha256(PROGRAM).hexdigest(),
             "launcher": str(launcher), "launcher_sha256": LAUNCHER_PIN,
             "replica": str(replica), "replica_sha256": digest(image), "git": image["git"],
             "sources": sources, "vectors": vectors, "tool": str(tool), "sdk": selected["sdk"], "runtime": runtime,
@@ -149,7 +154,8 @@ def run(ledger, scope, check, workspace=None):
     replica, launcher = Path(scope["replica"]), Path(scope["launcher"])
     names = sorted(scope["sources"])
     current = review(replica, launcher, names, scope["vectors"], scope["limits"]["max_seconds"],
-                     Path(scope["tool_root_read_only"]), arithmetic=scope["arithmetic"])
+                     Path(scope["tool_root_read_only"]), arithmetic=scope["arithmetic"],
+                     nested=scope["kind"] == ONBOARDED_KIND)
     if any(scope.get(key) != value for key, value in current.items()):
         raise Blocked(".NET execution scope changed")
     with (nullcontext(workspace) if workspace is not None else
@@ -164,12 +170,14 @@ def run(ledger, scope, check, workspace=None):
             data = path.read_bytes()
             if sha256(data).hexdigest() != scope["sources"][name]:
                 raise Blocked(".NET input changed")
-            (work / name).write_bytes(data)
+            staged = work / name
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(data)
         compiled = names
         if scope["arithmetic"]:
             from .csharp_sources import validate
 
-            validate({name: (work / name).read_bytes() for name in names})
+            validate({Path(name).name: (work / name).read_bytes() for name in names})
             (work / "ControllerEntry.cs").write_bytes(PROGRAM)
             compiled = [*names, "ControllerEntry.cs"]
         marker = protected / "marker.cs"

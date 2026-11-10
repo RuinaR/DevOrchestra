@@ -1,7 +1,10 @@
 """Owner review for the existing-Git onboarding workflow."""
 from concurrent.futures import Future
+import json
 from pathlib import Path
+from shutil import which
 from threading import Thread
+from time import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 
@@ -18,7 +21,7 @@ def show_panel(center, initial):
     runner = Runner(center.reader.ledger)
     panel = center.panel()
     panel.title("기존 Git 프로젝트 문맥")
-    panel.geometry("760x590")
+    panel.geometry("810x690")
     ttk.Label(panel, text=f"{project} · 원본 읽기 전용 / 개발 권한 별도 승인").pack(anchor="w")
     destination = ttk.Entry(panel)
     destination.insert(0, initial)
@@ -35,8 +38,16 @@ def show_panel(center, initial):
     examples = center.editor_box(panel, height=3)
     actions = ttk.Frame(panel)
     actions.pack(fill="x")
+    ttk.Label(panel, text="오프라인 .NET 검증 · C# 상대 경로 두 개를 쉼표로 구분").pack(anchor="w", pady=(6, 0))
+    build_paths = ttk.Entry(panel)
+    build_paths.pack(fill="x")
+    ttk.Label(panel, text="기대 벡터 JSON · 예: [[9, 31]]").pack(anchor="w")
+    build_vectors = ttk.Entry(panel)
+    build_vectors.pack(fill="x")
+    verification = ttk.Frame(panel)
+    verification.pack(fill="x")
     report = center.editor_box(panel, height=15, state="disabled")
-    busy, approved = False, None
+    busy, approved, build_approved = False, None, None
 
     def display(text):
         report.configure(state="normal")
@@ -68,10 +79,10 @@ def show_panel(center, initial):
             panel.destroy()
 
     def run(mode):
-        nonlocal busy, approved
+        nonlocal busy, approved, build_approved
         path = destination.get().strip()
         include = [line.strip() for line in examples.get("1.0", "end-1c").splitlines() if line.strip()]
-        if mode != "status" and not path:
+        if mode in ("review", "create") and not path:
             display("새 복제본 경로를 지정하세요.")
             return
         if mode == "create":
@@ -81,10 +92,33 @@ def show_panel(center, initial):
             if not center.confirm("기존 Git 프로젝트 복제", "검토된 파일만 새 경로에 복사합니다. 원본 Git 이력은 그대로 보존됩니다.",
                                   parent=panel):
                 return
+        build_input = (build_paths.get(), build_vectors.get())
+        build_args = None
+        if mode == "build-review":
+            try:
+                from .mxc_dotnet import ONBOARDED_KIND
+
+                launcher = which("codex.exe")
+                if not launcher:
+                    raise ValueError
+                names = [name.strip() for name in build_input[0].split(",") if name.strip()]
+                build_args = (project, ONBOARDED_KIND, launcher, names, json.loads(build_input[1]), 20, int(time()) + 180)
+            except ValueError:
+                display("Codex 실행기, 쉼표로 구분한 두 파일 경로와 [[입력, 기대값]] JSON을 확인하세요.")
+                return
+        if mode == "build":
+            if not build_approved or build_approved[0] != build_input:
+                display("실행 범위를 다시 검토하세요.")
+                return
+            if not center.confirm("격리 빌드·테스트 승인", "검토한 파일과 기대 벡터만 오프라인 MXC에서 실행합니다.",
+                                  parent=panel):
+                return
+            build_args = build_approved[1]
+        build_digest = build_approved[2] if build_approved else None
         busy = True
         for button in buttons:
             button.configure(state="disabled")
-        display("소유 Git 작업 실행 중 · 원본 변경과 네트워크 연결은 허용하지 않습니다.")
+        display("검토 또는 검증 진행 중 · 원본 변경과 네트워크 연결은 허용하지 않습니다.")
         future = Future()
         approval = approved[2] if approved else None
 
@@ -94,6 +128,11 @@ def show_panel(center, initial):
                     value = project_onboarding.status(runner.ledger, project)
                 elif mode == "review":
                     value = project_onboarding.review(runner, project, path, include)
+                elif mode == "build-review":
+                    value = runner.build_verifier_scope(*build_args)
+                elif mode == "build":
+                    runner.build_verify(*build_args, build_digest)
+                    value = project_onboarding.status(runner.ledger, project)
                 else:
                     value = project_onboarding.create(runner, project, path, include, approval)
             except Exception as error:
@@ -104,7 +143,7 @@ def show_panel(center, initial):
                 future.set_result((value, None))
 
         def poll():
-            nonlocal busy, approved
+            nonlocal busy, approved, build_approved
             if not future.done():
                 panel.after(100, poll)
                 return
@@ -114,14 +153,32 @@ def show_panel(center, initial):
             value, failure = future.result()
             if failure:
                 approved = None
+                build_approved = None
                 display("BLOCKED · " + failure)
             elif mode == "review":
                 approved = (path, include, digest(value))
                 display(review_text(value))
+            elif mode == "build-review":
+                build_approved = (build_input, build_args, digest(value))
+                display("\n".join((
+                    "ENVIRONMENT_READY · 이 실행 계약의 도구와 의존성 확인",
+                    f'범위 · {value["readiness"]["coverage"]}',
+                    f'SDK {value["sdk"]} · 런타임 {value["runtime"]}',
+                    f'도구 {value["tool"]}',
+                    f'도구 SHA-256 {value["tool_sha256"][value["tool"]]}',
+                    "소스 · " + ", ".join(value["sources"]),
+                    f'테스트 벡터 · {value["vectors"]}',
+                    "네트워크 OFF · 패키지 복원 및 프로젝트 빌드 스크립트 없음",
+                    f'시간 {value["limits"]["max_seconds"]}초 · 메모리 {value["limits"]["memory_bytes"]}B',
+                )))
             else:
                 display("\n".join(f"{key} · {value[key]}" for key in (
-                    "status", "replica", "original_head", "replica_head", "environment", "development", "reason",
-                ) if key in value))
+                    "status", "replica", "original_head", "replica_head", "environment", "development",
+                    "coverage", "sdk", "runtime", "compiler_version", "context_documents",
+                    "build_result", "test_results", "cleanup", "build_receipt_sha256", "reason",
+                ) if value.get(key) is not None))
+                if mode == "build":
+                    build_approved = None
                 if mode == "create":
                     approved = None
                     center.refresh()
@@ -132,6 +189,10 @@ def show_panel(center, initial):
     buttons = []
     for name, mode in (("준비 상태", "status"), ("문맥 및 복제 범위 검토", "review"), ("승인하고 복제본 생성", "create")):
         button = ttk.Button(actions, text=name, command=lambda mode=mode: run(mode))
+        button.pack(side="left", padx=(0, 6))
+        buttons.append(button)
+    for name, mode in (("환경·빌드 검토", "build-review"), ("승인하고 빌드·테스트", "build")):
+        button = ttk.Button(verification, text=name, command=lambda mode=mode: run(mode))
         button.pack(side="left", padx=(0, 6))
         buttons.append(button)
     panel.protocol("WM_DELETE_WINDOW", close)

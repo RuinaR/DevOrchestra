@@ -6,7 +6,7 @@ from devorchestra.project_onboarding import _protected, _records, _relative
 
 class ProjectOnboardingTests(unittest.TestCase):
     def test_private_paths_are_distinct_from_explicit_examples(self):
-        for path in ("private/", "data/account.sqlite3", "src/.env.local", "src/appsettings.json",
+        for path in ("private/", "data/account.sqlite3", "data/account.sqlite3-wal", "src/.env.local", "src/appsettings.json",
                      "engine/models/weights.dat", "keys/signing.pem"):
             with self.subTest(path=path):
                 self.assertTrue(_protected(path))

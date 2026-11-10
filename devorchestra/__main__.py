@@ -110,6 +110,9 @@ def main():
     onboarding.add_argument("--destination")
     onboarding.add_argument("--include", action="append", default=[])
     onboarding.add_argument("--approve")
+    commands.add_parser("replica-changes", help="Review frozen original versus replica bytes without applying").add_argument(
+        "--project", required=True,
+    )
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -157,6 +160,11 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "replica-changes":
+            from .replica_readiness import changes_review
+
+            print(canonical(changes_review(ledger, args.project)))
+            return
         if args.action == "onboard-git":
             from . import project_onboarding
 

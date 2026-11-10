@@ -6,7 +6,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 from shutil import which
-from tempfile import TemporaryDirectory
+from tempfile import mkdtemp
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -24,8 +24,8 @@ from .setup import validate_setup
 DOCUMENT = re.compile(r"(?:readme[^/]*|agents(?:\.override)?|project-definition|current-status|ai-handoff|handoff|worklog)\.md", re.I)
 PROTECTED = {".ai-local", ".codex", ".agents", ".vs", "node_modules", "venv", ".venv", "bin", "obj",
              "secrets", "credentials", "private", "models", "checkpoints", "__pycache__", ".git"}
-PRIVATE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".pfx", ".dpapi", ".safetensors", ".gguf",
-                    ".onnx", ".pt", ".pth", ".ckpt", ".log", ".bin", ".pkl"}
+PRIVATE_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".wal", ".shm", ".pem", ".key", ".pfx", ".dpapi",
+                    ".safetensors", ".gguf", ".onnx", ".pt", ".pth", ".ckpt", ".log", ".bin", ".pkl"}
 
 
 def _relative(value):
@@ -44,7 +44,19 @@ def _protected(value):
     name = path.name.casefold()
     return (bool(PROTECTED & {part.casefold() for part in path.parts}) or path.suffix.casefold() in PRIVATE_SUFFIXES
             or name.startswith((".env", "credentials", "secrets", "auth.", "id_rsa", "id_ed25519"))
+            or re.search(r"\.(?:db|sqlite3?)-(?:wal|shm|journal)$", name) is not None
             or name in {"appsettings.json", "local.settings.json", "settings.local.json"})
+
+
+@contextmanager
+def _git_scratch(ledger):
+    from .owned_artifacts import _remove_owned_tree
+
+    scratch = Path(mkdtemp(prefix="onboard-git-", dir=ledger.local_directory("temp", create=True)))
+    identity = scratch.stat().st_ino
+    yield scratch
+    if _remove_owned_tree(scratch, identity)["status"] != "REMOVED":
+        raise Blocked("Onboarding Git scratch cleanup is unconfirmed")
 
 
 @contextmanager
@@ -62,8 +74,7 @@ def _git(ledger, source, staging=None):
             raise Blocked("Packaged Git signature is unverified")
         identity["cmd/git.exe" if exe == git else "ucrt64/bin/git.exe"] = fingerprint(exe)["sha256"]
     verify_app_server_binary(launcher, approved_sha256=LAUNCHER_PIN)
-    with TemporaryDirectory(prefix="onboard-git-", dir=ledger.local_directory("temp", create=True)) as tmp:
-        scratch = Path(tmp)
+    with _git_scratch(ledger) as scratch:
         home, output = scratch / "home", scratch / "output"
         home.mkdir()
         output.mkdir()
@@ -88,8 +99,9 @@ def _git(ledger, source, staging=None):
             result = _observe(launcher, _args(git, "--no-optional-locks", "--no-replace-objects",
                                                 "-c", "core.hooksPath=NUL", "-c", "core.excludesFile=NUL",
                                                 "-c", "core.attributesFile=NUL", "-c", "core.fsmonitor=false",
-                                                "-c", "core.autocrlf=false", *roots, *args),
-                              cwd, logs, env, seconds=12, check=lambda: None, output_limit=1024 * 1024, encoding="utf-8")
+                                                "-c", "core.autocrlf=false", "-c", "maintenance.auto=false",
+                                                "-c", "gc.auto=0", *roots, *args),
+                              cwd, logs, env, seconds=20, check=lambda: None, output_limit=1024 * 1024, encoding="utf-8")
             if result["exitCode"] not in allowed or result["stderr"] or result["job_active"]:
                 raise Blocked("Offline Git onboarding command could not be verified")
             return result["stdout"]
@@ -399,5 +411,9 @@ def status(ledger, project):
             raise Blocked("Catalog or replica changed after onboarding")
     except (OSError, Blocked, KeyError, StopIteration):
         return {"status": "BLOCKED", "reason": "Catalog or replica baseline changed; review again"}
-    return {key: last[key] for key in ("status", "replica", "original_head", "replica_head",
-                                       "environment", "development", "original_rechecked")}
+    from .replica_readiness import project_status
+
+    result = {key: last[key] for key in ("status", "replica", "original_head", "replica_head",
+                                        "environment", "development", "original_rechecked")}
+    result["context_documents"] = list(baseline["documents"])
+    return {**result, **project_status(ledger, project, last)}

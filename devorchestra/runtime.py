@@ -519,7 +519,7 @@ class Runner:
         from pathlib import Path
         from . import mxc_dotnet
 
-        if kind != mxc_dotnet.KIND:
+        if kind not in (mxc_dotnet.KIND, mxc_dotnet.ONBOARDED_KIND):
             raise Blocked("Build tool adapter is not supported")
         catalog = Catalog(self.ledger).read()
         setup = catalog["setups"].get(project_id)
@@ -533,8 +533,13 @@ class Runner:
         from .dotnet_install import registered
 
         replica = Path(setup["replica"])
+        onboarded = kind == mxc_dotnet.ONBOARDED_KIND
         scope = mxc_dotnet.review(replica, launcher, sources, vectors, seconds,
-                                  registered(self.ledger, project_id, replica))
+                                  registered(self.ledger, project_id, replica), arithmetic=onboarded, nested=onboarded)
+        if onboarded:
+            from .replica_readiness import bind
+
+            scope["readiness"] = bind(self.ledger, project_id, scope)
         return {**scope, "project_id": project_id, "project_revision": project["revision"],
                 "role": "Verifier", "expires_epoch": expires}
 
@@ -581,6 +586,18 @@ class Runner:
             if removal["status"] != "REMOVED":
                 evidence = {**evidence, "execution_result": evidence["result"], "result": "NOT_VERIFIED",
                             "reason": "BUILD_CLEANUP_UNCONFIRMED"}
+            if "readiness" in scope:
+                from .replica_readiness import bind
+                from .replica_evidence import snapshot
+                from pathlib import Path
+
+                try:
+                    observed = {**scope, "replica_sha256": digest(snapshot(Path(scope["replica"])))}
+                    evidence["original_rechecked"] = bind(self.ledger, project_id, observed) == scope["readiness"]
+                except (Blocked, OSError):
+                    evidence["original_rechecked"] = False
+                if not evidence["original_rechecked"]:
+                    evidence.update(result="NOT_VERIFIED", reason="ONBOARDING_BASELINE_CHANGED")
             result = {**binding, **evidence, "kind": "build_verifier_result",
                       "cleanup": removal,
                       "timestamp": datetime.now(timezone.utc).isoformat()}
