@@ -581,7 +581,69 @@ class Runner:
             "budget_ceiling": context["budget_ceiling"],
         }}
 
-    def plan_native_manager(self, approval, request):
+    def review_native_manager(self, project_id, binary, cli_sha256, home, expires):
+        """Freeze an owner-reviewable, expiring one-shot request without starting Codex."""
+        from pathlib import Path
+
+        from .app_server import verify_app_server_binary
+        from .native_manager import MANAGER_CONFIG, review_manager_layers
+
+        if type(expires) is not int or not time() < expires <= time() + 300:
+            raise Blocked("Manager review expiry must be within the next five minutes")
+        events, head = self.ledger.snapshot()
+        require_admission(events)
+        setup = Catalog(self.ledger).read()["setups"].get(project_id)
+        if not setup:
+            raise Blocked("Register the Manager work copy before reviewing a turn")
+        baseline = self.native_manager_context(project_id)
+        if baseline["model"] in ("mock-v1", "deterministic"):
+            raise Blocked("Select a subscription model in the project Manager settings")
+        replica = Path(setup["replica"])
+        binary, home = Path(binary), Path(home)
+        verify_app_server_binary(binary, approved_sha256=cli_sha256)
+        layers = review_manager_layers(self.ledger, project_id, replica, home)
+        budget = {**baseline["budget_ceiling"], "seconds": min(60, baseline["budget_ceiling"]["seconds"]),
+                  "cost_microunits": 0}
+        return {
+            "contract": "manager-owner-turn-v1", "role": "Manager", "project_id": project_id,
+            "generation": len(events) + 1, "ledger_head": head, "input_sha256": digest(baseline),
+            "project_revision": baseline["project_revision"], "registered_git_sha": baseline["registered_git_sha"],
+            "binary": str(binary), "cli_sha256": cli_sha256, "replica": str(replica), "home": str(home),
+            "config_ref": digest(MANAGER_CONFIG), "instruction_layers": list(layers),
+            "model": baseline["model"], "reasoning": baseline["reasoning"], "budget": budget,
+            "expires": expires, "readable": [str(replica)], "writable": [], "tools": [], "network": [],
+            "authentication": "CHATGPT_SUBSCRIPTION_ONLY",
+        }
+
+    def run_reviewed_native_manager(self, project_id, binary, cli_sha256, home, expires, approved_sha256):
+        """Materialize a reviewed request and defer all authority to native admission."""
+        from pathlib import Path
+
+        from .native_manager import ManagerApproval, manager_request_hash
+
+        review = self.review_native_manager(project_id, binary, cli_sha256, home, expires)
+        if digest(review) != approved_sha256:
+            raise Blocked("Manager review changed; review the current request again")
+        baseline = self.native_manager_context(project_id)
+        if digest(baseline) != review["input_sha256"]:
+            raise Blocked("Manager requirements changed after review")
+        layers = tuple(review["instruction_layers"])
+        budget = Budget(**review["budget"])
+        ids = {key: digest([key, approved_sha256])[:32] for key in ("approval", "run", "task", "agent")}
+        request = RoleRequest(
+            project_id, ids["task"], ids["run"], review["generation"], ids["agent"], "Manager",
+            review["model"], review["reasoning"], baseline["development_id"],
+            Scope(review["replica"], (ids["approval"],), readable=(review["replica"],)),
+            budget, (review["input_sha256"],), baseline["goal"], min(expires, time() + budget.seconds),
+        )
+        approval = ManagerApproval(
+            ids["approval"], expires, Path(review["binary"]), Path(review["replica"]), Path(review["home"]),
+            layers, manager_request_hash(request, layers, cli_sha256), budget.tokens, 1024, cli_sha256,
+        )
+        return self.plan_native_manager(approval, request, reviewed_head=review["ledger_head"],
+                                        owner_review_sha256=approved_sha256)
+
+    def plan_native_manager(self, approval, request, *, reviewed_head=None, owner_review_sha256=None):
         """Internal one-shot planning entry; never grants another role."""
         from pathlib import Path
         from .native_manager import (
@@ -598,6 +660,7 @@ class Runner:
             require_admission(events)
             run, development = last_run(events), session_view(events)
             if (abandoned or request.generation != len(events) + 1
+                    or (reviewed_head is not None and reviewed_head != tail)
                     or (run and run[-1]["state"] not in TERMINAL)
                     or (development and not development["end"])
                     or any(event.get("request_id") == approval.request_id
@@ -630,6 +693,8 @@ class Runner:
                           timestamp=datetime.now(timezone.utc).isoformat())
             if context:
                 fields["question_development_id"] = context["project_context"]["development_id"]
+            if owner_review_sha256 is not None:
+                fields["owner_review_sha256"] = owner_review_sha256
             count, head = self.ledger.append(len(events), tail, {
                 **fields, "kind": "native_manager_intent",
             }, admission=require_admission)

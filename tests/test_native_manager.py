@@ -374,7 +374,7 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual(public_instruction("project")["text"], messages[0]["text"].strip())
         self.assertEqual(public_instruction("manager-planning")["text"], messages[1]["text"].strip())
 
-    def test_registered_project_plans_without_a_mock_session_and_grants_no_write(self):
+    def register_manager_project(self):
         source = self.replica.parent / "requirements"
         source.mkdir()
         (source / "goal.md").write_text("Synthetic planning requirement", encoding="utf-8")
@@ -389,6 +389,10 @@ class NativeManagerTests(unittest.TestCase):
         project["requested_scope"]["files"] = ["fixture.txt"]
         catalog.save_project(project, revision)
         catalog.register_requirement("sample", "goal.md", "GOAL")
+        return source
+
+    def test_registered_project_plans_without_a_mock_session_and_grants_no_write(self):
+        self.register_manager_project()
         context = self.runner.native_manager_context("sample")
         preview = self.runner.inspect_manager_admission("sample")
         self.assertEqual("BLOCKED", preview["state"])
@@ -401,6 +405,22 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual("BLOCKED", result["next_role_admission"])
         self.assertEqual(context["development_id"], result["question_development_id"])
         self.assertFalse((self.replica / "fixture.txt").exists())
+
+    def test_reviewed_owner_turn_stays_blocked_and_cannot_reuse_changed_instructions(self):
+        self.register_manager_project()
+        fields = ("sample", self.approval.binary, "a" * 64, self.approval.home, int(time()) + 120)
+        with patch("devorchestra.app_server.verify_app_server_binary"):
+            review = self.runner.review_native_manager(*fields)
+            self.assertEqual([], review["tools"])
+            self.assertEqual([], review["writable"])
+            self.assertEqual(1, review["generation"])
+            self.assertNotIn("Synthetic planning requirement", str(review))
+            with self.assertRaisesRegex(Blocked, "SIDE_EFFECTING_TOOLS_UNVERIFIED"):
+                self.runner.run_reviewed_native_manager(*fields, digest(review))
+            self.role_file.write_text("Changed Manager scope")
+            with self.assertRaisesRegex(Blocked, "review changed"):
+                self.runner.run_reviewed_native_manager(*fields, digest(review))
+        self.assertEqual([], self.ledger.read())
 
     def test_valid_turn_drains_commits_and_does_not_admit_developer(self):
         result, proposal = self.run_fixture()

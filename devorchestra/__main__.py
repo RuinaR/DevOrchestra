@@ -1,4 +1,4 @@
-"""Local owner console. No server, model, shell or external service adapter."""
+"""Local owner console for scoped Controller operations."""
 import argparse
 import json
 import sqlite3
@@ -22,6 +22,11 @@ def main():
     commands.add_parser("manager-preflight", help="Inspect native Manager admission without starting Codex").add_argument(
         "--project", required=True,
     )
+    manager_turn = commands.add_parser("manager-turn", help="Review or approve one registered Manager turn")
+    for option in ("project", "binary", "cli-sha256", "home"):
+        manager_turn.add_argument("--" + option, required=True)
+    manager_turn.add_argument("--expires", type=int, required=True, help="Review expiry as Unix seconds")
+    manager_turn.add_argument("--approve", metavar="REVIEW_SHA256")
     gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
     gui_verify.add_argument("--registered", action="store_true")
@@ -84,6 +89,16 @@ def main():
             decision = Runner(ledger).inspect_manager_admission(args.project)
             print(canonical(decision))
             return 2 if decision["state"] == "BLOCKED" else 0
+        if args.action == "manager-turn":
+            runner = Runner(ledger)
+            fields = (args.project, args.binary, args.cli_sha256, args.home, args.expires)
+            if args.approve is None:
+                review = runner.review_native_manager(*fields)
+                print(canonical({"review": review, "review_sha256": digest(review)}))
+                return
+            receipt, _proposal = runner.run_reviewed_native_manager(*fields, args.approve)
+            print(canonical(receipt))
+            return
         if args.action == "gui-build-exe":
             runner = Runner(ledger)
             if args.approve is None:

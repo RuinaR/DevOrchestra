@@ -209,18 +209,18 @@ def manager_admission(approval=None):
     return {"state": "READY", "reason": None, "message": "승인된 요청의 실행 전 검사를 진행할 수 있습니다."}
 
 
-def _instruction_or_public(path, section, layer):
+def _instruction_or_public(path, section):
     """Use the same bundled fallback as supervised handoffs when no local layer exists."""
     from .default_instructions import public_instruction
 
     check_path(path)
     if path.exists():
-        return instruction_bytes(path)
+        return instruction_bytes(path), None
     item = public_instruction(section)
     data = instruction_bytes(item["path"])
-    if layer["version"] != item["version"] or sha256(data).hexdigest() != item["sha256"]:
+    if sha256(data).hexdigest() != item["sha256"]:
         raise Blocked("Public Manager instruction binding changed")
-    return data
+    return data, item["version"]
 
 
 def require_live_manager_admission(approval=None):
@@ -234,19 +234,7 @@ def require_live_manager_admission(approval=None):
         raise Blocked(decision["reason"])
 
 
-def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False):
-    from .mxc_launcher import _known_folder
-
-    replica, home = approval.replica, approval.home
-    if (request.role != "Manager" or request.scope.approval_receipts != (approval.request_id,)
-            or request.scope.readable != (str(replica),) or request.scope.writable
-            or request.scope.tools or request.scope.network
-            or not request.model or request.model in ("mock-v1", "deterministic")
-            or not request.reasoning or request.reasoning == "NOT_APPLICABLE"
-            or not 0 < request.budget.seconds <= 60 or request.budget.tokens <= 0
-            or request.budget.cost_microunits < 0 or request.deadline_utc_epoch is None
-            or not time() < request.deadline_utc_epoch <= approval.expires_epoch):
-        raise Blocked("Manager scope or budget is invalid")
+def _manager_materials(ledger, project_id, replica, home):
     check_path(replica)
     check_path(home)
     temporary = ledger.local_directory("temp")
@@ -263,36 +251,63 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
         check_path(path)
     if (replica / ".codex").exists():
         raise Blocked("Replica-specific Codex configuration requires review")
-    binding = manager_request_hash(request, approval.layers, approval.candidate_cli_sha256)
-    if len(approval.layers) != 4 or binding != approval.request_hash:
-        raise Blocked("Manager request or instruction hash changed")
     config = home / "config.toml"
     with config.open("rb") as stream:
         if stream.read(len(MANAGER_CONFIG) + 1) != MANAGER_CONFIG.encode("ascii"):
             raise Blocked("Manager home configuration changed")
     directory = ledger.local_directory("instructions")
-    common = _instruction_or_public(directory / "common" / "orchestration-rules.md", "project", approval.layers[1])
+    common, common_version = _instruction_or_public(directory / "common" / "orchestration-rules.md", "project")
     role_path = directory / "roles" / "manager-planning.md"
     store = InstructionStore(ledger)
     defaults = store.active_defaults()
-    if pin := store.active(request.project_id):
+    if pin := store.active(project_id):
         if store.verify(pin, replica) != global_data:
             raise Blocked("Staged Manager global instructions differ from approved project instructions")
     elif defaults and sha256(global_data).hexdigest() != defaults["global"]["sha256"]:
         raise Blocked("Staged Manager global instructions differ from approved defaults")
-    drafts = store.active_role_drafts(request.project_id)
+    drafts = store.active_role_drafts(project_id)
+    role_version = None
     if ROLE in drafts:
         role = instruction_bytes(role_path)
     elif ROLE in defaults:
         role_path = Path(store.default_pin()["manifest"]).parent / defaults[ROLE]["path"]
         role = instruction_bytes(role_path)
     else:
-        role = _instruction_or_public(role_path, ROLE, approval.layers[-1])
+        role, role_version = _instruction_or_public(role_path, ROLE)
     contents = (global_data, common, project_data, role)
-    if len(approval.layers) != len(contents) or any(not blob.strip() for blob in contents):
+    if any(not blob.strip() for blob in contents):
         raise Blocked("Manager instruction layers are incomplete")
-    if any(sha256(blob).hexdigest() != ref["sha256"] for blob, ref in zip(contents, approval.layers)):
+    return contents, (None, common_version, None, role_version)
+
+
+def review_manager_layers(ledger, project_id, replica, home):
+    contents, versions = _manager_materials(ledger, project_id, replica, home)
+    return tuple({"layer": layer, "version": version or "owner-reviewed-local",
+                  "sha256": sha256(blob).hexdigest()}
+                 for layer, blob, version in zip(("global", "common", "project", "role"), contents, versions))
+
+
+def prepare_manager(ledger, approval, request, *, project_context=None, include_input_receipt=False):
+    from .mxc_launcher import _known_folder
+
+    replica, home = approval.replica, approval.home
+    if (request.role != "Manager" or request.scope.approval_receipts != (approval.request_id,)
+            or request.scope.readable != (str(replica),) or request.scope.writable
+            or request.scope.tools or request.scope.network
+            or not request.model or request.model in ("mock-v1", "deterministic")
+            or not request.reasoning or request.reasoning == "NOT_APPLICABLE"
+            or not 0 < request.budget.seconds <= 60 or request.budget.tokens <= 0
+            or request.budget.cost_microunits < 0 or request.deadline_utc_epoch is None
+            or not time() < request.deadline_utc_epoch <= approval.expires_epoch):
+        raise Blocked("Manager scope or budget is invalid")
+    binding = manager_request_hash(request, approval.layers, approval.candidate_cli_sha256)
+    if len(approval.layers) != 4 or binding != approval.request_hash:
         raise Blocked("Manager request or instruction hash changed")
+    contents, versions = _manager_materials(ledger, request.project_id, replica, home)
+    if any(sha256(blob).hexdigest() != ref["sha256"] or (version and version != ref["version"])
+           for blob, version, ref in zip(contents, versions, approval.layers)):
+        raise Blocked("Manager request or instruction hash changed")
+    global_data, common, project_data, role = contents
     if project_context is not None and (
         project_context["project_id"] != request.project_id or project_context["goal"] != request.goal
         or digest(project_context) not in request.verified_input_refs
