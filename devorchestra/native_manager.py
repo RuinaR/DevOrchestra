@@ -92,6 +92,8 @@ def manager_request_hash(request, layers, candidate_cli_sha256=None):
 def inspect_manager_policy(server, replica, *, experimental_api=False):
     policy = server.inspect_policy(cwd=replica, verify_config=_verify_manager_config,
                                    experimental_api=experimental_api)
+    if policy["managed_requirements_present"]:
+        raise Blocked("MANAGER_MANAGED_REQUIREMENTS_UNVERIFIED")
     if policy != {"sandbox": "read-only", "approval": "never", "managed_requirements_present": False}:
         raise Blocked("Manager App Server policy is not the approved profile")
     return policy
@@ -144,9 +146,11 @@ def manager_admission(approval=None):
         return {"state": "BLOCKED", "reason": "BINARY_IDENTITY_INVALID",
                 "message": "후보 Codex CLI에 별도로 승인된 SHA-256이 필요합니다."}
     verified = _verified_manager_boundaries(backend, cli_sha256)
-    for code, message in REQUIRED_BOUNDARIES:
-        if code not in verified:
-            return {"state": "BLOCKED", "reason": code, "message": message}
+    missing = [{"code": code, "message": message} for code, message in REQUIRED_BOUNDARIES
+               if code not in verified]
+    if missing:
+        return {"state": "BLOCKED", "reason": missing[0]["code"], "message": missing[0]["message"],
+                "missing_boundaries": missing}
     if (type(approval) is not ManagerApproval or not isinstance(approval.request_id, str)
             or not re.fullmatch(r"[0-9a-f]{32}", approval.request_id)
             or type(approval.expires_epoch) not in (int, float) or not time() < approval.expires_epoch):
@@ -158,6 +162,20 @@ def manager_admission(approval=None):
         return {"state": "BLOCKED", "reason": "BINARY_IDENTITY_INVALID",
                 "message": "승인된 Codex CLI의 서명과 해시를 확인할 수 없습니다."}
     return {"state": "READY", "reason": None, "message": "승인된 요청의 실행 전 검사를 진행할 수 있습니다."}
+
+
+def _instruction_or_public(path, section, layer):
+    """Use the same bundled fallback as supervised handoffs when no local layer exists."""
+    from .default_instructions import public_instruction
+
+    check_path(path)
+    if path.exists():
+        return instruction_bytes(path)
+    item = public_instruction(section)
+    data = instruction_bytes(item["path"])
+    if layer["version"] != item["version"] or sha256(data).hexdigest() != item["sha256"]:
+        raise Blocked("Public Manager instruction binding changed")
+    return data
 
 
 def require_live_manager_admission(approval=None):
@@ -200,12 +218,15 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
         check_path(path)
     if (replica / ".codex").exists():
         raise Blocked("Replica-specific Codex configuration requires review")
+    binding = manager_request_hash(request, approval.layers, approval.candidate_cli_sha256)
+    if len(approval.layers) != 4 or binding != approval.request_hash:
+        raise Blocked("Manager request or instruction hash changed")
     config = home / "config.toml"
     with config.open("rb") as stream:
         if stream.read(len(MANAGER_CONFIG) + 1) != MANAGER_CONFIG.encode("ascii"):
             raise Blocked("Manager home configuration changed")
     directory = ledger.local_directory("instructions")
-    common = instruction_bytes(directory / "common" / "orchestration-rules.md")
+    common = _instruction_or_public(directory / "common" / "orchestration-rules.md", "project", approval.layers[1])
     role_path = directory / "roles" / "manager-planning.md"
     store = InstructionStore(ledger)
     defaults = store.active_defaults()
@@ -215,16 +236,17 @@ def prepare_manager(ledger, approval, request, *, project_context=None, include_
     elif defaults and sha256(global_data).hexdigest() != defaults["global"]["sha256"]:
         raise Blocked("Staged Manager global instructions differ from approved defaults")
     drafts = store.active_role_drafts(request.project_id)
-    if ROLE not in drafts and ROLE in defaults:
+    if ROLE in drafts:
+        role = instruction_bytes(role_path)
+    elif ROLE in defaults:
         role_path = Path(store.default_pin()["manifest"]).parent / defaults[ROLE]["path"]
-    role = instruction_bytes(role_path)
+        role = instruction_bytes(role_path)
+    else:
+        role = _instruction_or_public(role_path, ROLE, approval.layers[-1])
     contents = (global_data, common, project_data, role)
     if len(approval.layers) != len(contents) or any(not blob.strip() for blob in contents):
         raise Blocked("Manager instruction layers are incomplete")
-    binding = manager_request_hash(request, approval.layers, approval.candidate_cli_sha256)
-    if (binding != approval.request_hash
-            or any(sha256(blob).hexdigest() != ref["sha256"]
-                   for blob, ref in zip(contents, approval.layers))):
+    if any(sha256(blob).hexdigest() != ref["sha256"] for blob, ref in zip(contents, approval.layers)):
         raise Blocked("Manager request or instruction hash changed")
     if project_context is not None and (
         project_context["project_id"] != request.project_id or project_context["goal"] != request.goal
@@ -328,9 +350,12 @@ def _collect_plan(server, request, replica, messages, expected_sources, before_t
                                "item/agentMessage/delta", "thread/tokenUsage/updated"),
     )["turn"]
     turn_id = turn["id"]
-    if not isinstance(turn_id, str) or not turn_id or turn["status"] != "inProgress":
+    if (not isinstance(turn_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", turn_id)
+            or turn["status"] != "inProgress"):
         raise Blocked("Manager turn acknowledgement invalid")
     reply = None
+    turn_started = False
+    started, completed = {}, set()
     for _ in range(4096):
         event = early.pop(0) if early else server.receive()
         params = event.get("params", {})
@@ -341,9 +366,15 @@ def _collect_plan(server, request, replica, messages, expected_sources, before_t
             if params["turn"]["id"] != turn_id:
                 raise Blocked("Manager terminal event belongs to another turn")
             if method == "turn/completed":
-                if params["turn"]["status"] != "completed" or reply is None or early:
+                if params["turn"]["status"] != "completed" or reply is None or early or started.keys() - completed:
                     raise Blocked("Manager result is incomplete")
-                return reply
+                return reply, {"authentication": "CHATGPT_ACCOUNT_CONFIRMED",
+                               "thread_sha256": digest(thread_id), "turn_sha256": digest(turn_id),
+                               "terminal_status": "completed", "completed_items": len(completed),
+                               "instruction_sources": "CONFIRMED"}
+            if turn_started or params["turn"]["status"] != "inProgress":
+                raise Blocked("Duplicate or invalid Manager turn start")
+            turn_started = True
             continue
         if params.get("turnId") != turn_id:
             raise Blocked("Manager event belongs to another turn")
@@ -351,6 +382,14 @@ def _collect_plan(server, request, replica, messages, expected_sources, before_t
             item = params["item"]
             if item["type"] not in ("agentMessage", "userMessage", "reasoning"):
                 raise Blocked("Manager attempted an unsupported tool or item")
+            identifier = item.get("id")
+            if (type(identifier) is not str or not 1 <= len(identifier) <= 128 or identifier in completed
+                    or (identifier in started and (method == "item/started" or started[identifier] != item["type"]))):
+                raise Blocked("Duplicate or inconsistent Manager item")
+            if method == "item/started":
+                started[identifier] = item["type"]
+            else:
+                completed.add(identifier)
             if item["type"] == "agentMessage" and (
                 item.get("delivery") is not None or item.get("questions") is not None
             ):
@@ -374,6 +413,9 @@ def run_owned_manager(ledger, approval, request, before_thread, before_send, can
     with open_app_server(approval.binary, approval.replica, env, timeout, cancelled,
                          explicit_mxc=True, **approval.binary_options()) as server:
         expected_sources = (approval.home / "AGENTS.md", selected_source(approval.replica)[0])
-        proposal = _collect_plan(server, request, approval.replica, messages, expected_sources,
-                                 before_thread, before_send)
-    return proposal  # Context exit confirmed the owned Job and pipes drained.
+        proposal, receipt = _collect_plan(server, request, approval.replica, messages, expected_sources,
+                                          before_thread, before_send)
+    cleanup = dict(server.cleanup_receipt)
+    if cleanup != {"job": "DRAINED_NORMALLY", "pipes": "CLOSED"}:
+        raise Blocked("Manager cleanup receipt is incomplete")
+    return proposal, {**receipt, "cleanup": cleanup}

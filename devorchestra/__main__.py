@@ -19,6 +19,9 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("init")
     commands.add_parser("local-status", help="Inspect project-local storage without creating it")
+    commands.add_parser("manager-preflight", help="Inspect native Manager admission without starting Codex").add_argument(
+        "--project", required=True,
+    )
     gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
     gui_verify.add_argument("--registered", action="store_true")
@@ -77,6 +80,10 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "manager-preflight":
+            decision = Runner(ledger).inspect_manager_admission(args.project)
+            print(canonical(decision))
+            return 2 if decision["state"] == "BLOCKED" else 0
         if args.action == "gui-build-exe":
             runner = Runner(ledger)
             if args.approve is None:

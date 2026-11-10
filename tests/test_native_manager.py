@@ -50,7 +50,7 @@ for line in sys.stdin:
     if method == 'account/read':
         assert msg['params'] == {'refreshToken':False}
     if method == 'thread/start':
-        assert mode not in ('tools-enabled', 'api-account', 'async-feature-enabled')
+        assert mode not in ('tools-enabled', 'api-account', 'async-feature-enabled', 'managed-requirements')
         assert msg['params']['sandbox'] == 'read-only'
         assert not msg['params'].get('dynamicTools')
         assert msg['params']['modelProvider'] == 'openai'
@@ -76,7 +76,7 @@ for line in sys.stdin:
     result = {
         'initialize': {'platformOs':'windows'},
         'config/read': {'config': config},
-        'configRequirements/read': {'requirements':None},
+        'configRequirements/read': {'requirements':{} if mode == 'managed-requirements' else None},
         'account/read': {'account': {'type':'apiKey' if mode == 'api-account' else 'chatgpt'},
                          'requiresOpenaiAuth': mode != 'wrong-auth-provider'},
         'thread/start': {'thread': {'id':'thr-fixture', 'ephemeral':True}, 'approvalPolicy':'never',
@@ -102,6 +102,11 @@ for line in sys.stdin:
         item = {'type':'agentMessage','id':'item-fixture','text':json.dumps(plan)}
         if mode == 'async-plan':
             item['delivery'] = 'async'
+        if mode == 'tool-call':
+            send({'id':99, 'method':'item/tool/call', 'params':{'tool':'shell', 'arguments':{}}})
+        if mode == 'duplicate-item':
+            notice('item/started', turnId='turn-fixture', item=item)
+            notice('item/started', turnId='turn-fixture', item=item)
         notice('item/completed', turnId='turn-fixture',
                item=item)
         notice('turn/completed', turn={'id':'turn-fixture','status':'completed'})
@@ -199,6 +204,8 @@ class NativeManagerTests(unittest.TestCase):
         tools = "SIDE_EFFECTING_TOOLS_UNVERIFIED"
         egress = "PROVIDER_EGRESS_UNVERIFIED"
         self.assertEqual(tools, manager_admission(self.approval)["reason"])
+        self.assertEqual([tools, egress], [item["code"] for item in
+                                         manager_admission(self.approval)["missing_boundaries"]])
         with patch("devorchestra.native_manager._verified_manager_boundaries", return_value={tools}):
             self.assertEqual(egress, manager_admission(self.approval)["reason"])
         with patch("devorchestra.native_manager._verified_manager_boundaries", return_value={tools, egress}), \
@@ -348,6 +355,22 @@ class NativeManagerTests(unittest.TestCase):
         self.assertIn("Owner-selected fixture", messages[-1]["text"])
         self.assertEqual([], self.ledger.read())
 
+    def test_public_common_and_role_fallbacks_are_hash_bound(self):
+        from devorchestra.default_instructions import public_instruction
+        from devorchestra.native_manager import prepare_manager
+
+        (self.role_file.parent.parent / "common/orchestration-rules.md").unlink()
+        self.role_file.unlink()
+        layers = list(self.layers)
+        for index, section in ((1, "project"), (3, "manager-planning")):
+            item = public_instruction(section)
+            layers[index] = {**layers[index], "version": item["version"], "sha256": item["sha256"]}
+        approval = replace(self.approval, layers=tuple(layers),
+                           request_hash=bind_instructions(self.request, layers))
+        messages, _ = prepare_manager(self.ledger, approval, self.request)
+        self.assertEqual(public_instruction("project")["text"], messages[0]["text"].strip())
+        self.assertEqual(public_instruction("manager-planning")["text"], messages[1]["text"].strip())
+
     def test_registered_project_plans_without_a_mock_session_and_grants_no_write(self):
         source = self.replica.parent / "requirements"
         source.mkdir()
@@ -382,6 +405,8 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual("DRAINED", result["owned_tree"])
         self.assertEqual("BLOCKED", result["next_role_admission"])
         self.assertEqual("UNKNOWN", result["usage"])
+        self.assertEqual("CHATGPT_ACCOUNT_CONFIRMED", result["authentication"])
+        self.assertEqual({"job": "DRAINED_NORMALLY", "pipes": "CLOSED"}, result["turn_receipt"]["cleanup"])
         self.assertEqual(["native_manager_intent", "native_manager_thread_dispatch",
                           "native_manager_dispatch", "native_manager_result"],
                          [event["kind"] for event in self.ledger.read()])
@@ -407,6 +432,21 @@ class NativeManagerTests(unittest.TestCase):
         self.runner = Runner(Ledger.for_project(self.ledger.state_boundary.parent))
         with self.assertRaisesRegex(Blocked, "ownership requires recovery"):
             self.run_fixture()
+
+    def test_duplicate_item_blocks_role_completion(self):
+        with self.assertRaisesRegex(Blocked, "UNKNOWN"):
+            self.run_fixture("duplicate-item")
+        self.assertEqual("native_manager_dispatch", self.ledger.read()[-1]["kind"])
+
+    def test_managed_requirements_block_before_thread_dispatch(self):
+        with self.assertRaisesRegex(Blocked, "UNKNOWN"):
+            self.run_fixture("managed-requirements")
+        self.assertEqual(["native_manager_intent"], [event["kind"] for event in self.ledger.read()])
+
+    def test_tool_request_never_dispatches_a_command(self):
+        with self.assertRaisesRegex(Blocked, "UNKNOWN"):
+            self.run_fixture("tool-call")
+        self.assertEqual("native_manager_dispatch", self.ledger.read()[-1]["kind"])
 
     def test_rpc_error_remains_unknown_without_raw_error(self):
         with self.assertRaisesRegex(Blocked, "UNKNOWN"):

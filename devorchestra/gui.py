@@ -1438,6 +1438,8 @@ class CommandCenter:
                  "READY": "실행 전 검사 준비"}[decision["state"]]
         label(panel, state, size=13, bold=True, bg=BG).pack(fill="x")
         label(panel, decision["message"], bg=BG, wraplength=520).pack(fill="x", pady=8)
+        for boundary in decision.get("missing_boundaries", ())[1:]:
+            label(panel, boundary["message"], bg=BG, wraplength=520).pack(fill="x", pady=(0, 8))
         label(panel, "지금 사용 가능 · 기존 Codex에 지시를 직접 전달하는 감독형 개발\n"
               "자동 개발 후보 · 공식 App Server (실행 경계 확인 전 차단)",
               bg=BG, fg=MUTED, wraplength=520).pack(fill="x", pady=(0, 8))

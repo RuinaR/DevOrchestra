@@ -552,6 +552,7 @@ class Runner:
                   for key, value in project["budget"].items()}
         return {
             "project_id": project_id, "development_id": baseline,
+            "project_revision": record["revision"], "registered_git_sha": project["git_sha"],
             "goal": project["goal"], "acceptance": project["acceptance"],
             "model": role["model"], "reasoning": role["reasoning"], "budget_ceiling": limits,
             "proposed_files_ceiling": files,
@@ -595,7 +596,8 @@ class Runner:
             events, tail = self.ledger.snapshot(recover_journal=True)
             require_admission(events)
             run, development = last_run(events), session_view(events)
-            if (abandoned or (run and run[-1]["state"] not in TERMINAL)
+            if (abandoned or request.generation != len(events) + 1
+                    or (run and run[-1]["state"] not in TERMINAL)
                     or (development and not development["end"])
                     or any(event.get("request_id") == approval.request_id
                            or (event["kind"] == "native_manager_intent"
@@ -623,7 +625,8 @@ class Runner:
                           request_id=approval.request_id, request_hash=approval.request_hash,
                           model=request.model, reasoning=request.reasoning, budget=asdict(request.budget),
                           input_sizing=sizing,
-                          deadline=request.deadline_utc_epoch, instruction_layers=list(approval.layers))
+                          deadline=request.deadline_utc_epoch, instruction_layers=list(approval.layers),
+                          timestamp=datetime.now(timezone.utc).isoformat())
             if context:
                 fields["question_development_id"] = context["project_context"]["development_id"]
             count, head = self.ledger.append(len(events), tail, {
@@ -656,7 +659,7 @@ class Runner:
                 dispatch_events.append(entry)
 
             try:
-                proposal = run_owned_manager(
+                proposal, turn_receipt = run_owned_manager(
                     self.ledger, approval, request,
                     lambda: record_dispatch("native_manager_thread_dispatch", 0),
                     lambda: record_dispatch("native_manager_dispatch", 1),
@@ -668,7 +671,8 @@ class Runner:
                 # Keep intent unresolved, including when dispatch may have reached the server.
                 raise Blocked("Manager outcome UNKNOWN; no automatic retry") from None
             result = {**fields, "kind": "native_manager_result", "owned_tree": "DRAINED",
-                      "proposal_sha256": digest(proposal), "usage": "UNKNOWN", "authentication": "UNKNOWN",
+                      "proposal_sha256": digest(proposal), "usage": "UNKNOWN",
+                      "authentication": turn_receipt["authentication"], "turn_receipt": turn_receipt,
                       "next_role_admission": "BLOCKED"}
             # Decide only from the verified result inside the commit transaction.
             def settle(current, current_head):
