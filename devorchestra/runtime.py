@@ -101,7 +101,8 @@ def last_run(events):
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
                                                  "native_inspection_", "native_manager_", "supervised_",
-                                                 "gui_validation_", "gui_build_", "gui_session_"))]
+                                                 "gui_validation_", "gui_build_", "gui_session_",
+                                                 "subscription_developer_"))]
     return []
 
 
@@ -120,6 +121,10 @@ def native_unresolved(events):
             pending.add(("manager", event["request_id"]))
         elif event["kind"] == "native_manager_result":
             pending.discard(("manager", event["request_id"]))
+        elif event["kind"] == "subscription_developer_intent":
+            pending.add(("subscription-developer", event["run_id"]))
+        elif event["kind"] == "subscription_developer_result":
+            pending.discard(("subscription-developer", event["run_id"]))
         elif event["kind"] == "gui_validation_intent":
             pending.add(("gui", event["approval_id"]))
         elif event["kind"] == "gui_validation_result":

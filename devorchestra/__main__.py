@@ -37,6 +37,14 @@ def main():
     commands.add_parser("chatgpt-login", help="Open official browser consent").add_argument("--account")
     for action in ("chatgpt-models", "chatgpt-logout"):
         commands.add_parser(action).add_argument("--account", required=True)
+    developer = commands.add_parser("developer-edit", help="Review or approve one controlled subscription file edit")
+    for option in ("project", "manager-run", "account", "model"):
+        developer.add_argument("--" + option, required=True)
+    developer.add_argument("--expires", type=int, required=True)
+    developer.add_argument("--approve", metavar="REVIEW_SHA256")
+    developer_diff = commands.add_parser("developer-diff", help="Read a protected Developer diff locally")
+    developer_diff.add_argument("--project", required=True)
+    developer_diff.add_argument("--run", required=True)
     mxc_host = commands.add_parser("manager-mxc-offline", help="Measure MXC files and App Server stdio without login")
     for option in ("launcher", "launcher-sha256", "candidate", "candidate-sha256", "powershell-sha256"):
         mxc_host.add_argument("--" + option, required=True)
@@ -100,6 +108,22 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "developer-diff":
+            from .subscription_developer import read_diff
+
+            print(read_diff(ledger, args.project, args.run), end="")
+            return
+        if args.action == "developer-edit":
+            from . import subscription_developer
+
+            fields = (Runner(ledger), args.project, args.manager_run, args.account, args.model, args.expires)
+            if args.approve is None:
+                scope, _, _ = subscription_developer.review(*fields)
+                print(canonical({"review": scope, "review_sha256": digest(scope)}))
+                return
+            receipt = subscription_developer.run(*fields, args.approve)
+            print(canonical(receipt))
+            return 0 if receipt["outcome"] == "COMPLETED" else 2
         if args.action.startswith("chatgpt-"):
             from .chatgpt_subscription import AccountStore, SubscriptionError, list_models
             from .lease import execution_slot

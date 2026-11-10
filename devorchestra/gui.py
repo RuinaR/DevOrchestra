@@ -1491,7 +1491,7 @@ class CommandCenter:
 
     def subscription_manager(self, project_id):
         from .chatgpt_subscription import AccountStore
-        from . import subscription_manager
+        from . import subscription_developer, subscription_manager
 
         panel = self.panel()
         panel.title("ChatGPT 구독 · Manager 계획")
@@ -1551,30 +1551,41 @@ class CommandCenter:
             else:
                 panel.destroy()
 
-        def start():
+        def start(manager_run=None):
             nonlocal running
+            if running:
+                return
             account, expires = picker.get(), int(time()) + 300
-            fields = (self.controller, project_id, account, model, expires)
+            backend = subscription_developer if manager_run else subscription_manager
             try:
-                approval, _, _ = subscription_manager.review(*fields)
+                if manager_run:
+                    developer = Catalog(self.reader.ledger).read()["projects"][project_id]["data"]["roles"]["Developer"]
+                    fields = self.controller, project_id, manager_run, account, developer["model"], expires
+                else:
+                    fields = self.controller, project_id, account, model, expires
+                approval, _, _ = backend.review(*fields)
             except (Blocked, OSError, ValueError) as error:
                 status.set(str(error))
                 return
             checksum = digest(approval)
-            if not self.confirm("ChatGPT 구독 Manager 승인",
-                                f"{project_id} · {model} · 계정 {account}\n"
-                                "등록된 요구사항 원문, 목표, 완료 기준과 공개 지침을 OpenAI에 전송합니다.\n"
-                                "파일 변경·셸·GUI 권한 없음.\n"
+            role = approval["role"]
+            scope = (f"승인된 계획과 현재 파일을 OpenAI에 전송합니다.\n복제본: {approval['replica']}\n"
+                     f"허용 파일: {approval['file']} · 셸·빌드·GUI 권한 없음.\n" if manager_run else
+                     "등록된 요구사항 원문, 목표, 완료 기준과 공개 지침을 OpenAI에 전송합니다.\n"
+                     "파일 변경·셸·GUI 권한 없음.\n")
+            if not self.confirm(f"ChatGPT 구독 {role} 승인",
+                                f"{project_id} · {approval['model']} · 계정 {account}\n" + scope +
                                 f"요청 SHA-256 {approval['request_sha256']}", parent=panel):
                 return
             running = True
             button.configure(state="disabled")
-            status.set("구독 Manager 실행 중")
+            status.set(f"구독 {role} 실행 중")
             future = Future()
 
             def work():
                 try:
-                    future.set_result(subscription_manager.run(*fields, checksum, cancellation.is_set)[0])
+                    value = backend.run(*fields, checksum, cancellation.is_set)
+                    future.set_result(value if manager_run else value[0])
                 except Exception as error:
                     future.set_exception(error)
 
@@ -1591,9 +1602,11 @@ class CommandCenter:
                     return
                 receipt = future.result()
                 status.set(f"{receipt['outcome']} · {receipt['run_id']}\n{receipt.get('reason', '')}")
-                if receipt["outcome"] == "COMPLETED":
+                if receipt["outcome"] == "COMPLETED" and not manager_run:
                     ttk.Button(panel, text="완료된 계획 보기",
                                command=lambda: show_plan(receipt["run_id"])).pack(anchor="w")
+                    ttk.Button(panel, text="이 계획의 Developer 검토",
+                               command=lambda: start(receipt["run_id"])).pack(anchor="w")
 
             cancellation.clear()
             Thread(target=work, daemon=False).start()
@@ -1601,6 +1614,9 @@ class CommandCenter:
 
         button = ttk.Button(panel, text="요청 검토 및 실행", command=start)
         button.pack(side="left", pady=6)
+        if latest and latest.get("task_candidate_status") == "OWNER_SCOPE_REQUIRED":
+            ttk.Button(panel, text="Developer 범위 검토",
+                       command=lambda: start(latest["run_id"])).pack(anchor="w")
         ttk.Button(panel, text="닫기 / 취소", command=close).pack(side="right", pady=6)
         panel.protocol("WM_DELETE_WINDOW", close)
         panel.bind("<Escape>", lambda _event: close())

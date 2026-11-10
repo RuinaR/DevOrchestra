@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.93은 실제 Manager 계획에 바인딩된 구독 Developer의 단일 파일 수정을 실측했다. \`developer-edit\`는 리뷰 해시와 별도 승인으로만 실행한다. \`developer-diff\`는 보호된 검토 자료를 로컬에서 읽는다. 다음 단계는 검토 계약에 diff를 연결하고 SDK 파일·프로세스 집행과 결정적 테스트를 별도 검증하는 것이다.
+
 다음 자동 개발 검증은 [공식 Codex 백엔드 비교](ARCHITECTURE-ROADMAP.md#공식-codex-백엔드)에서 시작한다. Windows SDK의 설치 CLI 시작은 확인했고, 실제 구독 Manager 턴은 여전히 차단 상태다. 기존 App Server 검토 명령과 감독형 경로를 유지한다.
 
 개발 노트북에서는 [공개 지침](../defaults/global/AGENTS.md)과 감독형 요청 바인딩부터 확인한다. 이전 요청의 계약 해시가 다르면 결과를 가져오기 전에 지시를 다시 발행한다. 직접 GUI 검증에는 운영 원장과 분리된 테스트 데이터를 사용한다. 자동 역할 실행의 다음 관문은 [GUI 도구 입장 조건](ARCHITECTURE-ROADMAP.md#개발-노트북-gui-도구-입장-조건)이다.

@@ -15,6 +15,8 @@ Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택�
 
 ### 구독 Manager 실행
 
+P2.93은 실제 Manager 계획의 해시와 후보 범위, 등록 복제본의 Git 기준·파일 증거, Developer 모델·예산·세대·만료를 별도 소유자 승인에 묶는다. 구독 텍스트 모델은 승인된 기존 루트 파일 하나의 교체안을 작성한다. Controller만 그 파일을 변경하며 셸·빌드·GUI 권한은 부여하지 않는다. 보호된 diff는 읽기 전용 검토 입력이다. SDK의 작업공간 쓰기 샌드박스에 승인 파일 한정 쓰기와 하위 프로세스 경계가 입증되기 전까지 SDK Developer 실행은 별도 차단한다.
+
 초기화된 로컬 저장소에서 Command Center의 **Continue with ChatGPT** 또는 `python -m devorchestra chatgpt-login`을 사용하고 브라우저에서 DevOrchestra 전용 OAuth 동의를 검토한다. `chatgpt-accounts`는 로컬 계정 식별자와 연결 상태를 표시하고, `chatgpt-models --account <ID>`는 해당 계정의 공식 모델 목록을 표시한다. `chatgpt-logout --account <ID>`는 서버 갱신 토큰 철회를 시도하고 로컬 토큰을 제거한다. 원격 철회가 확인되지 않으면 ChatGPT 설정에서 연결을 해제할 수 있다.
 
 등록 Manager 모델과 예산을 설정한 후 Command Center의 **구독 Manager 계획 승인**에서 요청을 검토한다. CLI는 `manager-turn --backend chatgpt-subscription-text --project <ID> --account <ID> --model <MODEL> --expires <UNIX_SECONDS>`로 검토하고 같은 인수에 `--approve <REVIEW_SHA256>`를 추가해 실행한다. 요구사항 원문과 공개 지침을 전송하고 도구를 제공하지 않는다. 토큰과 구조 검증을 통과한 계획은 Windows 사용자 DPAPI로 로컬 보호하며 원장에는 결과와 참조를 기록한다. 공식 미리보기의 제공자 출력 토큰 상한은 사용할 수 없다. 요청 크기·실행 시간·응답 크기를 로컬에서 제한하고, 보고된 사용량이 예산을 초과하면 계획을 승인 후보로 기록하지 않는다.

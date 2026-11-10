@@ -424,7 +424,7 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual([], self.ledger.read())
 
     def test_subscription_manager_binds_review_and_records_only_validated_output(self):
-        from devorchestra import subscription_manager
+        from devorchestra import subscription_developer, subscription_manager
 
         self.register_manager_project()
         proposal = {"disposition": "PROPOSED", "priority_reason": "Fixture", "task_spec": "Adjust fixture",
@@ -462,6 +462,51 @@ class NativeManagerTests(unittest.TestCase):
         self.assertNotIn("fixture-token", str(self.ledger.read()))
         self.assertTrue((self.ledger.local_directory("recovery") / result["protected_plan_ref"]).is_file())
         self.assertEqual(proposal, subscription_manager.read_plan(self.ledger, "sample", result["run_id"]))
+
+        catalog = Catalog(self.ledger)
+        record = catalog.read()["projects"]["sample"]
+        record["data"]["roles"]["Developer"] = record["data"]["roles"]["Manager"].copy()
+        catalog.save_project(record["data"], record["revision"])
+        git = self.replica / ".git"
+        git.mkdir()
+        (git / "HEAD").write_text("a" * 40, encoding="ascii")
+        (git / "index").write_bytes(b"synthetic index")
+        target = self.replica / "fixture.txt"
+        target.write_bytes(b"original\n")
+        sibling = self.replica / "protected.txt"
+        sibling.write_bytes(b"unchanged\n")
+        developer_fields = self.runner, "sample", result["run_id"], "fixture-account", self.request.model, int(time()) + 120
+        edit = {"path": sibling.name, "content": "changed\n"}
+
+        def deliver_edit(_token, body, check, before_send, _deadline):
+            self.assertEqual([], body["tools"])
+            check()
+            before_send()
+            completed["output"][0]["content"][0]["text"] = json.dumps(edit)
+            return completed
+
+        with patch.object(subscription_manager, "AccountStore", accounts), \
+                patch.object(subscription_developer, "AccountStore", accounts), \
+                patch.object(subscription_developer, "list_models", return_value=[{"model": self.request.model}]), \
+                patch.object(subscription_developer, "complete", side_effect=deliver_edit) as send:
+            approval = subscription_developer.review(*developer_fields)[0]
+            with self.assertRaisesRegex(Blocked, "approval changed"):
+                subscription_developer.run(*developer_fields, "wrong")
+            send.assert_not_called()
+            denied = subscription_developer.run(*developer_fields, digest(approval))
+            self.assertEqual(("FAILED", False), (denied["outcome"], denied["file_applied"]))
+            self.assertEqual(b"original\n", target.read_bytes())
+            self.assertEqual(b"unchanged\n", sibling.read_bytes())
+            edit["path"] = target.name
+            approval = subscription_developer.review(*developer_fields)[0]
+            receipt = subscription_developer.run(*developer_fields, digest(approval))
+            with self.assertRaisesRegex(Blocked, "already has a completed"):
+                subscription_developer.review(*developer_fields)
+        self.assertEqual(("COMPLETED", True, "BLOCKED"),
+                         (receipt["outcome"], receipt["file_applied"], receipt["reviewer_admission"]))
+        self.assertEqual(b"changed\n", target.read_bytes())
+        self.assertEqual(b"unchanged\n", sibling.read_bytes())
+        self.assertIn("+changed", subscription_developer.read_diff(self.ledger, "sample", receipt["run_id"]))
 
     def test_unadmitted_backend_cannot_fall_back_to_app_server(self):
         from devorchestra.adapter import ModelBackend
