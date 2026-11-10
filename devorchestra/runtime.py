@@ -101,7 +101,7 @@ def last_run(events):
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
                                                  "native_inspection_", "native_manager_", "supervised_",
-                                                 "gui_validation_", "gui_build_", "gui_session_",
+                                                 "gui_validation_", "gui_build_", "gui_session_", "build_verifier_",
                                                  "subscription_developer_", "subscription_cycle_",
                                                  "subscription_session_"))]
     return []
@@ -138,6 +138,10 @@ def native_unresolved(events):
             pending.add(("gui-build", event["approval_id"]))
         elif event["kind"] == "gui_build_result":
             pending.discard(("gui-build", event["approval_id"]))
+        elif event["kind"] == "build_verifier_intent":
+            pending.add(("build-verifier", event["run_id"]))
+        elif event["kind"] == "build_verifier_result":
+            pending.discard(("build-verifier", event["run_id"]))
     return bool(pending)
 
 
@@ -419,6 +423,60 @@ class Runner:
                 stream.write(data)
             result = {**binding, "kind": "gui_build_result", "result": "PASS", "exe": str(output),
                       "exe_sha256": sha256(data).hexdigest(), "job_active": 0,
+                      "timestamp": datetime.now(timezone.utc).isoformat()}
+            self.ledger.append(count, fence, result, allow_shutdown=True)
+            return result
+
+    def build_verifier_scope(self, project_id, kind, launcher, sources, vectors, seconds, expires):
+        from pathlib import Path
+        from . import mxc_dotnet
+
+        if kind != mxc_dotnet.KIND:
+            raise Blocked("Build tool adapter is not supported")
+        catalog = Catalog(self.ledger).read()
+        setup = catalog["setups"].get(project_id)
+        project = catalog["projects"].get(project_id)
+        if not setup or not project:
+            raise Blocked("Build verification requires a registered replica")
+        if (type(expires) is not int or not time() < expires <= time() + 3600
+                or type(seconds) is not int
+                or seconds > min(catalog["global_budget"]["seconds"], project["data"]["budget"]["seconds"])):
+            raise Blocked("Build verification expiry or budget is outside the project scope")
+        scope = mxc_dotnet.review(Path(setup["replica"]), launcher, sources, vectors, seconds)
+        return {**scope, "project_id": project_id, "project_revision": project["revision"],
+                "role": "Verifier", "expires_epoch": expires}
+
+    def build_verify(self, project_id, kind, launcher, sources, vectors, seconds, expires, approved_scope,
+                     cancelled=lambda: False):
+        from . import mxc_dotnet
+        from .mxc_host_probe import OwnedMxcStopped
+
+        with execution_slot() as abandoned:
+            events, tail = self._idle_diagnostic(abandoned)
+            scope = self.build_verifier_scope(project_id, kind, launcher, sources, vectors, seconds, expires)
+            if digest(scope) != approved_scope:
+                raise Blocked("Build verifier approval changed")
+            run_id = uuid4().hex
+            binding = {"project_id": project_id, "run_id": run_id, "task_id": run_id, "role": "Verifier",
+                       "approval_id": uuid4().hex, "generation": len(events) + 1, "state": "DIAGNOSTIC",
+                       "scope": scope, "scope_sha256": approved_scope}
+            count, fence = self.ledger.append(len(events), tail, {
+                **binding, "kind": "build_verifier_intent", "timestamp": datetime.now(timezone.utc).isoformat(),
+            }, admission=require_admission)
+
+            def check():
+                self._check_diagnostic_fence(count, fence)
+                if cancelled():
+                    raise Blocked("CANCELLED")
+                if time() >= expires:
+                    raise Blocked("APPROVAL_EXPIRED")
+
+            try:
+                evidence = mxc_dotnet.run(self.ledger, scope, check)
+            except OwnedMxcStopped as error:
+                evidence = {"result": "NOT_VERIFIED", "reason": str(error), "job_active": 0}
+            self._check_diagnostic_fence(count, fence)
+            result = {**binding, **evidence, "kind": "build_verifier_result",
                       "timestamp": datetime.now(timezone.utc).isoformat()}
             self.ledger.append(count, fence, result, allow_shutdown=True)
             return result

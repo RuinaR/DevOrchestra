@@ -85,6 +85,15 @@ def main():
     gui_build.add_argument("--project", required=True)
     gui_build.add_argument("--exe", default="DevOrchestraQa.exe")
     gui_build.add_argument("--approve", metavar="SCOPE_SHA256")
+    build_verify = commands.add_parser("build-verify", help="Review or run an approved offline build verification")
+    build_verify.add_argument("--project", required=True)
+    build_verify.add_argument("--kind", required=True)
+    build_verify.add_argument("--launcher", required=True)
+    build_verify.add_argument("--source", action="append", required=True)
+    build_verify.add_argument("--vectors", type=json.loads, required=True)
+    build_verify.add_argument("--seconds", type=int, required=True)
+    build_verify.add_argument("--expires", type=int, required=True)
+    build_verify.add_argument("--approve", metavar="SCOPE_SHA256")
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -132,6 +141,16 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "build-verify":
+            runner = Runner(ledger)
+            fields = (args.project, args.kind, args.launcher, args.source, args.vectors, args.seconds, args.expires)
+            if args.approve is None:
+                scope = runner.build_verifier_scope(*fields)
+                print(canonical({"review": scope, "review_sha256": digest(scope)}))
+                return
+            receipt = runner.build_verify(*fields, args.approve)
+            print(canonical(receipt))
+            return 0 if receipt["result"] == "PASS" else 2
         if args.action == "subscription-session-recover":
             from .subscription_session import recover
 
