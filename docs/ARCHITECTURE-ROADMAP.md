@@ -15,6 +15,8 @@ Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택�
 
 ### 구독 Manager 실행
 
+P2.94의 `cycle-role`은 동일한 Developer 변경을 `reviewer` → `verifier` → `manager-final` 순서로 처리한다. 각 역할은 별도의 만료 가능한 검토 해시가 필요하다. Verifier는 승인한 `--vectors` JSON의 함수명·완료 기준·정수 입력/출력을 고정해 작은 Python 반환식만 해석한다. 생성 소스를 일반 Python 프로세스에서 실행하지 않는다. 기존 GUI 브로커는 별도 승인 경로로 유지한다. 재작업은 `cycle-rework`로 보호된 근거를 읽을 수 있고, 새 승인 없이는 디스패치하지 않는다.
+
 P2.93은 실제 Manager 계획의 해시와 후보 범위, 등록 복제본의 Git 기준·파일 증거, Developer 모델·예산·세대·만료를 별도 소유자 승인에 묶는다. 구독 텍스트 모델은 승인된 기존 루트 파일 하나의 교체안을 작성한다. Controller만 그 파일을 변경하며 셸·빌드·GUI 권한은 부여하지 않는다. 보호된 diff는 읽기 전용 검토 입력이다. SDK의 작업공간 쓰기 샌드박스에 승인 파일 한정 쓰기와 하위 프로세스 경계가 입증되기 전까지 SDK Developer 실행은 별도 차단한다.
 
 초기화된 로컬 저장소에서 Command Center의 **Continue with ChatGPT** 또는 `python -m devorchestra chatgpt-login`을 사용하고 브라우저에서 DevOrchestra 전용 OAuth 동의를 검토한다. `chatgpt-accounts`는 로컬 계정 식별자와 연결 상태를 표시하고, `chatgpt-models --account <ID>`는 해당 계정의 공식 모델 목록을 표시한다. `chatgpt-logout --account <ID>`는 서버 갱신 토큰 철회를 시도하고 로컬 토큰을 제거한다. 원격 철회가 확인되지 않으면 ChatGPT 설정에서 연결을 해제할 수 있다.

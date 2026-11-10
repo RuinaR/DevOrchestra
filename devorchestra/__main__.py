@@ -45,6 +45,18 @@ def main():
     developer_diff = commands.add_parser("developer-diff", help="Read a protected Developer diff locally")
     developer_diff.add_argument("--project", required=True)
     developer_diff.add_argument("--run", required=True)
+    cycle = commands.add_parser("cycle-role", help="Review or approve the next Developer evidence role")
+    cycle.add_argument("--phase", required=True, choices=("reviewer", "verifier", "manager-final"))
+    cycle.add_argument("--project", required=True)
+    cycle.add_argument("--developer-run", required=True)
+    cycle.add_argument("--account")
+    cycle.add_argument("--model")
+    cycle.add_argument("--vectors", type=json.loads, help="Owner-approved JSON test vectors for the fixed Python Verifier")
+    cycle.add_argument("--expires", type=int, required=True)
+    cycle.add_argument("--approve", metavar="REVIEW_SHA256")
+    rework = commands.add_parser("cycle-rework", help="Read protected rework evidence locally")
+    rework.add_argument("--project", required=True)
+    rework.add_argument("--developer-run", required=True)
     mxc_host = commands.add_parser("manager-mxc-offline", help="Measure MXC files and App Server stdio without login")
     for option in ("launcher", "launcher-sha256", "candidate", "candidate-sha256", "powershell-sha256"):
         mxc_host.add_argument("--" + option, required=True)
@@ -108,6 +120,27 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "cycle-rework":
+            from .subscription_cycle import rework_context
+
+            print(canonical(rework_context(ledger, args.project, args.developer_run)))
+            return
+        if args.action == "cycle-role":
+            from . import subscription_cycle
+
+            fields = (Runner(ledger), args.project, args.developer_run, args.phase,
+                      args.account, args.model, args.expires, args.vectors)
+            if args.approve is None:
+                scope = subscription_cycle.review(*fields)
+                print(canonical({"review": scope, "review_sha256": digest(scope)}))
+                return
+            receipt = subscription_cycle.run(*fields, args.approve)
+            print(canonical(receipt))
+            if receipt["outcome"] != "COMPLETED":
+                return 2
+            if args.phase == "verifier":
+                return receipt["exit_code"] if receipt["exit_code"] is not None else 2
+            return 0
         if args.action == "developer-diff":
             from .subscription_developer import read_diff
 

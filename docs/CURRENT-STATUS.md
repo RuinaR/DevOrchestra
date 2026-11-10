@@ -1,5 +1,7 @@
 # 현재 상태
 
+**P2.94 실제 구독 순차 사이클.** 독립 Git 프로젝트에서 실제 Manager, Developer, Reviewer, 최종 Manager가 응답했다. Controller가 `clamp.py` 한 파일을 변경하고, 결정적 하네스가 정수 테스트 세 건을 실행해 PASS를 기록했다. 최종 Manager가 해당 검증 영수증을 참조해 COMPLETED를 반환했다. 생성 코드의 일반 런타임, GUI 증거의 동일 사이클 통합, 자동 재작업과 통합 승인은 미연결이다.
+
 **P2.93 승인된 한 파일의 실제 구독 Developer 수정.** P2.92의 실제 계획으로 등록 복제본의 \`sample.txt\` 변경을 확인했다. 별도 합성 Git 프로젝트에서는 실제 Manager 계획과 구독 Developer를 순차 실행해 \`greeting.py\` 한 파일을 변경했다. Git 변경 목록, Python 컴파일 및 AST 인수 검사를 통과했다. 모델은 도구 없이 교체안을 반환했고 Controller가 승인 파일에 적용했다. SDK 실행, 모델 기반 Reviewer, 일반 빌드·셸 실행은 계속 차단한다. 보호된 diff는 후속 검토용으로 로컬에 남긴다.
 
 **P2.92 구독 텍스트 Manager.** 전용 브라우저 OAuth 동의와 구독 범위를 확인하고 공식 모델 목록을 조회했다. 운영 DB와 분리된 시험 프로젝트에서 실제 `gpt-6.1-sol` 스트림의 `response.completed`를 수신했다. 승인 범위에 맞는 계획을 보호 저장하고 Controller 원장에 완료 및 제공자 보고 사용량 1,256 토큰을 기록했다. 먼저 관측한 MIME 불일치 두 건은 UNKNOWN으로 유지한다. `text/plain` 응답도 SSE 프레임과 공식 완료 이벤트가 모두 확인되어야 완료할 수 있다. SDK Developer·Reviewer 자동 실행은 계속 차단한다.

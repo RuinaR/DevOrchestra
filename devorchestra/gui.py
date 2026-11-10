@@ -586,6 +586,8 @@ class CommandCenter:
                 goal += "\n결과물 · " + ", ".join(handoff["artifacts"])[:250]
         if getattr(self, "details_visible", False):
             goal += f"\n자동 Manager · {manager_status}{cycle_label}"
+            if subscription := workflow.get("subscription_cycle"):
+                goal += f"\n구독 개발 검증 · {subscription['phase']} · {subscription['status']}"
         session = view["development"]
         if session and getattr(self, "details_visible", False):
             start, end = session["start"], session["end"]

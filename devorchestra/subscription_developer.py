@@ -167,12 +167,14 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
         deadline = monotonic() + min(approval["budget"]["seconds"], expires - time())
         count = len(events)
         run_id = uuid4().hex
-        fields = {"project_id": project, "run_id": run_id, "task_id": run_id, "agent_run_id": run_id,
+        fields = {"project_id": project, "run_id": run_id, "task_id": manager_run, "agent_run_id": run_id,
                   "manager_run_id": manager_run, "role": "Developer", "state": "DIAGNOSTIC", "source": SOURCE,
                   "generation": approval["generation"], "scope_sha256": approved, "backend": BACKEND,
                   "model": model, "request_sha256": approval["request_sha256"], "plan_sha256": approval["plan_sha256"],
                   "instruction_layers": approval["instruction_layers"], "budget": approval["budget"],
-                  "git_head": approval["git_head"], "file": approval["file"], "before_sha256": approval["before_sha256"]}
+                  "git_head": approval["git_head"], "project_revision": approval["project_revision"],
+                  "baseline_sha256": approval["baseline_sha256"],
+                  "file": approval["file"], "before_sha256": approval["before_sha256"]}
         started, applied = False, False
         result = {**fields, "kind": "subscription_developer_result", "usage": "UNKNOWN",
                   "response_completed": False, "owned_tree": "DRAINED", "owned_processes_started": 0}
@@ -233,12 +235,14 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                 finally:
                     stream.close()
                     pending.unlink(missing_ok=True)
-            observed = changes(before, snapshot(replica), {target.name})
+            after = snapshot(replica)
+            observed = changes(before, after, {target.name})
             if observed[target.name]["after"]["sha256"] != sha256(replacement).hexdigest():
                 raise Blocked("Developer applied bytes could not be verified")
             write_protected(runner.ledger.local_directory("recovery", create=True) / artifact, {"diff": diff})
             result.update(outcome="COMPLETED", after_sha256=sha256(replacement).hexdigest(),
                           diff_sha256=digest(diff), protected_diff_ref=artifact, reviewer_admission="BLOCKED",
+                          after_replica_sha256=digest(after), changed_files=sorted(observed),
                           verification="PYTHON_SYNTAX_ONLY" if target.suffix == ".py" else "FILE_BYTES_VERIFIED")
         except (Blocked, KeyboardInterrupt) as error:
             if not started:

@@ -115,6 +115,14 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     if manager_event and manager_event["kind"] == "native_manager_result":
         manager_status = {"COMPLETED": "SUBSCRIPTION_COMPLETED", "FAILED": "SUBSCRIPTION_FAILED",
                           "UNKNOWN": "SUBSCRIPTION_UNKNOWN"}.get(manager_event.get("outcome"), manager_status)
+    cycle_event = next((event for event in reversed(project_events)
+                        if event["kind"] in ("subscription_cycle_intent", "subscription_cycle_result")), None)
+    subscription_cycle = None
+    if cycle_event:
+        outcome = cycle_event.get("outcome", "IN_PROGRESS_OR_UNSETTLED")
+        subscription_cycle = {"phase": cycle_event["phase"], "run_id": cycle_event["run_id"],
+                              "status": (cycle_event.get("decision", cycle_event.get("verdict", outcome))
+                                         if outcome == "COMPLETED" else outcome)}
     if selected_question:
         next_action = "ANSWER_QUESTION"
     elif not registration:
@@ -149,6 +157,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
             "requirements_baseline_count": len(baseline),
             "pending_requirements_count": len(pending_requirements) if start or session else 0,
             "manager_status": manager_status,
+            "subscription_cycle": subscription_cycle,
             "next_action": next_action,
         },
         "shutdown": shutdown,

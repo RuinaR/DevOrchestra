@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.94에서 구독 모델 네 턴과 고정 Python Verifier의 실제 순차 사이클을 검증했다. `cycle-role`은 변경 매니페스트가 있는 Developer 결과가 필요하며, 최종 완료에는 동일 작업의 결정적 PASS가 필요하다. 다음 단계는 소유 GUI 영수증을 이 계약에 연결하고 재작업 범위를 별도 검증하는 것이다.
+
 P2.93은 실제 Manager 계획에 바인딩된 구독 Developer의 단일 파일 수정을 실측했다. \`developer-edit\`는 리뷰 해시와 별도 승인으로만 실행한다. \`developer-diff\`는 보호된 검토 자료를 로컬에서 읽는다. 다음 단계는 검토 계약에 diff를 연결하고 SDK 파일·프로세스 집행과 결정적 테스트를 별도 검증하는 것이다.
 
 다음 자동 개발 검증은 [공식 Codex 백엔드 비교](ARCHITECTURE-ROADMAP.md#공식-codex-백엔드)에서 시작한다. Windows SDK의 설치 CLI 시작은 확인했고, 실제 구독 Manager 턴은 여전히 차단 상태다. 기존 App Server 검토 명령과 감독형 경로를 유지한다.
