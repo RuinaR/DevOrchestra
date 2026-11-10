@@ -268,7 +268,8 @@ def run_arithmetic(ledger, manifest, replica, sources, run_id, check):
 
     frozen = manifest["build"]
     current = review(replica, frozen["launcher"], list(sources), frozen["vectors"],
-                     frozen["limits"]["max_seconds"], Path(frozen["tool_root_read_only"]), arithmetic=True)
+                     frozen["limits"]["max_seconds"], Path(frozen["tool_root_read_only"]), arithmetic=True,
+                     nested=frozen["kind"] == ONBOARDED_KIND)
     if (any(value != current[key] for key, value in frozen.items() if key not in ("replica_sha256", "sources"))
             or current["sources"] != {name: sha256(data).hexdigest() for name, data in sources.items()}):
         raise Blocked("C# source or toolchain changed outside the approved session")

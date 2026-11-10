@@ -150,6 +150,10 @@ def native_unresolved(events):
             pending.add(("onboarding", event["run_id"]))
         elif event["kind"] == "onboarding_result":
             pending.discard(("onboarding", event["run_id"]))
+        elif event["kind"] == "original_apply_intent":
+            pending.add(("original-apply", event["run_id"]))
+        elif event["kind"] == "original_apply_result":
+            pending.discard(("original-apply", event["run_id"]))
     return bool(pending)
 
 

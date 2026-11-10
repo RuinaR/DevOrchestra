@@ -169,6 +169,13 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
         role_instruction = (" Review the actual change for concrete defects. GUI execution is deliberately "
                             "pending until Verifier. If the change is sound and needs only runtime confirmation, "
                             "use ACCEPT_FOR_VERIFICATION and record the pending GUI check as a coverage gap.")
+    elif phase == "reviewer" and session and session.scope.get("runtime"):
+        context["verification_pending"] = {"tool": session.scope["runtime"]["kind"],
+                                           "manifest_sha256": digest(session.scope["runtime"])}
+        role_instruction = (" Review the actual source diff for concrete defects. The isolated build and tests "
+                            "run in the next role. Missing runtime results at this stage are a coverage gap, "
+                            "rather than a reason to request a source edit. Use ACCEPT_FOR_VERIFICATION when "
+                            "the diff needs no changes before that verification.")
     if phase == "manager-final":
         if session and (frozen := session.scope.get("gui_contract")):
             provenance = verifier.get("provenance", {})
@@ -300,6 +307,8 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                 if "vectors_sha256" in scope:
                     result.update(harness=result.get("runtime", "RESTRICTED_AST_RUNTIME"),
                                   vectors_sha256=scope["vectors_sha256"])
+                if scope.get("runtime") and scope.get("batch"):
+                    result["source_files_sha256"] = {name: sha256(data).hexdigest() for name, data in source.items()}
                 result["artifact_sha256"] = digest(result["observations"])
             else:
                 from .ai_usage import check_account, response_usage

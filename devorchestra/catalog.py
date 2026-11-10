@@ -195,7 +195,7 @@ class Catalog:
                 data = event["data"]
                 if event["kind"] == "setup_saved":
                     from .setup import validate_setup
-                    validate_setup(data)
+                    validate_setup(data, allow_file_proposals=data["project"]["project_id"] in projects)
                     setups[data["project"]["project_id"]] = {
                         "replica": data["replica"], "wait_seconds": data["wait_seconds"],
                     }

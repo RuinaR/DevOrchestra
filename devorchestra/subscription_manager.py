@@ -53,6 +53,15 @@ def review(runner, project, account, model, expires, *, session=None):
               for name, item in zip(("global", "project", ROLE), instructions)]
     context = {key: baseline[key] for key in ("goal", "acceptance", "requirements", "proposed_files_ceiling",
                                               "clarifications")}
+    if any(event["kind"] == "onboarding_result" and event.get("project_id") == project for event in events):
+        from .replica_readiness import baseline as onboarding_baseline
+
+        _, _, frozen, onboarding = onboarding_baseline(runner.ledger, project)
+        context["onboarding"] = {
+            "original_head": frozen["head"], "replica_head": onboarding["replica_head"],
+            "staged_count": len(frozen["staged"]), "modified_count": len(frozen["raw_worktree_changed"]),
+            "documents": {name: info["sha256"] for name, info in sorted(frozen["documents"].items())[:16]},
+        }
     from .role_contract import OUTPUT_SCHEMAS
 
     body = {"model": model, "store": False, "stream": True, "tools": [],

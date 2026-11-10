@@ -46,13 +46,16 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
             raise Blocked("Batch Verifier requires vectors for every approved file")
         check_names(files, vectors["create"], "cs" if csharp else "py")
         if csharp:
-            if (set(files) != csharp_sources.FILES or vectors["create"]
+            if ({Path(name).name for name in files} != csharp_sources.FILES or len(files) != len(csharp_sources.FILES)
+                    or vectors["create"]
                     or set(vectors["runtime"]) != {"kind", "launcher", "vectors"}
                     or any(item != baseline["acceptance"] for item in vectors["files"].values())):
                 raise Blocked("C# runtime requires two existing approved arithmetic files and frozen acceptance")
         else:
             for spec in vectors["files"].values():
                 validate_vectors(spec, baseline["acceptance"])
+        if any(not (Path(setup["replica"]) / name).parent.is_dir() for name in files):
+            raise Blocked("Approved file parents must already exist in the replica")
     elif (not setup or len(files) != 1 or "/" in files[0]
             or (files[0] != "gui-test.json" if gui else not files[0].endswith(".py"))):
         raise Blocked("Select one registered Python file or the approved data-only GUI descriptor")
@@ -98,6 +101,7 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
             scope["runtime"] = {"kind": csharp_sources.KIND, "build": mxc_dotnet.review(
                 replica, spec["launcher"], files, spec["vectors"], min(seconds, 20),
                 registered(runner.ledger, project, replica), arithmetic=True,
+                nested=any("/" in name for name in files),
             )}
             scope["tools"] = ["controller-replace-batch", csharp_sources.KIND]
         elif "runtime" in vectors:

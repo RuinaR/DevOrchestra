@@ -276,7 +276,8 @@ class CommandCenter:
         self.verify_overview = label(verification, fg=MUTED, wraplength=480)
         self.verify_overview.pack(fill="x")
         self.action_grid(verification, (("GUI 검증 보고서와 이미지", self.gui_verification_report),
-                                        ("복제본 빌드·테스트", self.onboarding_panel)))
+                                        ("복제본 빌드·테스트", self.onboarding_panel),
+                                        ("원본 반영 검토", self.original_apply_panel)))
         approval = section(body, "승인 센터")
         approval.grid(row=3, column=0, sticky="ew", padx=18)
         self.approval_button = ttk.Button(approval, state="disabled", command=self.answer_question)
@@ -1246,6 +1247,59 @@ class CommandCenter:
         from .gui_onboarding import show_panel
 
         show_panel(self, initial)
+
+    def original_apply_panel(self):
+        from . import original_apply
+
+        if self.project.current() < 0:
+            return
+        project = self.project_ids[self.project.current()]
+        panel = self.panel()
+        panel.title("DevOrchestra · 검증된 변경 원본 반영")
+        panel.geometry("850x650")
+        status = tk.StringVar(panel, value="동일 복제본의 최종 판정과 격리 검증 영수증을 확인합니다.")
+        ttk.Label(panel, textvariable=status, wraplength=780).pack(fill="x", pady=8)
+        preview = self.editor_box(panel, height=20, state="disabled")
+        expires = int(time()) + 240
+        try:
+            scope, patch = original_apply.review(self.controller, project, expires)
+        except (Blocked, OSError, ValueError, sqlite3.Error) as error:
+            status.set(f"반영 차단 · {error}")
+            try:
+                latest = next((row for row in reversed(self.controller.ledger.read())
+                               if row["kind"] == "original_apply_result" and row["project_id"] == project), None)
+            except (Blocked, OSError, ValueError, sqlite3.Error):
+                latest = None
+            if latest:
+                preview.configure(state="normal")
+                preview.insert("1.0", f"최근 반영 · {latest['result']}\n"
+                               + "\n".join(latest["paths"]))
+                preview.configure(state="disabled")
+            return
+        checksum = digest(scope)
+        status.set(f"변경 {len(scope['paths'])}개 · 별도 원본 쓰기 승인 필요\n"
+                   f"원본 {scope['original']}\n복제본 {scope['replica']}")
+        preview.configure(state="normal")
+        preview.insert("1.0", patch)
+        preview.configure(state="disabled")
+
+        def apply():
+            if not self.confirm("원본 쓰기 승인",
+                                f"검토한 {len(scope['paths'])}개 경로를 원본 작업 트리에 반영합니다.\n"
+                                f"{scope['original']}\nGit 커밋이나 스테이징은 수행하지 않습니다.",
+                                parent=panel):
+                return
+            button.configure(state="disabled")
+            try:
+                receipt = original_apply.run(self.controller, project, expires, checksum)
+            except (Blocked, OSError, ValueError, sqlite3.Error) as error:
+                status.set(f"반영 중단 · {error}")
+            else:
+                status.set(f"{receipt['result']} · {receipt['reason'] or '원본 파일 해시 확인 완료'}")
+            self.refresh()
+
+        button = ttk.Button(panel, text="검토한 변경의 원본 반영 승인", command=apply, style="Primary.TButton")
+        button.pack(anchor="e")
 
     def instruction_settings(self):
         panel = self.panel()

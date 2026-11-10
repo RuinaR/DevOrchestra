@@ -112,7 +112,8 @@ def review(runner, project, manager_run, account, model, expires, *, session=Non
     if not any(item["account"] == account and item["subscription_granted"] for item in AccountStore(ledger).accounts()):
         raise Blocked("DevOrchestra ChatGPT plan consent is required")
     replica = Path(setup["replica"])
-    path = replica / candidate["paths"][0]
+    primary = candidate["paths"][0]
+    path = replica / primary
     if batch:
         original = {}
         for name in names:
@@ -176,7 +177,7 @@ def review(runner, project, manager_run, account, model, expires, *, session=Non
                 "baseline_sha256": digest(baseline), "generation": len(events) + 1, "ledger_head": fence,
                 "account": account, "model": model, "expires": expires, "budget": budget, "replica": str(replica),
                 "git_head": _head(replica), "replica_sha256": digest(image),
-                "file": path.name, "before_sha256": original_hashes[path.name],
+                "file": primary, "before_sha256": original_hashes[primary],
                 "tools": ["controller-replace-one-file"], "shell": False, "build": False, "gui": False,
                 "instruction_layers": [{"layer": name, "version": item["version"], "sha256": item["sha256"]}
                                        for name, item in zip(parts, instructions)],

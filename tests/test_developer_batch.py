@@ -14,16 +14,20 @@ class DeveloperBatchTests(unittest.TestCase):
             root = Path(folder)
             replica = root / "replica"
             replica.mkdir()
-            original = {"first.py": b"value = 1\n", "second.py": None}
-            (replica / "first.py").write_bytes(original["first.py"])
-            developer_batch.check_names(list(original), ["second.py"])
-            replacement = developer_batch.replacement(b'{"first.py":"value = 2","second.py":"value = 3"}', original)
+            (replica / "src").mkdir()
+            (replica / "tests").mkdir()
+            original = {"src/first.py": b"value = 1\n", "tests/second.py": None}
+            (replica / "src/first.py").write_bytes(original["src/first.py"])
+            developer_batch.check_names(list(original), ["tests/second.py"])
+            replacement = developer_batch.replacement(
+                b'{"src/first.py":"value = 2","tests/second.py":"value = 3"}', original,
+            )
             before = snapshot(replica)
             after, observed = developer_batch.apply(replica, before, original, replacement,
                                                      root / "journal.dpapi", lambda: None)
             self.assertEqual(after, snapshot(replica))
             self.assertEqual(set(original), set(observed))
-            self.assertEqual(b"value = 3", (replica / "second.py").read_bytes())
+            self.assertEqual(b"value = 3", (replica / "tests/second.py").read_bytes())
             self.assertTrue((root / "journal.dpapi").is_file())
 
     def test_second_write_failure_restores_first_file_and_removes_staging(self):
@@ -55,5 +59,7 @@ class DeveloperBatchTests(unittest.TestCase):
             developer_batch.check_names(["first.py", "FIRST.py"], [])
         with self.assertRaises(Blocked):
             developer_batch.check_names(["first.py", "../second.py"], [])
+        with self.assertRaises(Blocked):
+            developer_batch.check_names(["first.py", "models/second.py"], [])
         with self.assertRaises(Blocked):
             developer_batch.replacement(b'{"first.py":"value = 1","second.py":"def bad"}', ["first.py", "second.py"])

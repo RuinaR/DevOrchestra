@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.107은 승인된 하위 경로의 Python/C# 배치와 검증 센터의 **원본 반영 검토**를 연결한다. CLI는 `original-apply --project ID --expires UNIX_SECONDS`로 diff와 승인 해시를 검토하고, 동일 인자에 `--approve HASH`를 추가해 한 번 반영한다. 원본 Git 및 작업 트리, 온보딩 기준, 동일 세션의 리뷰·격리 런타임·최종 판정, 변경 바이트가 일치해야 한다. 중단된 intent와 로컬 DPAPI 복구 자료를 보존하며 자동 재실행하지 않는다. 삭제·이동, 새 디렉터리, 임의 MSBuild와 범용 Python 패키지 실행은 지원 범위 밖이다.
+
 P2.105 Command Center의 일곱 작업 공간은 기존 Controller 메서드를 호출한다. `ui_design.py`가 토큰과 버튼 스킨을 제공하고, 정적 폰트·아이콘과 고지는 EXE 패키지에 포함된다. 프레임워크 교체·모든 모달 리디자인·OS 수준 접근성 인증은 별도 작업이다.
 
 P2.104는 기존 Git 문맥 패널의 **환경·빌드 검토**에서 복제본 C# 파일 두 개와 기대 벡터를 승인한다. 같은 기능의 CLI는 \`build-verify --kind mxc-dotnet-onboarded-v1\`이다. MSBuild·패키지 복원·프로젝트 스크립트는 이 좁은 실행 범위 밖이다. \`replica-changes --project <ID>\`는 원본 파일과 독립 이력 복제본을 읽기 전용으로 비교한다. 승인 전 준비 상태와 실측 결과를 구분하고 기존 미확정 스테이징은 보존한다.

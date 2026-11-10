@@ -113,6 +113,10 @@ def main():
     commands.add_parser("replica-changes", help="Review frozen original versus replica bytes without applying").add_argument(
         "--project", required=True,
     )
+    original_apply = commands.add_parser("original-apply", help="Review or apply verified replica changes")
+    original_apply.add_argument("--project", required=True)
+    original_apply.add_argument("--expires", required=True, type=int)
+    original_apply.add_argument("--approve")
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -160,6 +164,16 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "original-apply":
+            from . import original_apply
+
+            runner = Runner(ledger)
+            if args.approve:
+                print(canonical(original_apply.run(runner, args.project, args.expires, args.approve)))
+            else:
+                scope, patch = original_apply.review(runner, args.project, args.expires)
+                print(canonical({"review": scope, "review_sha256": digest(scope), "diff": patch}))
+            return
         if args.action == "replica-changes":
             from .replica_readiness import changes_review
 

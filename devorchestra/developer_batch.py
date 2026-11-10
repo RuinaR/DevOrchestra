@@ -19,12 +19,16 @@ BATCH_LIMIT = 16384
 
 
 def check_names(names, create, extension="py"):
+    from .project_onboarding import _protected
+    from .supervised import _path_allowed
+
     if (type(create) is not list or not 2 <= len(names) <= 4
             or len({name.casefold() for name in names}) != len(names)
-            or any(not re.fullmatch(rf"[A-Za-z0-9_-]{{1,64}}\.{extension}", name) for name in names)
+            or any(not re.fullmatch(rf"(?:[A-Za-z0-9_-]{{1,64}}/){{0,6}}[A-Za-z0-9_-]{{1,64}}\.{extension}", name)
+                   or not _path_allowed(name) or _protected(name) for name in names)
             or any(type(name) is not str or name not in names for name in create)
             or len(set(create)) != len(create)):
-        raise Blocked(f"Batch requires two to four exact root .{extension} files and explicit creation paths")
+        raise Blocked(f"Batch requires two to four exact .{extension} paths and explicit creation paths")
 
 
 def replacement(output, names, *, csharp=False):
@@ -49,7 +53,9 @@ def replacement(output, names, *, csharp=False):
         if csharp:
             from .csharp_sources import validate
 
-            validate(result)
+            if len({Path(name).name.casefold() for name in result}) != len(result):
+                raise Blocked("Ambiguous C# source basename")
+            validate({Path(name).name: data for name, data in result.items()})
         return result
     except (ValueError, UnicodeError, SyntaxError, RecursionError):
         raise Blocked("Invalid batch replacement for the approved files") from None
