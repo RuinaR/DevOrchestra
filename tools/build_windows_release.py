@@ -61,6 +61,7 @@ def main():
     sys.path.insert(0, str(root))
     from devorchestra.lease import execution_slot
     from devorchestra.ledger import check_path
+    from devorchestra.owned_artifacts import _remove_owned_tree
 
     if sys.platform != "win32" or platform.machine().upper() not in ("AMD64", "X86_64"):
         raise SystemExit("WINDOWS_X64_REQUIRED")
@@ -85,12 +86,15 @@ def main():
         output = root / ".ai-local" / "release" / f"{release}-{sha[:12]}-{uuid4().hex[:8]}"
         check_path(output)
         output.mkdir(parents=True)
+        staging = output / "staging"
+        staging.mkdir()
+        identity = staging.stat().st_ino
         info = {"version": release, "git_sha": sha, "pyinstaller": tool}
-        metadata = output / "release.json"
+        metadata = staging / "release.json"
         metadata.write_text(json.dumps(info), encoding="utf-8")
-        launcher = output / "launcher.py"
+        launcher = staging / "launcher.py"
         launcher.write_text("from devorchestra.gui import main\nmain()\n", encoding="utf-8")
-        resource = output / "version.txt"
+        resource = staging / "version.txt"
         numbers = tuple(map(int, release.split("."))) + (0,)
         resource.write_text(
             f"VSVersionInfo(ffi=FixedFileInfo(filevers={numbers}, prodvers={numbers}, "
@@ -99,10 +103,10 @@ def main():
             f"StringStruct('FileVersion','{release}'), StringStruct('Comments','Git {sha}')])]), "
             "VarFileInfo([VarStruct('Translation',[1033,1200])])])", encoding="utf-8",
         )
-        _package(root, output, [
+        _package(root, staging, [
             "-m", "PyInstaller", "--onefile", "--windowed", "--noupx",
-            "--name", "DevOrchestra", "--paths", str(root), "--specpath", str(output),
-            "--workpath", str(output / "work"), "--distpath", str(output / "dist"),
+            "--name", "DevOrchestra", "--paths", str(root), "--specpath", str(staging),
+            "--workpath", str(staging / "work"), "--distpath", str(output / "dist"),
             "--add-data", f"{metadata};devorchestra", "--add-data", f"{root / 'defaults'};defaults",
             "--version-file", str(resource), str(launcher),
         ])
@@ -132,8 +136,16 @@ def main():
                 or not any(name.startswith("_tcl_data/") for name in names)
                 or not any(name.startswith("_tk_data/") for name in names)):
             raise SystemExit("BUNDLED_RESOURCES_UNVERIFIED")
-        info.update(sha256=checksum.hexdigest(), bytes=executable.stat().st_size, gui_runtime="NOT_VERIFIED")
+        for log in ("build.log", "build.stdout.log"):
+            source = staging / log
+            check_path(source)
+            source.rename(output / log)
+        removal = _remove_owned_tree(staging, identity)
+        info.update(sha256=checksum.hexdigest(), bytes=executable.stat().st_size, gui_runtime="NOT_VERIFIED",
+                    cleanup=removal)
         executable.with_suffix(".json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+        if removal["status"] != "REMOVED":
+            raise SystemExit("PACKAGE_CLEANUP_UNCONFIRMED")
         print(executable)
         print(json.dumps(info))
 

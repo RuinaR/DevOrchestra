@@ -1,4 +1,5 @@
 """Narrow offline Roslyn adapter for a reviewed two-source console project."""
+from contextlib import nullcontext
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ from tempfile import TemporaryDirectory
 
 from .app_server import verify_app_server_binary
 from .build_execution import BuildExecution, limits
+from .dotnet_environment import select
 from .lease import Blocked
 from .ledger import canonical, check_path, digest
 from .mxc_host_probe import LAUNCHER_PIN, PROFILE, _profile
@@ -15,11 +17,6 @@ from .mxc_launcher import _known_folder, _signed_offline
 from .replica_evidence import fingerprint, snapshot
 
 KIND = "mxc-dotnet-console-v1"
-SDK = "7.0.302"
-FRAMEWORK = "7.0.5"
-ROSLYN = "4.6.0-3.23212.2 (d78a163b)"
-CONFIG = {"runtimeOptions": {"tfm": "net7.0", "rollForward": "Disable",
-                             "framework": {"name": "Microsoft.NETCore.App", "version": FRAMEWORK}}}
 PROGRAM = b"""using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -66,18 +63,19 @@ CALCULATION = b"""static class Calculation {
 """
 
 
-def _toolchain():
+def _toolchain(replica):
     root = _known_folder(0x26) / "dotnet"
-    compiler = root / "sdk" / SDK / "Roslyn" / "bincore"
-    refs = root / "packs" / "Microsoft.NETCore.App.Ref" / FRAMEWORK / "ref" / "net7.0"
+    selected = select(root, replica)
+    compiler = selected["compiler"]
+    refs = selected["ref_pack"] / "ref" / selected["target"]
     names = ("System.Runtime", "System.Console", "System.Net.Primitives", "System.Net.Sockets",
              "System.Diagnostics.Process", "System.ComponentModel.Primitives", "Microsoft.Win32.Primitives")
     tool = root / "dotnet.exe"
     libraries = [refs / (name + ".dll") for name in names]
-    runtime = root / "shared" / "Microsoft.NETCore.App" / FRAMEWORK
+    runtime = selected["runtime"]
     files = [tool, compiler / "csc.dll", compiler / "csc.runtimeconfig.json", compiler / "csc.deps.json",
              compiler / "Microsoft.CodeAnalysis.dll", compiler / "Microsoft.CodeAnalysis.CSharp.dll",
-             root / "host" / "fxr" / FRAMEWORK / "hostfxr.dll",
+             selected["host"] / "hostfxr.dll",
              runtime / "coreclr.dll", runtime / "hostpolicy.dll", runtime / "System.Private.CoreLib.dll",
              *libraries]
     try:
@@ -86,7 +84,7 @@ def _toolchain():
         raise Blocked("Required pinned .NET SDK or runtime files are missing") from error
     if not _signed_offline(tool) or not _signed_offline(compiler / "csc.dll"):
         raise Blocked(".NET host or compiler signature is unverified")
-    return root, tool, compiler / "csc.dll", libraries, identity
+    return root, tool, compiler / "csc.dll", libraries, identity, selected
 
 
 def review(replica, launcher, source_names, vectors, seconds):
@@ -101,6 +99,9 @@ def review(replica, launcher, source_names, vectors, seconds):
             or type(seconds) is not int or not 1 <= seconds <= 30):
         raise Blocked("Invalid .NET test vectors or time budget")
     image = snapshot(replica)
+    if any(path.casefold().endswith((".csproj", ".sln", ".slnx", ".props", ".targets"))
+           for path in image["files"]):
+        raise Blocked("Project build scripts and MSBuild metadata are outside the direct Roslyn adapter")
     sources = {name: image["files"].get(name, {}).get("sha256") for name in source_names}
     if sorted(filter(None, sources.values())) != sorted(sha256(data).hexdigest() for data in (PROGRAM, CALCULATION)):
         raise Blocked("Only the reviewed .NET console sources are admitted")
@@ -110,33 +111,41 @@ def review(replica, launcher, source_names, vectors, seconds):
     if not launcher.is_absolute() or launcher.name.casefold() != "codex.exe":
         raise Blocked("MXC requires the absolute path of the approved Codex launcher")
     verify_app_server_binary(launcher, approved_sha256=LAUNCHER_PIN)
-    root, tool, compiler, libraries, identity = _toolchain()
+    root, tool, compiler, libraries, identity, selected = _toolchain(replica)
+    runtime = selected["runtime"].name
+    config = {"runtimeOptions": {"tfm": selected["target"], "rollForward": "Disable",
+                                 "framework": {"name": "Microsoft.NETCore.App", "version": runtime}}}
+    compiler_command = ["exec", "--fx-version", runtime, str(compiler)]
     return {"kind": KIND, "launcher": str(launcher), "launcher_sha256": LAUNCHER_PIN,
             "replica": str(replica), "replica_sha256": digest(image), "git": image["git"],
-            "sources": sources, "vectors": vectors, "tool": str(tool), "sdk": SDK, "runtime": FRAMEWORK,
-            "expected_compiler_version": ROSLYN,
+            "sources": sources, "vectors": vectors, "tool": str(tool), "sdk": selected["sdk"], "runtime": runtime,
+            "environment_selection": {"sdk_policy": selected["sdk_policy"],
+                                      "global_json_sha256": selected["global_json_sha256"],
+                                      "reference_pack": selected["ref_pack"].name, "host": selected["host"].name,
+                                      "architecture": "win-x64", "source": "INSTALLED_SIGNED_TOOLCHAIN"},
             "tool_sha256": identity, "arguments": {
-                "version": ["exec", str(compiler), "/version"],
-                "compile": ["exec", str(compiler), "/nologo", "/noconfig", "/nostdlib+", "/target:exe",
+                "version": [*compiler_command, "/version"],
+                "compile": [*compiler_command, "/nologo", "/noconfig", "/nostdlib+", "/target:exe",
                             "/preferreduilang:en-US", "/deterministic+", *[f"/reference:{path}" for path in libraries]],
                 "execute": ["exec", "PRIVATE_APP_DLL", "TEST_VALUE", "OWNED_LOOPBACK_PORT", "SOURCE_NAME"],
             }, "workspace": "READ_ONLY_HASHED_COPY", "cwd": "STAGED_INPUT_ROOT",
             "writable": ["PRIVATE_TOOL_HOME", "PRIVATE_OUTPUT"],
             "outputs": ["app.dll", "app.runtimeconfig.json"],
-            "tool_root_read_only": str(root), "runtime_config": CONFIG,
+            "tool_root_read_only": str(root), "runtime_config": config,
             "environment": ["SystemRoot", "WINDIR", "SystemDrive", "LOCALAPPDATA", "ProgramData", "PATH",
                             "CODEX_HOME", "TEMP", "TMP", "DOTNET_CLI_HOME", "DOTNET_CLI_TELEMETRY_OPTOUT",
                             "DOTNET_CLI_UI_LANGUAGE", "DOTNET_MULTILEVEL_LOOKUP", "DOTNET_EnableDiagnostics"],
             "limits": limits(seconds)}
 
 
-def run(ledger, scope, check):
+def run(ledger, scope, check, workspace=None):
     replica, launcher = Path(scope["replica"]), Path(scope["launcher"])
     names = sorted(scope["sources"])
     current = review(replica, launcher, names, scope["vectors"], scope["limits"]["max_seconds"])
     if any(scope.get(key) != value for key, value in current.items()):
         raise Blocked(".NET execution scope changed")
-    with TemporaryDirectory(prefix="mxc-dotnet-", dir=ledger.local_directory("temp", create=True)) as temp:
+    with (nullcontext(workspace) if workspace is not None else
+          TemporaryDirectory(prefix="mxc-dotnet-", dir=ledger.local_directory("temp", create=True))) as temp:
         root = Path(temp)
         work, home, output, protected = [root / name for name in ("work", "home", "output", "protected")]
         for folder in (work, home, output, protected):
@@ -176,7 +185,8 @@ def run(ledger, scope, check):
                   "profile_sha256": sha256(profile.encode()).hexdigest()}
         version = step("compiler-version", scope["arguments"]["version"])
         compiler_version = version["stdout"].strip()
-        if version["exitCode"] or version["stderr"] or compiler_version != scope["expected_compiler_version"]:
+        if (version["exitCode"] or version["stderr"]
+                or not re.fullmatch(r"[0-9.]+(?:-[\w.+-]+)?(?: \([0-9a-f]+\))?", compiler_version)):
             return {**result, "result": "BLOCKED", "reason": "COMPILER_VERSION_UNVERIFIED"}
         result["compiler_version"] = compiler_version
         report = step("compile", [*compiler, f"/out:{app}", *names])

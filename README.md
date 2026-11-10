@@ -32,6 +32,12 @@ CLI에서는 `python -B -m devorchestra gui-verify --project fixture-a`로 범�
 
 감독형 모드는 사용자가 역할 지시와 결과를 직접 전달하는 실사용 경로입니다. 가져온 계획은 외부 실행 증거와 별도로 표시됩니다. 최종 목표인 자동 Codex 실행은 기존 입장 조건을 유지합니다.
 
+### 개발 환경과 산출물 점검
+
+등록 프로젝트의 개발 도구 요구사항은 `python -B -m devorchestra environment-review --project <ID>`로 확인합니다. 이 명령은 복제본을 실행하지 않고 소스·매니페스트 표식을 조사합니다. .NET 콘솔 Verifier는 루트 `global.json`의 지원되는 정책을 읽고 설치된 SDK·런타임·참조 팩을 고른 뒤 신원을 승인에 묶습니다. 온라인 설치와 프로젝트 빌드 스크립트 실행은 현재 승인 대상 밖입니다.
+
+`python -B -m devorchestra artifact-review --retain 2`는 최근 로컬 릴리스와 기존 임시 자료를 분류합니다. 빌드 Verifier는 작업 전용 임시 폴더를 원장에 기록하고 소유 Job을 회수한 후 정리합니다.
+
 ### 포터블 Windows x64 빌드
 
 Windows x64, x64 Python, Tk와 이미 설치된 PyInstaller를 준비한 깨끗한 소스 체크아웃에서 `python -B tools/build_windows_release.py 0.2.66`을 실행합니다. 스크립트는 로컬 전용 `.ai-local/release/` 아래 새 폴더에 GUI EXE를 빌드하고 버전·Git SHA·PE 형식·내장 Tk 리소스·해시를 검사합니다. EXE는 배치할 폴더의 `.ai-local/`을 사용합니다. 업데이트할 때 같은 위치의 EXE만 교체하고 데이터 폴더를 보존합니다. 빌드 도구가 없으면 사전검사에서 중단됩니다. 패키지 GUI 실행은 별도 격리 검증 대상입니다.

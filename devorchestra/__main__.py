@@ -94,6 +94,12 @@ def main():
     build_verify.add_argument("--seconds", type=int, required=True)
     build_verify.add_argument("--expires", type=int, required=True)
     build_verify.add_argument("--approve", metavar="SCOPE_SHA256")
+    commands.add_parser("environment-review", help="Inspect tool requirements without running the project").add_argument(
+        "--project", required=True,
+    )
+    commands.add_parser("artifact-review", help="Classify retained local builds and cleanup candidates").add_argument(
+        "--retain", type=int, default=2,
+    )
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -141,6 +147,16 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "artifact-review":
+            from .owned_artifacts import review
+
+            print(canonical(review(ledger, args.retain)))
+            return
+        if args.action == "environment-review":
+            from .development_environment import review
+
+            print(canonical(review(ledger, args.project)))
+            return
         if args.action == "build-verify":
             runner = Runner(ledger)
             fields = (args.project, args.kind, args.launcher, args.source, args.vectors, args.seconds, args.expires)

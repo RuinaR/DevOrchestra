@@ -450,6 +450,7 @@ class Runner:
                      cancelled=lambda: False):
         from . import mxc_dotnet
         from .mxc_host_probe import OwnedMxcStopped
+        from .owned_artifacts import cleanup, workspace
 
         with execution_slot() as abandoned:
             events, tail = self._idle_diagnostic(abandoned)
@@ -457,11 +458,14 @@ class Runner:
             if digest(scope) != approved_scope:
                 raise Blocked("Build verifier approval changed")
             run_id = uuid4().hex
+            scratch = workspace(self.ledger, run_id)
             binding = {"project_id": project_id, "run_id": run_id, "task_id": run_id, "role": "Verifier",
                        "approval_id": uuid4().hex, "generation": len(events) + 1, "state": "DIAGNOSTIC",
                        "scope": scope, "scope_sha256": approved_scope}
             count, fence = self.ledger.append(len(events), tail, {
                 **binding, "kind": "build_verifier_intent", "timestamp": datetime.now(timezone.utc).isoformat(),
+                "cleanup_plan": {"classification": "AUTO_CLEAN", "workspace": scratch.name,
+                                 "condition": "OWNED_JOBS_DRAINED"},
             }, admission=require_admission)
 
             def check():
@@ -471,12 +475,22 @@ class Runner:
                 if time() >= expires:
                     raise Blocked("APPROVAL_EXPIRED")
 
+            check_path(self.ledger.local_directory("temp", create=True))
+            scratch.mkdir()
+            identity = scratch.stat().st_ino
             try:
-                evidence = mxc_dotnet.run(self.ledger, scope, check)
+                evidence = mxc_dotnet.run(self.ledger, scope, check, workspace=scratch)
             except OwnedMxcStopped as error:
                 evidence = {"result": "NOT_VERIFIED", "reason": str(error), "job_active": 0}
             self._check_diagnostic_fence(count, fence)
+            if evidence.get("job_active") != 0:
+                raise Blocked("Build cleanup requires verified Job drain")
+            removal = cleanup(self.ledger, run_id, scratch, identity)
+            if removal["status"] != "REMOVED":
+                evidence = {**evidence, "execution_result": evidence["result"], "result": "NOT_VERIFIED",
+                            "reason": "BUILD_CLEANUP_UNCONFIRMED"}
             result = {**binding, **evidence, "kind": "build_verifier_result",
+                      "cleanup": removal,
                       "timestamp": datetime.now(timezone.utc).isoformat()}
             self.ledger.append(count, fence, result, allow_shutdown=True)
             return result
