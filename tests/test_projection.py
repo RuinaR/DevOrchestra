@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
+from threading import Lock
 import unittest
 from unittest.mock import Mock, patch
 from xml.etree.ElementTree import fromstring
@@ -14,6 +15,7 @@ from devorchestra.ledger import Ledger
 from devorchestra.projection import ProjectionReader
 from devorchestra.runtime import Runner, Scenario
 from devorchestra.sandbox_profile import restricted_profile
+from devorchestra.ui_design import MUTED, RED, TEAL
 
 
 @unittest.skipUnless(os.name == "nt", "Windows P1 ledger integration")
@@ -122,43 +124,65 @@ class ProjectionTests(unittest.TestCase):
         center.project = Mock()
         center.project.current.return_value = 0
         center.view = None
+        center.projection_lock = Lock()
+        center.refresh_generation = 0
         center.observation = Mock()
         center.render = Mock(wraps=center.render)
         center.clear = Mock(wraps=center.clear)
         for attr in ("global_badge", "mission", "goal", "project_states", "development_button", "gates",
-                     "safety", "resources", "run_filter", "role_filter", "render_audit"):
+                     "safety", "resources", "run_filter", "role_filter", "render_audit",
+                     "overview", "verify_overview", "approval_button"):
             setattr(center, attr, Mock())
         center.phases = [(name, Mock()) for name in ("PLAN", "DEV", "REV", "VFY", "DEC")]
         center.cards = {"Manager": (Mock(), Mock())}
         center.refresh()
         center.render.assert_called_once()
-        center.cards["Manager"][0].configure.assert_called_with(text="NO EXECUTION", fg="#b9cde4")
+        center.cards["Manager"][0].configure.assert_called_with(text="NO EXECUTION", fg=MUTED)
         center.refresh()
         center.render.assert_called_once()
         self.approve()
         self.command("run")
         center.refresh()
-        center.phases[0][1].configure.assert_called_with(text="PLAN\nRECORDED OK", fg="#78efca")
-        center.cards["Manager"][0].configure.assert_called_with(text="PASS · CHECKPOINTING", fg="#78efca")
+        center.phases[0][1].configure.assert_called_with(text="PLAN\nRECORDED OK", fg=TEAL)
+        center.cards["Manager"][0].configure.assert_called_with(text="PASS · CHECKPOINTING", fg=TEAL)
         center.project_ids.append("fixture-b")
         center.project.current.return_value = 1
         center.select_project(None)
-        center.cards["Manager"][0].configure.assert_called_with(text="NO EXECUTION", fg="#b9cde4")
+        center.cards["Manager"][0].configure.assert_called_with(text="NO EXECUTION", fg=MUTED)
         with closing(sqlite3.connect(self.ledger.path)) as db, db:
             db.execute("DELETE FROM events WHERE seq=1")
         center.refresh()
         self.assertIsNone(center.view)
-        center.global_badge.configure.assert_called_with(text="저장소 확인 필요", fg="#ff9da9")
+        center.global_badge.configure.assert_called_with(text="저장소 확인 필요", fg=RED)
 
     def test_first_run_refresh_never_reads_a_missing_database(self):
         center = CommandCenter.__new__(CommandCenter)
         center.view = None
+        center.refresh_generation = 0
         center.clear = Mock()
         center.reader = Mock()
         center.reader.ledger.storage_status.return_value = {"status": "NOT_INITIALIZED"}
         center.refresh()
         center.reader.read.assert_not_called()
         self.assertTrue(center.clear.call_args.kwargs["first_run"])
+
+    def test_audit_pages_bound_widget_rows_and_display_unknown_state(self):
+        center = CommandCenter.__new__(CommandCenter)
+        center.view = {"events": [{"sequence": index, "kind": "sdk_install_intent"} for index in range(1, 123)]}
+        center.run_options = {}
+        center.audit_page = 0
+        for attr in ("tree", "role_filter", "run_filter", "audit_count", "audit_previous",
+                     "audit_next", "select_event"):
+            setattr(center, attr, Mock())
+        center.tree.selection.return_value = ()
+        center.tree.get_children.return_value = ()
+        center.role_filter.get.return_value = "All roles"
+        center.render_audit()
+        self.assertEqual(60, center.tree.insert.call_count)
+        self.assertEqual("UNKNOWN", center.tree.insert.call_args.kwargs["values"][-1])
+        center.tree.insert.reset_mock()
+        center.move_audit(2)
+        self.assertEqual(2, center.tree.insert.call_count)
 
     def test_reader_rejects_replaced_verified_history(self):
         self.start()

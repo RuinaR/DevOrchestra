@@ -108,6 +108,7 @@ def main():
             "--name", "DevOrchestra", "--paths", str(root), "--specpath", str(staging),
             "--workpath", str(staging / "work"), "--distpath", str(output / "dist"),
             "--add-data", f"{metadata};devorchestra", "--add-data", f"{root / 'defaults'};defaults",
+            "--add-data", f"{root / 'devorchestra' / 'ui_assets'};devorchestra/ui_assets",
             "--version-file", str(resource), str(launcher),
         ])
         if git("rev-parse", "HEAD") != sha or git("status", "--porcelain", "--untracked-files=normal"):
@@ -132,7 +133,9 @@ def main():
         archive = CArchiveReader(str(executable))
         names = {name.replace("\\", "/") for name in archive.toc}
         from devorchestra.default_instructions import SOURCES
+        from devorchestra.ui_design import ASSET_FILES
         if ("devorchestra/release.json" not in names or not {f"defaults/{path}" for path in SOURCES.values()} <= names
+                or not {f"devorchestra/ui_assets/{path}" for path in ASSET_FILES} <= names
                 or not any(name.startswith("_tcl_data/") for name in names)
                 or not any(name.startswith("_tk_data/") for name in names)):
             raise SystemExit("BUNDLED_RESOURCES_UNVERIFIED")

@@ -5,10 +5,10 @@ from concurrent.futures import Future
 import json
 from pathlib import Path
 import sqlite3
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import monotonic, time
 import tkinter as tk
-from tkinter import filedialog, font, ttk
+from tkinter import filedialog, ttk
 from uuid import UUID, uuid4
 
 from .catalog import Catalog, REQUIREMENT_ROLES, new_project, read_frozen_requirements
@@ -22,10 +22,9 @@ from .questions import AUTHORIZATION_TYPES
 from .runtime import PROJECTS, Runner
 from .setup import create_work_copy, validate_setup
 from .supervised import MAX_HANDOFF_BYTES, latest_handoff
+from . import ui_design
+from .ui_design import BG, PANEL, TILE, EDGE, INK, MUTED, CYAN, TEAL, AMBER, RED
 
-BG, PANEL, TILE, EDGE = "#0c111d", "#141e2e", "#202c42", "#455778"
-INK, MUTED, CYAN = "#f1f6ff", "#b9cde4", "#96baff"
-TEAL, AMBER, RED = "#78efca", "#ffd082", "#ff9da9"
 ROLE_MARKS = {"Manager": "01 / CMD", "Developer": "02 / DEV",
               "Reviewer": "03 / REV", "Verifier": "04 / VFY"}
 POLL_MS = 1500
@@ -37,9 +36,8 @@ REQUIREMENT_HELP = {
     "DESIGN": "구조나 설계 변경 요청. 예: 문서 등록과 개발 시작을 분리해 주세요.",
     "IMPROVEMENT": "테스트 후 개선점 요청. 예: 긴 문서 이름을 쉽게 읽을 수 있게 해 주세요.",
 }
-SAFETY_NOTE = ("다른 앱과 비간섭을 목표로 합니다. 프로젝트 및 승인 작업 폴더만 개발 대상으로 삼으며, "
-               "메이플스토리 등 다른 앱의 입력·창·프로세스·메모리·화면 접근을 금지합니다. "
-               "OS 수준 비간섭은 아직 실측되지 않았습니다.")
+SAFETY_NOTE = ("승인한 작업 폴더만 개발 대상으로 삼습니다. 비소유 앱의 입력·창·프로세스·메모리·화면에 "
+               "접근하지 않습니다. 격리와 자원 회수는 실행별 검증 근거로 확인합니다.")
 
 
 def handoff_stage(item):
@@ -100,7 +98,7 @@ def color(state):
 
 def audit_rows(view, run_id=None, role=None, *, include_stream=False):
     return [event for event in reversed(view["events"])
-            if (run_id is None or event["run_id"] == run_id)
+            if (run_id is None or event.get("run_id") == run_id)
             and (role is None or event.get("role", event.get("request", {}).get("role")) == role
                  or (include_stream and event.get("stream_role") == role))]
 
@@ -122,9 +120,9 @@ def label(parent, text="", size=10, fg=INK, bg=PANEL, bold=False, **options):
 
 
 def section(parent, name):
-    frame = tk.Frame(parent, bg=PANEL, padx=13, pady=9,
+    frame = tk.Frame(parent, bg=PANEL, padx=ui_design.CARD_PAD, pady=12,
                      highlightbackground=EDGE, highlightthickness=1)
-    label(frame, name, fg=CYAN, bold=True).pack(fill="x")
+    label(frame, name, size=12, fg=CYAN, bold=True).pack(fill="x", pady=(0, 6))
     return frame
 
 
@@ -141,69 +139,83 @@ class CommandCenter:
         self.gui_verification_cancel = None
         self.shutdown_notice = None
         self.question_window = None
+        self.page = "dashboard"
+        self.audit_page = 0
+        self.projection_lock = Lock()
+        self.poll_future = None
+        self.refresh_generation = 0
         root.title(f"DevOrchestra | Command Center · {build_label()}")
         root.configure(bg=BG)
         root.geometry("1220x830")
         root.minsize(760, 580)
         root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(3, weight=1)
         self.theme()
 
-        header = tk.Frame(root, bg=BG, padx=16, pady=10)
+        header = tk.Frame(root, bg=BG, padx=18, pady=10)
         header.grid(row=0, column=0, sticky="ew")
-        label(header, "DevOrchestra  /  개발 운영실", 18, bg=BG, bold=True).pack(side="left")
+        ui_design.brand_icon(header).pack(side="left")
+        wordmark = tk.Frame(header, bg=BG)
+        wordmark.pack(side="left", padx=(10, 18))
+        label(wordmark, "DevOrchestra", 17, bg=BG, bold=True).pack(anchor="w")
+        label(wordmark, "COMMAND CENTER  /  개발 운영실", 9, bg=BG, fg=MUTED).pack(anchor="w")
         self.global_badge = label(header, fg=CYAN, bg=BG, bold=True)
         self.global_badge.pack(side="right")
-        body = self.scroll_workspace(root)
-        self.observation = label(body, bg=BG, fg=MUTED)
-        self.observation.grid(row=4, column=0, sticky="ew", padx=16, pady=6)
-
-        command = tk.Frame(body, bg=BG)
-        command.grid(row=1, column=0, sticky="ew", padx=16)
-        command.columnconfigure(1, weight=2)
-        command.columnconfigure(2, weight=1)
-        projects = section(command, "프로젝트와 요구사항")
-        projects.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self.project = ttk.Combobox(projects, state="readonly", width=16,
+        self.project = ttk.Combobox(header, state="readonly", width=19,
                                     values=[PROJECTS[key].name for key in self.project_ids])
-        self.project.pack(fill="x", pady=(7, 3))
+        self.project.pack(side="right", padx=(8, 14))
         self.project.current(0)
         self.project.bind("<<ComboboxSelected>>", self.select_project)
-        ttk.Button(projects, text="프로젝트 등록", command=self.register_project).pack(fill="x")
-        ttk.Button(projects, text="목표와 완료 기준 편집", command=lambda: self.register_project(edit=True)).pack(fill="x")
-        ttk.Button(projects, text="요구사항 문서", command=self.requirement_settings).pack(fill="x")
-        ttk.Button(projects, text="초기 설정", command=self.setup_wizard).pack(fill="x")
-        ttk.Button(projects, text="작업 지침", command=self.instruction_settings).pack(fill="x")
-        ttk.Button(projects, text="GUI 검증 보고서", command=self.gui_verification_report).pack(fill="x")
-        ttk.Button(projects, text="AI 사용량", command=self.ai_usage_panel).pack(fill="x")
-        ttk.Button(projects, text="기존 Git 문맥", command=self.onboarding_panel).pack(fill="x")
-        advanced = tk.Frame(projects, bg=PANEL)
-        for mode, title in (("edit", "프로젝트 설정"), ("limits", "공용 예산"), ("reserve", "토큰 예비량")):
-            ttk.Button(advanced, text=title, command=lambda mode=mode: self.edit_settings(mode)).pack(fill="x")
+        shell = tk.Frame(root, bg=BG)
+        shell.grid(row=1, column=0, sticky="nsew")
+        root.grid_rowconfigure(1, weight=1)
+        rail = tk.Frame(shell, bg=ui_design.RAIL, padx=12, pady=15)
+        rail.pack(side="left", fill="y")
+        workspace = tk.Frame(shell, bg=BG)
+        workspace.pack(side="left", fill="both", expand=True)
+        workspace.grid_columnconfigure(0, weight=1)
+        body = self.scroll_workspace(workspace)
+        self.observation = label(body, bg=BG, fg=MUTED)
+        self.observation.grid(row=10, column=0, sticky="ew", padx=18, pady=8)
+
+        command = tk.Frame(body, bg=BG)
+        self.command_frame = command
+        command.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, ui_design.GAP))
+        command.columnconfigure(0, weight=1)
+        projects = section(command, "프로젝트와 요구사항")
+        projects.grid(row=0, column=0, sticky="ew")
+        self.action_grid(projects, (("프로젝트 등록", self.register_project),
+                                    ("프로젝트 빠른 검색", self.search_projects),
+                                    ("목표와 완료 기준 편집", lambda: self.register_project(edit=True)),
+                                    ("요구사항 문서", self.requirement_settings),
+                                    ("기존 Git 문맥 및 준비 상태", self.onboarding_panel)))
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
-        label(projects, "목표·완료 기준은 프로젝트 전체의 기준입니다.\n요구사항 문서는 이번 개발 차수의 작업 지시입니다.",
-              fg=MUTED, wraplength=245).pack(fill="x", pady=(8, 0))
 
-        mission = section(command, "작업 현황")
-        mission.grid(row=0, column=1, sticky="nsew", padx=(0, 8))
-        self.mission = label(mission, size=13, bold=True)
+        mission = section(command, "현재 작업")
+        mission.grid(row=0, column=0, sticky="ew")
+        self.mission = label(mission, size=18, bold=True)
         self.mission.pack(fill="x", pady=(4, 0))
         self.goal = label(mission, fg=MUTED)
         self.goal.pack(fill="x")
+        mission.bind("<Configure>", lambda e: self.goal.configure(wraplength=max(240, e.width - 40)))
         self.development_button = ttk.Button(mission, text="개발 시작", command=self.development_start,
                                              style="Primary.TButton", state="disabled")
         self.development_button.pack(fill="x", pady=(8, 2))
-        label(mission, "자동 실행은 권한 경계 확인 전까지 차단됩니다. 감독형은 지시와 결과를 직접 전달합니다.",
-              fg=MUTED, wraplength=455).pack(fill="x")
-        self.gates = label(mission)
-        self.gates.pack(fill="x", pady=(3, 0))
         self.question_button = ttk.Button(mission, text="사용자 응답 대기 없음", state="disabled",
                                           command=self.answer_question)
         self.question_button.pack(fill="x", pady=(4, 0))
 
+        hero = tk.Frame(body, bg=ui_design.HERO, padx=22, pady=18)
+        hero.grid(row=1, column=0, sticky="ew", padx=18, pady=(10, ui_design.GAP))
+        label(hero, "WORKSPACE  /  개요", size=10, fg=CYAN, bg=ui_design.HERO, bold=True).pack(anchor="w")
+        label(hero, "개발 상황판", size=24, bg=ui_design.HERO, bold=True).pack(anchor="w", pady=(2, 4))
+        self.overview = label(hero, bg=ui_design.HERO, fg=MUTED)
+        self.overview.pack(anchor="w")
+        self.action_grid(hero, (("AI 사용량", self.ai_usage_panel), ("프로젝트 검색  Ctrl+K", self.search_projects),
+                                ("초기 설정", self.setup_wizard)), background=ui_design.HERO)
+
         briefing = section(body, "다음 행동과 안전 경계")
-        briefing.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 10))
+        briefing.grid(row=5, column=0, sticky="ew", padx=18, pady=(0, ui_design.GAP))
         self.next_brief = label(briefing, size=12, bold=True, fg=CYAN, wraplength=690)
         self.next_brief.pack(fill="x")
         label(briefing, SAFETY_NOTE, fg=MUTED, wraplength=690).pack(fill="x", pady=(5, 0))
@@ -214,6 +226,8 @@ class CommandCenter:
         self.safety.pack(fill="x", pady=(5, 0))
         self.resources = label(safety)
         self.resources.pack(fill="x")
+        safety.bind("<Configure>", lambda e: [widget.configure(wraplength=max(230, e.width - 40))
+                                             for widget in (self.safety, self.resources)])
         controls = tk.Frame(safety, bg=PANEL)
         controls.pack(fill="x")
         self.shutdown_label = label(safety, fg=AMBER)
@@ -227,27 +241,26 @@ class CommandCenter:
             self.shutdown_buttons[action] = button
 
         operations = tk.Frame(body, bg=BG)
-        operations.grid(row=7, column=0, sticky="ew", padx=16, pady=8)
-        timeline = section(operations, "04  /  QUEST TIMELINE")
+        operations.grid(row=3, column=0, sticky="ew", padx=18, pady=8)
+        timeline = section(operations, "실행 단계")
         timeline.pack(fill="x")
         lane = tk.Frame(timeline, bg=PANEL)
         lane.pack(fill="x", pady=(5, 0))
         self.phases = []
-        for index, name in enumerate(("PLAN", "DEVELOP", "REVIEW", "VERIFY", "DECIDE")):
-            lane.columnconfigure(index, weight=1, uniform="phase")
+        for name in ("PLAN", "DEVELOP", "REVIEW", "VERIFY", "DECIDE"):
             badge = label(lane, bg=TILE, bold=True)
-            badge.grid(row=0, column=index, sticky="ew", padx=(0, 4), ipady=4, ipadx=4)
             self.phases.append((name, badge))
+        self.flow_cards(lane, [badge for _, badge in self.phases], 115)
 
-        operators = section(operations, "05  /  OPERATOR ROSTER")
+        operators = section(operations, "역할별 실행 근거")
         operators.pack(fill="x", pady=(8, 0))
         roster = tk.Frame(operators, bg=PANEL)
         roster.pack(fill="x", pady=(5, 0))
         self.cards = {}
-        for column, (role, mark) in enumerate(ROLE_MARKS.items()):
-            roster.columnconfigure(column, weight=1, uniform="role")
+        role_frames = []
+        for role, mark in ROLE_MARKS.items():
             card = tk.Frame(roster, bg=TILE, padx=8, pady=4)
-            card.grid(row=0, column=column, sticky="nsew", padx=(0, 5))
+            role_frames.append(card)
             button = ttk.Button(card, text=f"{mark}   {role}", command=lambda r=role: self.show_role(r))
             button.pack(fill="x")
             status = label(card, bg=TILE, bold=True)
@@ -255,32 +268,152 @@ class CommandCenter:
             detail = label(card, size=9, fg=MUTED, bg=TILE)
             detail.pack(fill="x")
             self.cards[role] = (status, detail)
+        self.flow_cards(roster, role_frames, 185)
 
         audit = self.build_audit(body)
-        details_visible = False
-
-        def toggle_details():
-            nonlocal details_visible
-            details_visible = not details_visible
-            self.details_visible = details_visible
-            for frame in (safety, operations, audit):
-                (frame.grid if details_visible else frame.grid_remove)()
-            if details_visible:
-                self.gates.pack(fill="x", before=self.question_button)
-                advanced.pack(fill="x", before=self.project_states)
-            else:
-                self.gates.pack_forget()
-                advanced.pack_forget()
-            if self.view:
-                self.render()
-
-        details_visible = True
-        toggle_details()
-        ttk.Button(header, text="고급 정보", command=toggle_details).pack(side="right", padx=8)
+        verification = section(body, "검증 센터")
+        verification.grid(row=3, column=0, sticky="ew", padx=18)
+        self.verify_overview = label(verification, fg=MUTED, wraplength=480)
+        self.verify_overview.pack(fill="x")
+        self.action_grid(verification, (("GUI 검증 보고서와 이미지", self.gui_verification_report),
+                                        ("복제본 빌드·테스트", self.onboarding_panel)))
+        approval = section(body, "승인 센터")
+        approval.grid(row=3, column=0, sticky="ew", padx=18)
+        self.approval_button = ttk.Button(approval, state="disabled", command=self.answer_question)
+        self.approval_button.pack(fill="x", pady=(0, 8))
+        self.gates = label(approval, fg=MUTED, wraplength=480)
+        self.gates.pack(fill="x")
+        settings = section(body, "설정")
+        settings.grid(row=3, column=0, sticky="ew", padx=18)
+        self.action_grid(settings, (("초기 설정", self.setup_wizard), ("작업 지침", self.instruction_settings),
+                                    ("프로젝트 설정", lambda: self.edit_settings("edit")),
+                                    ("공용 예산", lambda: self.edit_settings("limits")),
+                                    ("토큰 예비량", lambda: self.edit_settings("reserve")),
+                                    ("AI 사용량 및 연결", self.ai_usage_panel)))
+        self.page_frames = {
+            "dashboard": (hero, mission, briefing), "projects": (projects,),
+            "operations": (mission, safety, operations), "verification": (verification,),
+            "approval": (approval,), "records": (audit, safety), "settings": (settings,),
+        }
+        self.navigation = {}
+        label(rail, "운영 공간", 9, bg=ui_design.RAIL, fg=MUTED).pack(anchor="w", pady=(0, 8))
+        for key, title in (("dashboard", "01  대시보드"), ("projects", "02  프로젝트"),
+                           ("operations", "03  개발 운영실"), ("verification", "04  검증 센터"),
+                           ("approval", "05  승인 센터"), ("records", "06  기록·복구"), ("settings", "07  설정")):
+            item = ttk.Button(rail, text=title, width=15, style="Rail.TButton",
+                              command=lambda key=key: self.navigate(key))
+            item.pack(fill="x", pady=(0, 5))
+            self.navigation[key] = item
+        label(rail, "단일 실행 슬롯", 9, bg=ui_design.RAIL, fg=MUTED).pack(anchor="w", pady=(12, 0))
+        self.navigate("dashboard")
+        root.bind("<Control-k>", lambda _: self.search_projects())
         root.bind("<F5>", lambda _: self.refresh())
         root.protocol("WM_DELETE_WINDOW", self.close_requested)
         self.refresh()
-        root.after(POLL_MS, self.poll)
+        self.poll_timer = root.after(POLL_MS, self.poll)
+        root.bind("<Destroy>", self.cancel_poll, add="+")
+
+    @staticmethod
+    def action_grid(parent, actions, *, background=PANEL):
+        area = tk.Frame(parent, bg=background)
+        area.pack(fill="x", pady=(6, 0))
+        for col in range(2):
+            area.columnconfigure(col, weight=1, uniform="actions")
+        style = "Hero.TButton" if background == ui_design.HERO else "TButton"
+        buttons = [ttk.Button(area, text=title, command=action, style=style) for title, action in actions]
+        columns = None
+
+        def flow(width):
+            nonlocal columns
+            required = max(button.winfo_reqwidth() for button in buttons)
+            updated = 2 if width >= (required + 6) * 2 else 1
+            if updated == columns:
+                return
+            columns = updated
+            area.columnconfigure(0, weight=1, uniform="actions" if columns == 2 else "")
+            area.columnconfigure(1, weight=1 if columns == 2 else 0, uniform="actions" if columns == 2 else "")
+            for index, button in enumerate(buttons):
+                button.grid(row=index // columns, column=index % columns, sticky="ew", padx=3, pady=3)
+
+        area.bind("<Configure>", lambda event: flow(event.width))
+        flow(0)
+
+    @staticmethod
+    def flow_cards(parent, cards, minimum):
+        scale = max(1, float(parent.tk.call("tk", "scaling")) * 72 / 96)
+        columns = None
+
+        def layout(width):
+            nonlocal columns
+            count = min(len(cards), max(1, int(width / (minimum * scale))))
+            if count == columns:
+                return
+            columns = count
+            for index in range(len(cards)):
+                parent.columnconfigure(index, weight=int(index < columns),
+                                       uniform="card" if index < columns else "")
+            for index, card in enumerate(cards):
+                card.grid(row=index // columns, column=index % columns, sticky="nsew",
+                          padx=(0, 5), pady=(0, 5), ipadx=3, ipady=3)
+
+        parent.bind("<Configure>", lambda event: layout(event.width))
+        layout(0)
+
+    def navigate(self, page):
+        visible = set(self.page_frames[page])
+        for group in self.page_frames.values():
+            for frame in group:
+                (frame.grid if frame in visible else frame.grid_remove)()
+        self.page = page
+        self.details_visible = page == "operations"
+        (self.command_frame.grid if page in ("dashboard", "projects", "operations")
+         else self.command_frame.grid_remove)()
+        if page in ("records", "operations"):
+            self.page_frames["operations"][1].grid_configure(row=9 if page == "records" else 6)
+        for key, item in self.navigation.items():
+            item.configure(style="RailActive.TButton" if key == page else "Rail.TButton")
+        self.workspace_canvas.yview_moveto(0)
+        if self.view:
+            self.render()
+
+    def search_projects(self):
+        dialog = self.panel()
+        dialog.title("프로젝트 빠른 검색")
+        dialog.geometry("570x400")
+        label(dialog, "프로젝트 빠른 검색", 16, bg=BG, bold=True).pack(fill="x", pady=(0, 8))
+        query = tk.StringVar(dialog)
+        entry = ttk.Entry(dialog, textvariable=query)
+        entry.pack(fill="x")
+        matches = tk.Listbox(dialog, height=11, exportselection=False)
+        matches.pack(fill="both", expand=True, pady=8)
+        found = []
+
+        def update(*_args):
+            needle = query.get().strip().casefold()
+            found[:] = [(index, f"{name} [{key}]") for index, (name, key) in
+                        enumerate(zip(self.project.cget("values"), self.project_ids))
+                        if needle in f"{name} {key}".casefold()]
+            matches.delete(0, "end")
+            for _, name in found:
+                matches.insert("end", name)
+            if found:
+                matches.selection_set(0)
+
+        def choose(_event=None):
+            if selected := matches.curselection():
+                self.project.current(found[selected[0]][0])
+                self.select_project(None)
+                dialog.destroy()
+                self.navigate("projects")
+
+        query.trace_add("write", update)
+        update()
+        matches.bind("<Double-Button-1>", choose)
+        matches.bind("<Return>", choose)
+        entry.bind("<Return>", choose)
+        entry.bind("<Down>", lambda _event: matches.focus_set())
+        ttk.Button(dialog, text="프로젝트 열기", command=choose, style="Primary.TButton").pack(anchor="e")
+        entry.focus_set()
 
     def scroll_workspace(self, root):
         root.grid_rowconfigure(3, weight=0)
@@ -288,6 +421,7 @@ class CommandCenter:
         viewport = ttk.Frame(root)
         viewport.grid(row=1, column=0, sticky="nsew")
         canvas = tk.Canvas(viewport, bg=BG, highlightthickness=0, takefocus=True, yscrollincrement=20)
+        self.workspace_canvas = canvas
         scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
@@ -309,7 +443,7 @@ class CommandCenter:
                 canvas.yview_scroll((-1 if event.delta > 0 else 1) * max(1, abs(event.delta) // 120), "units")
                 return "break"
 
-        root.bind("<MouseWheel>", wheel, add="+")
+        self.root.bind("<MouseWheel>", wheel, add="+")
         canvas.bind("<Button-1>", lambda _event: canvas.focus_set())
         for key, step in (("Up", -1), ("Down", 1), ("Prior", -1), ("Next", 1)):
             unit = "pages" if key in ("Prior", "Next") else "units"
@@ -319,50 +453,15 @@ class CommandCenter:
         return content
 
     def theme(self):
-        available = {family.casefold(): family for family in font.families(self.root)}
-        family = next((available[name] for name in ("pretendard", "suit", "맑은 고딕", "malgun gothic")
-                       if name in available), "Segoe UI")
-        self.root.ui_font = family
-        for control, options in {
-            "Toplevel": {"background": BG},
-            "Text": {"background": TILE, "foreground": INK, "insertBackground": INK,
-                     "selectBackground": EDGE, "selectForeground": INK,
-                     "highlightBackground": EDGE, "highlightColor": CYAN, "highlightThickness": 1,
-                     "font": f"{{{family}}} 11", "padX": 8, "padY": 6, "relief": "flat"},
-            "Listbox": {"background": TILE, "foreground": INK, "selectBackground": EDGE,
-                        "selectForeground": INK, "highlightBackground": EDGE, "highlightColor": CYAN,
-                        "highlightThickness": 1, "font": f"{{{family}}} 11"},
-        }.items():
-            for key, value in options.items():
-                self.root.option_add(f"*{control}.{key}", value)
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
-        style.configure(".", background=TILE, foreground=INK, fieldbackground=TILE,
-                        bordercolor=EDGE, font=(family, 10))
-        style.configure("TButton", padding=(8, 5))
-        style.map("TButton", background=[("disabled", PANEL), ("pressed", EDGE), ("active", "#254665")],
-                  foreground=[("disabled", MUTED)],
-                  bordercolor=[("focus", CYAN)])
-        style.configure("Primary.TButton", background="#385ba0", foreground=INK, padding=(12, 8))
-        style.map("Primary.TButton", background=[("disabled", PANEL), ("pressed", "#2d4778"),
-                                                  ("active", "#4c70b2")], bordercolor=[("focus", CYAN)])
-        for control in ("TEntry", "TCombobox", "TCheckbutton", "TNotebook.Tab"):
-            style.map(control, background=[("disabled", PANEL), ("selected", EDGE), ("active", "#254665")],
-                      bordercolor=[("invalid", RED), ("focus", CYAN)])
-        style.map("TCombobox", fieldbackground=[("readonly", TILE)],
-                  selectbackground=[("readonly", EDGE)], selectforeground=[("readonly", INK)])
-        style.configure("Treeview", rowheight=24)
-        style.map("Treeview", background=[("selected", "#315879")],
-                  foreground=[("selected", INK)])
-        style.configure("Treeview.Heading", background="#1a2231", foreground=INK)
-        style.map("Treeview.Heading", background=[("pressed", "#0d121b"), ("active", "#263245")],
-                  foreground=[("pressed", INK), ("active", INK)])
+        ui_design.install(self.root)
 
     def confirm(self, title, text, *, parent):
-        dialog = tk.Toplevel(parent, bg=BG, padx=18, pady=14)
+        dialog = tk.Toplevel(parent, bg=BG, padx=20, pady=16)
+        dialog.ui_font = self.root.ui_font
         dialog.title(title)
         dialog.transient(parent)
         dialog.resizable(False, False)
+        label(dialog, "승인 범위 검토", size=15, fg=CYAN, bg=BG, bold=True).pack(fill="x", pady=(0, 8))
         label(dialog, text, size=11, bg=BG, wraplength=460).pack(fill="x", pady=(0, 12))
         result = False
 
@@ -375,7 +474,7 @@ class CommandCenter:
         controls.pack(anchor="e")
         cancel = ttk.Button(controls, text="취소", command=finish)
         cancel.pack(side="left", padx=6)
-        ttk.Button(controls, text="확인", command=lambda: finish(True)).pack(side="left")
+        ttk.Button(controls, text="확인", command=lambda: finish(True), style="Primary.TButton").pack(side="left")
         dialog.protocol("WM_DELETE_WINDOW", finish)
         dialog.bind("<Escape>", lambda _event: finish())
         dialog.grab_set()
@@ -385,6 +484,7 @@ class CommandCenter:
 
     def panel(self):
         window = tk.Toplevel(self.root, bg=BG, padx=12, pady=10)
+        window.ui_font = self.root.ui_font
         window.bind("<Escape>", lambda _event: window.destroy())
         return window
 
@@ -398,22 +498,28 @@ class CommandCenter:
         return editor
 
     def build_audit(self, root):
-        audit = section(root, "06  /  EVENT STREAM & EVIDENCE")
+        audit = section(root, "원장 기록과 실행 근거")
         audit.grid(row=8, column=0, sticky="ew", padx=16, pady=(0, 10))
         controls = tk.Frame(audit, bg=PANEL)
         controls.pack(fill="x", pady=4)
-        label(controls, "Run").pack(side="left", padx=(0, 4))
-        self.run_filter = ttk.Combobox(controls, state="readonly", width=27)
+        label(controls, "실행").pack(side="left", padx=(0, 4))
+        self.run_filter = ttk.Combobox(controls, state="readonly", width=17)
         self.run_filter.pack(side="left", padx=(0, 12))
-        label(controls, "Role").pack(side="left", padx=(0, 4))
-        self.role_filter = ttk.Combobox(controls, state="readonly", width=15,
+        label(controls, "역할").pack(side="left", padx=(0, 4))
+        self.role_filter = ttk.Combobox(controls, state="readonly", width=12,
                                         values=("All roles", *ROLE_MARKS))
         self.role_filter.current(0)
         self.role_filter.pack(side="left")
         for box in (self.run_filter, self.role_filter):
-            box.bind("<<ComboboxSelected>>", lambda _: self.render_audit())
-        self.audit_count = label(controls, fg=MUTED)
-        self.audit_count.pack(side="right")
+            box.bind("<<ComboboxSelected>>", lambda _: self.move_audit(reset=True))
+        paging = tk.Frame(audit, bg=PANEL)
+        paging.pack(fill="x", pady=4)
+        self.audit_count = label(paging, fg=MUTED)
+        self.audit_count.pack(side="left")
+        self.audit_next = ttk.Button(paging, text="다음", command=lambda: self.move_audit(1))
+        self.audit_next.pack(side="right")
+        self.audit_previous = ttk.Button(paging, text="이전", command=lambda: self.move_audit(-1))
+        self.audit_previous.pack(side="right", padx=5)
 
         split = ttk.Panedwindow(audit, orient="horizontal")
         split.pack(fill="both", expand=True)
@@ -421,13 +527,13 @@ class CommandCenter:
         split.add(left, weight=3)
         split.add(right, weight=2)
         columns = ("seq", "role", "event", "state")
-        self.tree = ttk.Treeview(left, columns=columns, show="headings", height=4)
+        self.tree = ttk.Treeview(left, columns=columns, show="headings", height=10)
         for key, title, width in zip(columns, ("SEQ", "ACTOR", "EVENT", "STATE"), (52, 95, 152, 115)):
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=44, stretch=(key == "event"))
         self.tree.bind("<<TreeviewSelect>>", self.select_event)
         self.scrollable(left, self.tree)
-        self.evidence = tk.Text(right, height=4, width=36, wrap="word", bg=BG, fg=INK,
+        self.evidence = tk.Text(right, height=10, width=25, wrap="word", bg=BG, fg=INK,
                                 relief="flat", font=("Consolas", 10), padx=8, pady=5,
                                 highlightthickness=1, highlightbackground=EDGE,
                                 highlightcolor=CYAN, state="disabled")
@@ -442,34 +548,79 @@ class CommandCenter:
         widget.pack(side="left", fill="both", expand=True)
 
     def select_project(self, _event):
+        self.audit_page = 0
         self.run_filter.set("")
         self.role_filter.current(0)
         self.view = None
         self.refresh()
 
     def poll(self):
-        self.refresh()
-        self.root.after(POLL_MS, self.poll)
+        if self.poll_future:
+            generation, project, future = self.poll_future
+            if not future.done():
+                self.poll_timer = self.root.after(80, self.poll)
+                return
+            self.poll_future = None
+            if generation == self.refresh_generation:
+                view, storage = future.result()
+                if storage:
+                    self.clear(storage_message(storage), first_run=storage["status"] == "NOT_INITIALIZED")
+                else:
+                    self.publish_view(project, view)
+            self.poll_timer = self.root.after(POLL_MS, self.poll)
+            return
+        if self.view is None:
+            self.refresh()
+            self.poll_timer = self.root.after(POLL_MS, self.poll)
+            return
+        if self.project.current() < 0:
+            self.poll_timer = self.root.after(POLL_MS, self.poll)
+            return
+        project = self.project_ids[self.project.current()]
+        future = Future()
+        self.poll_future = (self.refresh_generation, project, future)
+
+        def work():
+            future.set_result(self.read_projection(project))
+
+        Thread(target=work, daemon=True).start()
+        self.poll_timer = self.root.after(80, self.poll)
+
+    def cancel_poll(self, event):
+        if event.widget is self.root:
+            self.root.after_cancel(self.poll_timer)
+
+    def read_projection(self, project):
+        try:
+            with self.projection_lock:
+                return self.reader.read(project), None
+        except (Blocked, OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+            return None, self.reader.ledger.storage_status()
 
     def refresh(self):
-        previous = self.view
-        if previous is None:
+        self.refresh_generation += 1
+        if self.view is None:
             storage = self.reader.ledger.storage_status()
             if storage["status"] != "READY":
                 self.clear(storage_message(storage), first_run=storage["status"] == "NOT_INITIALIZED")
                 return
-        try:
-            project_id = self.project_ids[self.project.current()]
-            view = self.reader.read(project_id)
-        except (Blocked, OSError, sqlite3.Error, ValueError, KeyError, TypeError):
-            self.clear(storage_message(self.reader.ledger.storage_status()))
+        if self.project.current() < 0:
             return
+        project = self.project_ids[self.project.current()]
+        view, storage = self.read_projection(project)
+        if storage:
+            self.clear(storage_message(storage), first_run=storage["status"] == "NOT_INITIALIZED")
+        else:
+            self.publish_view(project, view)
+
+    def publish_view(self, project_id, view):
+        previous = self.view
         if (self.view is None or view["snapshot_version"] != self.view["snapshot_version"]
                 or view["project_id"] != self.view["project_id"]
                 or view["catalog_version"] != self.view["catalog_version"]):
             self.view = view
             self.project_ids = list(view["project_names"])
-            self.project.configure(values=[f"{name} [{key}]" for key, name in view["project_names"].items()])
+            self.project.configure(values=list(view["project_names"].values()))
             self.project.current(self.project_ids.index(project_id))
             self.render()
         else:
@@ -496,6 +647,9 @@ class CommandCenter:
         self.mission.configure(text="첫 실행 안내" if first_run else "저장소 확인 필요",
                                fg=CYAN if first_run else RED)
         self.goal.configure(text=reason, wraplength=350)
+        self.overview.configure(text="로컬 저장소를 준비한 뒤 프로젝트와 요구사항을 등록하세요.", wraplength=470)
+        self.verify_overview.configure(text="검증 근거 없음 · NOT_VALIDATED")
+        self.approval_button.configure(text="사용자 응답 대기 없음", state="disabled")
         self.project_states.configure(text="UNKNOWN")
         self.development_button.configure(text="개발 시작", state="disabled")
         if hasattr(self, "next_brief"):
@@ -521,6 +675,8 @@ class CommandCenter:
                 state="normal" if pending else "disabled",
                 text=f"사용자 응답 대기 · {pending['question']['type']}" if pending else "사용자 응답 대기 없음",
             )
+            self.approval_button.configure(text=self.question_button.cget("text"),
+                                           state="normal" if pending else "disabled")
         run, current = view["run"], view["global_run"]
         state = view["global_state"]
         global_project = current["project"]["name"] if current else "No run"
@@ -564,12 +720,18 @@ class CommandCenter:
                             if latest else "첫 요구사항을 작성하거나 문서로 등록하세요.")
         self.project_states.configure(text=f"등록 요구사항 {workflow['requirements_count']}개\n{document_summary}",
                                       wraplength=245)
+        active = workflow.get("subscription_session")
+        summary = (f'통합 개발 {active["status"]} · 보고 {active["reported_tokens"]} 토큰'
+                   if active else "통합 개발 기록 없음")
+        self.overview.configure(text=f"{readable_state}   /   요구사항 {workflow['requirements_count']}개   /   {summary}",
+                                wraplength=470)
+        self.verify_overview.configure(text=cycle_label.lstrip() or "선택 프로젝트의 실행 근거와 이미지를 확인하세요.")
         _, stage_title, stage_next = handoff_stage(handoff)
         if hasattr(self, "next_brief"):
             waiting = view.get("user_question")
             self.next_brief.configure(text=("사용자 질문에 답변하세요." if waiting else stage_next if handoff
                                            else next_action))
-        self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}",
+        self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}", wraplength=440,
                                fg=color(view["project_state"]))
         registration = view["registration"]
         configured = registration["data"] if registration else None
@@ -623,7 +785,7 @@ class CommandCenter:
                      f"\n{meter(session['recorded_wall_seconds'], limits['seconds'])} recorded wall "
                      f"{session['recorded_wall_seconds']:.1f}/{limits['seconds']}s · deadline {deadline}"
                      f"\nSelection · {selected} · Session control via CLI")
-        self.goal.configure(text=goal, wraplength=350)
+        self.goal.configure(text=goal)
         self.gates.configure(text="\n".join(
             f"{gate['name']}   {gate['state']}" +
             (f" · {gate['git_sha'][:7]} ({gate['scope']})" if gate.get("git_sha") else "")
@@ -1300,8 +1462,8 @@ class CommandCenter:
         project_id = self.project_ids[self.project.current()]
         panel = self.panel()
         panel.title("DevOrchestra · GUI 검증 보고서")
-        panel.geometry("860x445")
-        panel.minsize(775, 415)
+        panel.geometry("860x510")
+        panel.minsize(775, 490)
         registered = project_id not in PROJECTS
         status = tk.StringVar(value="등록 프로젝트 GUI 시나리오" if registered else "고정 Windows 테스트 앱 · Verifier")
         ttk.Label(panel, textvariable=status, wraplength=810).pack(fill="x", pady=(0, 8))
@@ -1335,10 +1497,38 @@ class CommandCenter:
                 photo = load(receipt, image)
                 viewer = self.panel()
                 viewer.title(title)
-                shown = photo if photo.width() <= viewer.winfo_screenwidth() - 80 else photo.subsample(2)
-                picture = ttk.Label(viewer, image=shown)
-                picture.image = shown
-                picture.pack()
+                viewer.geometry("820x600")
+                tools = ttk.Frame(viewer)
+                tools.pack(fill="x")
+                viewport = ttk.Frame(viewer)
+                viewport.pack(fill="both", expand=True, pady=6)
+                viewport.columnconfigure(0, weight=1)
+                viewport.rowconfigure(0, weight=1)
+                canvas = tk.Canvas(viewport, bg=BG, highlightthickness=0, takefocus=True)
+                canvas.grid(row=0, column=0, sticky="nsew")
+                vertical = ttk.Scrollbar(viewport, command=canvas.yview)
+                vertical.grid(row=0, column=1, sticky="ns")
+                horizontal = ttk.Scrollbar(viewport, orient="horizontal", command=canvas.xview)
+                horizontal.grid(row=1, column=0, sticky="ew")
+                canvas.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+                drawing = canvas.create_image(0, 0, anchor="nw")
+
+                def zoom(native=False):
+                    width, height = max(200, canvas.winfo_width()), max(200, canvas.winfo_height())
+                    factor = max(1, (photo.width() + width - 1) // width,
+                                 (photo.height() + height - 1) // height)
+                    canvas.image = photo if native or factor == 1 else photo.subsample(factor)
+                    canvas.itemconfigure(drawing, image=canvas.image)
+                    canvas.configure(scrollregion=canvas.bbox(drawing))
+                    canvas.xview_moveto(0)
+                    canvas.yview_moveto(0)
+
+                ttk.Button(tools, text="화면에 맞춤", command=zoom).pack(side="left", padx=(0, 5))
+                ttk.Button(tools, text="원본 100%", command=lambda: zoom(True)).pack(side="left")
+                canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
+                canvas.bind("<Down>", lambda _event: canvas.yview_scroll(1, "units"))
+                canvas.bind("<Up>", lambda _event: canvas.yview_scroll(-1, "units"))
+                viewer.after_idle(zoom)
                 ttk.Label(viewer, text=f"{image['file']} · SHA-256 {image['sha256']}").pack(fill="x")
             except (Blocked, OSError, ValueError, KeyError, tk.TclError):
                 status.set("이미지 무결성 또는 표시를 확인할 수 없습니다.")
@@ -2189,10 +2379,15 @@ class CommandCenter:
         ttk.Button(editor, text="Save configuration", command=save).pack(anchor="e")
 
     def show_role(self, role):
+        self.navigate("records")
         self.role_filter.set(role)
         self.run_filter.set("All runs")
         self.render_audit()
         self.tree.focus_set()
+
+    def move_audit(self, delta=0, *, reset=False):
+        self.audit_page = 0 if reset else max(0, self.audit_page + delta)
+        self.render_audit()
 
     def render_audit(self):
         selected = self.tree.selection()
@@ -2203,13 +2398,19 @@ class CommandCenter:
             role = self.role_filter.get()
             rows = audit_rows(self.view, self.run_options.get(self.run_filter.get()),
                               None if role == "All roles" else role, include_stream=True)
-        self.audit_count.configure(text=f"{len(rows)} verified receipts")
-        for event in rows:
+        size = 60
+        pages = max(1, (len(rows) + size - 1) // size)
+        self.audit_page = min(self.audit_page, pages - 1)
+        self.audit_count.configure(text=f"검증 원장 {len(rows)}건 · {self.audit_page + 1}/{pages} 페이지")
+        self.audit_previous.configure(state="normal" if self.audit_page else "disabled")
+        self.audit_next.configure(state="normal" if self.audit_page < pages - 1 else "disabled")
+        for event in rows[self.audit_page * size:(self.audit_page + 1) * size]:
             key = str(event["sequence"])
             self.event_lookup[key] = event
             actor = event.get("role", event.get("stream_role", event.get("request", {}).get("role", "Runner")))
+            state = event.get("state", event.get("status", event.get("result", "UNKNOWN")))
             self.tree.insert("", "end", iid=key,
-                             values=(key, actor, event["kind"], event["state"]))
+                             values=(key, actor, event["kind"], state))
         key = selected[0] if selected and selected[0] in self.event_lookup else next(iter(self.event_lookup), None)
         if key:
             self.tree.selection_set(key)
