@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 from shutil import copyfile
+import socket
 from tempfile import TemporaryDirectory
 from time import monotonic
 from uuid import uuid4
@@ -62,7 +63,7 @@ def _args(child, *arguments):
             "--permission-profile", PROFILE, "--", str(child), *arguments]
 
 
-def _observe_files(launcher, argv, work, scratch, environment):
+def _observe(launcher, argv, work, scratch, environment):
     import msvcrt
 
     api = _api()
@@ -82,9 +83,9 @@ def _observe_files(launcher, argv, work, scratch, environment):
                 os.set_handle_inheritable(handle, True)
             _create_owned(api, job, launcher, argv, work, environment, info, stdio)
         if _account(api, job).active != 1 or api.ResumeThread(info.thread) != 1:
-            raise Blocked("MXC file probe ownership unverified")
+            raise Blocked("MXC probe ownership unverified")
         if _wait_empty(api, job, monotonic() + 15).active or api.WaitForSingleObject(info.process, 0) != 0:
-            raise Blocked("MXC file probe timeout")
+            raise Blocked("MXC probe timeout")
         drained = True
         code = w.DWORD()
         _require(api.GetExitCodeProcess(info.process, c.byref(code)))
@@ -94,11 +95,70 @@ def _observe_files(launcher, argv, work, scratch, environment):
         check_path(path)
     with stdout.open("rb") as stream:
         output = stream.read(257)
-    return probe_receipt({"exitCode": code.value, "stdout": output.decode("ascii", errors="replace"),
-                          "stderr": "" if stderr.stat().st_size == 0 else "REDACTED"}, work, argv)
+    return {"exitCode": code.value, "stdout": output.decode("ascii", errors="replace"),
+            "stderr": "" if stderr.stat().st_size == 0 else "REDACTED"}
 
 
-def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha256, powershell_sha256):
+def _observe_loopback(launcher, powershell, work, scratch, env):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(0.5)
+        address = listener.getsockname()
+        marker_bytes = uuid4().hex.encode("ascii")
+        with socket.create_connection(address, timeout=1):
+            control, _ = listener.accept()
+            control.close()
+        # Only this freshly bound numeric loopback endpoint can be contacted.
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$client = [Net.Sockets.TcpClient]::new()
+try {{
+    if ($client.ConnectAsync('127.0.0.1', {address[1]}).Wait(1500)) {{
+        $payload = [Text.Encoding]::ASCII.GetBytes('{marker_bytes.decode("ascii")}')
+        $client.GetStream().Write($payload, 0, $payload.Length)
+        [Console]::WriteLine('CONNECTED')
+    }} else {{ [Console]::WriteLine('TIMEOUT') }}
+}} catch {{
+    $failure = $_.Exception.GetBaseException()
+    if ($failure -isnot [Net.Sockets.SocketException]) {{ throw }}
+    [Console]::WriteLine('SOCKET_' + $failure.NativeErrorCode)
+}} finally {{ $client.Dispose() }}
+"""
+        command = _args(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                        b64encode(script.encode("utf-16-le")).decode("ascii"))
+        observation = _observe(launcher, command, work, scratch, env)
+        accepted = False
+        matched = False
+        try:
+            connection, _ = listener.accept()
+        except TimeoutError:
+            pass
+        else:
+            accepted = True
+            with connection:
+                connection.settimeout(0.5)
+                try:
+                    with connection.makefile("rb") as stream:
+                        matched = stream.read(len(marker_bytes)) == marker_bytes
+                except TimeoutError:
+                    pass
+    marker = observation["stdout"].strip()
+    status = "INCONCLUSIVE"
+    if observation["exitCode"] == 0 and not observation["stderr"]:
+        if marker == "CONNECTED" and matched:
+            status = "REACHABLE"
+        elif marker == "SOCKET_10013" and not accepted:
+            status = "ACCESS_DENIED"
+    return {"status": status, "host_control": "CONNECTED", "listener_accepted": accepted,
+            "challenge_matched": matched,
+            "exit_code": observation["exitCode"],
+            "child_observation": marker if marker in {"CONNECTED", "TIMEOUT", "SOCKET_10013"} else "OTHER"}
+
+
+def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha256, powershell_sha256,
+                   *, loopback_only=False):
     """Test only pinned binaries and synthetic files; this cannot admit a model turn."""
     launcher, candidate = map(Path, (launcher, candidate))
     if (launcher.name.casefold() != "codex.exe" or launcher_sha256 != LAUNCHER_PIN
@@ -116,21 +176,24 @@ def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha25
         request_id = uuid4().hex
         fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",
                   "source": "WINDOWS_NATIVE_CODEX", "request_id": request_id,
-                  "probe_kind": "MXC_OFFLINE_MANAGER_HOST", "launcher_sha256": launcher_sha256,
-                  "candidate_sha256": candidate_sha256, "powershell_sha256": powershell_sha256,
-                  "file_probe_ref": digest(FILE_PROBE)}
+                  "probe_kind": "MXC_OFFLINE_LOOPBACK" if loopback_only else "MXC_OFFLINE_MANAGER_HOST",
+                  "launcher_sha256": launcher_sha256, "candidate_sha256": candidate_sha256,
+                  "powershell_sha256": powershell_sha256}
+        if not loopback_only:
+            fields["file_probe_ref"] = digest(FILE_PROBE)
         with TemporaryDirectory(prefix="mxc-host-", dir=temporary) as folder:
             lab = Path(folder) / f"app-server-{uuid4().hex}"
             work, home, scratch, protected = (lab / part for part in ("work", "home", "tmp", "protected"))
             for path in (work, home, scratch, protected):
                 path.mkdir(parents=True)
-            server_path = work / candidate.name
-            copyfile(candidate, server_path)
-            verify_app_server_binary(server_path, approved_sha256=candidate_sha256)
+            if not loopback_only:
+                server_path = work / candidate.name
+                copyfile(candidate, server_path)
+                verify_app_server_binary(server_path, approved_sha256=candidate_sha256)
+                (work / "allowed.txt").write_bytes(ALLOWED)
+                (protected / "protected.txt").write_bytes(PROTECTED)
             profile = _profile(work, home, scratch)
             (home / "config.toml").write_text(profile, encoding="ascii")
-            (work / "allowed.txt").write_bytes(ALLOWED)
-            (protected / "protected.txt").write_bytes(PROTECTED)
             windows, appdata = (_known_folder(number) for number in (0x24, 0x1C))
             env = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,
                    "LOCALAPPDATA": str(appdata), "ProgramData": str(_known_folder(0x23)),
@@ -143,21 +206,28 @@ def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha25
                 }, admission=require_admission)
                 runner._check_diagnostic_fence(count, fence)
                 recheck()
-                command = _args(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                                b64encode(FILE_PROBE.encode("utf-16-le")).decode("ascii"))
-                files = _observe_files(launcher, command, work, scratch, env)
+                if loopback_only:
+                    loopback = _observe_loopback(launcher, powershell, work, scratch, env)
+                else:
+                    command = _args(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                                    b64encode(FILE_PROBE.encode("utf-16-le")).decode("ascii"))
+                    files = probe_receipt(_observe(launcher, command, work, scratch, env), work, command)
             def cancelled():
                 runner._check_diagnostic_fence(count, fence)
                 return False
 
-            cancelled()
-            with _owned_stdio(launcher, _args(server_path, "--listen", "stdio://"),
-                              work, env, 15, cancelled) as server:
-                server.restrict_outbound(MANAGER_POLICY_METHODS)
-                server.initialize()
+            if not loopback_only:
+                cancelled()
+                with _owned_stdio(launcher, _args(server_path, "--listen", "stdio://"),
+                                  work, env, 15, cancelled) as server:
+                    server.restrict_outbound(MANAGER_POLICY_METHODS)
+                    server.initialize()
         result = {**fields, "kind": "native_inspection_result", "timestamp": datetime.now(timezone.utc).isoformat(),
-                  "sandboxed_app_server_stdio": "INITIALIZED", "file_probe": files, "owned_tree": "DRAINED",
-                  "cleanup": server.cleanup_receipt, "model_turn": "NOT_STARTED",
+                  "profile_ref": digest(profile), "owned_tree": "DRAINED", "model_turn": "NOT_STARTED",
                   "provider_egress": "NOT_VERIFIED", "server_internal_tools": "NOT_VERIFIED"}
+        if loopback_only:
+            result["loopback"] = loopback
+        else:
+            result.update(sandboxed_app_server_stdio="INITIALIZED", file_probe=files, cleanup=server.cleanup_receipt)
         ledger.append(count, fence, result, allow_shutdown=True)
         return result
