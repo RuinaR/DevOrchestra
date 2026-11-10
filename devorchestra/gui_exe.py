@@ -13,7 +13,7 @@ from .job_probe import (
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 )
 from .lease import Blocked
-from .ledger import check_path
+from .ledger import canonical, check_path
 from .mxc_launcher import _known_folder
 from .system_powershell import _open_locked
 
@@ -41,6 +41,21 @@ try {
 """
 BUILD_SCRIPT = _BUILD_SCRIPT.replace("__SOURCE__", b64encode(SOURCE.encode()).decode("ascii"))
 BUILD_SHA256 = sha256(BUILD_SCRIPT.encode()).hexdigest()
+
+
+def embedded_build(form):
+    """Insert only a base64 data literal into the fixed, reviewed host."""
+    from .gui_project import parse
+
+    data = canonical(form).encode("ascii")
+    parse(data)
+    encoded = b64encode(data).decode("ascii")
+    source = SOURCE.replace('File.ReadAllText("approved-form.json")',
+                            f'System.Text.Encoding.UTF8.GetString(Convert.FromBase64String("{encoded}"))')
+    if source == SOURCE:
+        raise Blocked("Trusted GUI source embedding point is unavailable")
+    script = _BUILD_SCRIPT.replace("__SOURCE__", b64encode(source.encode()).decode("ascii"))
+    return script, sha256(source.encode()).hexdigest(), sha256(script.encode()).hexdigest()
 
 
 class BuildFailed(Blocked):
@@ -90,7 +105,7 @@ def read_exe(path):
     return data
 
 
-def compile_exe(directory, compiler, check, seconds):
+def compile_exe(directory, compiler, check, seconds, *, form=None):
     """Execute only the embedded compiler program, in the existing owned Job."""
     api = _api()
     job = _require(api.CreateJobObjectW(None, None))
@@ -105,8 +120,9 @@ def compile_exe(directory, compiler, check, seconds):
         check()
         executable, recheck = compiler
         recheck()
+        script = BUILD_SCRIPT if form is None else embedded_build(form)[0]
         command = ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                   b64encode(BUILD_SCRIPT.encode("utf-16-le")).decode("ascii")]
+                   b64encode(script.encode("utf-16-le")).decode("ascii")]
         _create_owned(api, job, executable, command, directory,
                       {"SystemRoot": str(_known_folder(0x24)), "TEMP": str(directory),
                        "TMP": str(directory)}, info)

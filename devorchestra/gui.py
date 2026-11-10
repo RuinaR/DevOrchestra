@@ -1334,6 +1334,8 @@ class CommandCenter:
             result = receipt.get("result", "NOT_VERIFIED")
             status.set(f"{result} · {receipt['role']} · 영수증 {receipt['run_id']}\n"
                        f"종료 코드 {receipt.get('exit_code')} · Job 활성 {receipt.get('job_active')}"
+                       + (f"\n통합 작업 {receipt['task_id']} · 변경 SHA-256 {receipt['source_sha256']}"
+                          if "provenance" in receipt else "")
                        + (f"\n{receipt['reason']}" if receipt.get("reason") else ""))
             try:
                 for column, scene in enumerate(receipt.get("scenes", ())):
@@ -1635,10 +1637,16 @@ class CommandCenter:
 
         panel = self.panel()
         panel.title("구독 개발 세션 · 승인 한 번")
-        status = tk.StringVar(value="승인할 Python 검증 벡터와 전체 한도를 지정하세요.")
+        status = tk.StringVar(value="승인할 검증 계약과 전체 한도를 지정하세요.")
         ttk.Label(panel, textvariable=status, wraplength=520).pack(fill="x", pady=8)
         vectors = self.editor_box(panel, height=8)
-        vectors.insert("1.0", json.dumps({"function": "", "acceptance": baseline["acceptance"], "vectors": []},
+        if baseline["proposed_files_ceiling"] == ["gui-test.json"]:
+            from .subscription_gui import SPEC
+
+            spec = SPEC
+        else:
+            spec = {"function": "", "acceptance": baseline["acceptance"], "vectors": []}
+        vectors.insert("1.0", json.dumps(spec,
                                         ensure_ascii=False, indent=2))
         row = ttk.Frame(panel)
         row.pack(fill="x")
@@ -1669,11 +1677,13 @@ class CommandCenter:
             except (Blocked, ValueError, OSError, sqlite3.Error) as error:
                 status.set(str(error))
                 return
+            verification = ("검토된 WinForms 빌드·소유 창 조작·비공개 캡처" if scope.get("gui_contract")
+                            else "고정 Python 벡터")
             if not self.confirm("통합 개발 세션 승인",
                                 f"{project_id} · {scope['file']} · {seconds}초 · {tokens} 토큰\n"
                                 f"목표: {scope['goal']}\n"
-                                f"복제본 {scope['replica']}\n재작업 최대 {reworks}회 · 고정 Python 벡터\n"
-                                "승인된 문맥과 소스 한 파일을 OpenAI에 전송합니다. 셸·GUI 실행은 포함되지 않습니다.",
+                                f"복제본 {scope['replica']}\n재작업 최대 {reworks}회 · {verification}\n"
+                                "승인된 문맥과 소스 한 파일을 OpenAI에 전송합니다. 모델 셸 권한은 없습니다.",
                                 parent=panel):
                 return
             future = Future()

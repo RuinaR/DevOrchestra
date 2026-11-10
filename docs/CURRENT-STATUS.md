@@ -1,5 +1,7 @@
 # 현재 상태
 
+**P2.96 통합 소유 GUI 검증.** 독립 등록 프로젝트에서 실제 구독 역할이 `gui-test.json`의 상태 문구 한 필드를 변경했다. 검토된 고정 WinForms 소스에 변경 폼을 데이터로 내장한 EXE를 빌드하고, 동결 시나리오에서 클릭·입력·스크롤·리사이즈와 실제 상태를 확인했다. 같은 작업의 GUI PASS·대표 이미지 3장·EXE와 변경 해시를 원장에 연결해 실제 최종 Manager가 COMPLETED로 판정했다. 별도 실패 실측에서 기대값과 관측값, 실패 이미지 및 소유 Job 회수를 확인했다. 일반 생성 코드 빌드·실행은 이 경로에 포함되지 않는다.
+
 **P2.95 통합 승인 실측.** 독립 Git 프로젝트에서 한 승인으로 실제 Manager, Developer, Reviewer, 고정 Python Verifier, 최종 Manager를 실행했다. 첫 Reviewer가 의도적으로 결함 있는 변경을 반려했고, 같은 범위에서 Developer 재작업 한 번을 거쳐 Verifier PASS와 최종 COMPLETED를 기록했다. 제공자 보고 사용량은 10,501 토큰이다. 먼저 수행한 별도 세션의 최종 모델 답변은 증거 계약 위반으로 차단했다. GUI 영수증은 이 Python 세션에 연결하지 않는다.
 
 **P2.94 실제 구독 순차 사이클.** 독립 Git 프로젝트에서 실제 Manager, Developer, Reviewer, 최종 Manager가 응답했다. Controller가 `clamp.py` 한 파일을 변경하고, 결정적 하네스가 정수 테스트 세 건을 실행해 PASS를 기록했다. 최종 Manager가 해당 검증 영수증을 참조해 COMPLETED를 반환했다. 생성 코드의 일반 런타임, GUI 증거의 동일 사이클 통합, 자동 재작업과 통합 승인은 미연결이다.

@@ -184,8 +184,6 @@ def _exercise(window, directory, wait_for, observed, scenes, form):
         actions = [_perform(window, step, wait_for, observed) for step in scene["steps"]]
         title = scene["title"]
         status = window.text(form["controls"]["status"])
-        if status != scene["expected"]:
-            raise Blocked("Observed GUI status did not match the scenario")
         window.click("capture")
         original = directory / f"scene-{number}.png"
         annotated = directory / f"report-{number}.png"
@@ -193,9 +191,12 @@ def _exercise(window, directory, wait_for, observed, scenes, form):
         source = verified_image(original)[1]
         processed = verified_image(annotated)[1]
         scenes.append({"title": title, "input": ", ".join(actions) or "Start owned app", "observed": status,
+                       "expected": scene["expected"],
                        "captured_at": datetime.now(timezone.utc).isoformat(),
                        "original": source, "processed": processed})
         observed[title] = status
+        if status != scene["expected"]:
+            raise Blocked("Observed GUI status did not match the scenario")
 
     if len({scene["original"]["sha256"] for scene in scenes}) != len(scenes):
         raise Blocked("GUI representative scenes were duplicates")
@@ -236,10 +237,17 @@ def _perform(window, step, wait_for, observed):
 def run_fixture(approved, directory, cancelled, admission, locked_executable, form=None, exe_data=None):
     """Return observations only after the Job, handles and app have been accounted for."""
     expected = ("fixed-gui-scenario", SCENARIO) if form is None else ("registered-gui-scenario", PROJECT_SCENARIO)
-    from .gui_exe import EXE_MEMORY, SOURCE_SHA256
+    from .gui_exe import EXE_MEMORY, SOURCE_SHA256, embedded_build
 
     executable_fixture = exe_data is not None
     expected_source = SOURCE_SHA256 if executable_fixture else FIXTURE_SHA256
+    embedded = approved.get("embedded_form") is True
+    if embedded:
+        if not executable_fixture or form is None:
+            raise Blocked("Embedded GUI form requires its trusted build")
+        _, expected_source, build_hash = embedded_build(form)
+        if approved.get("build_sha256") != build_hash:
+            raise Blocked("Embedded GUI build identity changed")
     if ((approved["tool"], approved["scenario"]) != expected
             or approved["tool"] not in ROLES.get(approved["role"], ())
             or approved.get("capabilities") != list(OWNED_GUI_CAPABILITIES)
@@ -316,7 +324,7 @@ def run_fixture(approved, directory, cancelled, admission, locked_executable, fo
         limits.job_memory = EXE_MEMORY
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
         check()
-        if form is not None:
+        if form is not None and not embedded:
             with (directory / "approved-form.json").open("x", encoding="utf-8") as stream:
                 json.dump(form, stream, ensure_ascii=True)
         if executable_fixture:

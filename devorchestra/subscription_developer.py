@@ -90,8 +90,11 @@ def review(runner, project, manager_run, account, model, expires, *, session=Non
     )
     if digest(candidate) != receipt["task_candidate_ref"]:
         raise Blocked("Current requirements or scope no longer match the Manager candidate")
-    if len(candidate["paths"]) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}\.(py|txt)", candidate["paths"][0]):
-        raise Blocked("Controlled Developer supports one root-level Python or text file")
+    gui = session.scope.get("gui_contract") if session else None
+    if (len(candidate["paths"]) != 1 or
+            not (candidate["paths"][0] == "gui-test.json" if gui
+                 else re.fullmatch(r"[A-Za-z0-9_-]{1,64}\.(py|txt)", candidate["paths"][0]))):
+        raise Blocked("Controlled Developer supports one approved root-level source or GUI descriptor")
     catalog = Catalog(ledger).read()
     record, setup = catalog["projects"].get(project), catalog["setups"].get(project)
     if not setup or not record:
@@ -126,6 +129,8 @@ def review(runner, project, manager_run, account, model, expires, *, session=Non
         session.limit(budget, project, "developer")
         if path.name != session.scope["file"]:
             raise Blocked("Manager plan is outside the session write scope")
+        if gui:
+            body["instructions"] += " In the GUI descriptor change only the opened field. Preserve all tests and other fields."
         if session.rework:
             body["input"].append({"role": "user", "content": canonical(
                 {"previous_failure": session.rework["feedback"], "instruction": "Correct this failure only."})})
@@ -222,6 +227,10 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                 if usage["total_tokens"] > approval["budget"]["tokens"]:
                     raise Blocked("Developer reported usage exceeds the approved budget")
             replacement = _replacement(completed, approval["file"])
+            if session and (gui := session.scope.get("gui_contract")):
+                from .subscription_gui import validate_change
+
+                validate_change(replacement, gui)
             if replacement == original:
                 raise Blocked("Developer proposed no file change")
             replica = Path(approval["replica"])

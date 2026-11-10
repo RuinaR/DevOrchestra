@@ -443,8 +443,10 @@ class Runner:
         if "read-receipt" not in ROLES.get(role, ()):
             raise Blocked("GUI evidence access denied for this role")
         return next((event for event in reversed(self.ledger.read())
-                     if event["project_id"] == project_id and event["kind"] in
-                     ("gui_validation_intent", "gui_validation_result")), None)
+                     if event["project_id"] == project_id and (
+                         event["kind"] in ("gui_validation_intent", "gui_validation_result")
+                         or event["kind"] == "subscription_cycle_result" and "provenance" in event
+                     )), None)
 
     @staticmethod
     def _gui_session_scope(scope):

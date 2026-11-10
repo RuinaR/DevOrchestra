@@ -1,10 +1,11 @@
 """One owner approval for a bounded subscription development task."""
 from contextlib import ExitStack
+from hashlib import sha256
 from pathlib import Path
 from time import monotonic, time
 from uuid import uuid4
 
-from . import subscription_cycle as cycle, subscription_developer as developer, subscription_manager as manager
+from . import subscription_cycle as cycle, subscription_developer as developer, subscription_gui, subscription_manager as manager
 from .catalog import Catalog
 from .default_instructions import public_instruction
 from .lease import Blocked, development_session_scope, execution_slot, held_execution_slot
@@ -24,7 +25,9 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
     events, head = runner.ledger.snapshot()
     require_admission(events)
     baseline = runner.native_manager_context(project)
-    validate_vectors(vectors, baseline["acceptance"])
+    gui = isinstance(vectors, dict) and "gui" in vectors
+    if not gui:
+        validate_vectors(vectors, baseline["acceptance"])
     catalog = Catalog(runner.ledger).read()
     data = catalog["projects"][project]["data"]
     setup = catalog["setups"].get(project)
@@ -33,8 +36,9 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
             or tokens > min(limits["tokens"], data["budget"]["tokens"])):
         raise Blocked("Session exceeds registered project or global limits")
     files = baseline["proposed_files_ceiling"]
-    if not setup or len(files) != 1 or "/" in files[0] or not files[0].endswith(".py"):
-        raise Blocked("The subscription session supports exactly one registered root Python file")
+    if (not setup or len(files) != 1 or "/" in files[0]
+            or (files[0] != "gui-test.json" if gui else not files[0].endswith(".py"))):
+        raise Blocked("Select one registered Python file or the approved data-only GUI descriptor")
     image = snapshot(Path(setup["replica"]))
     if not image["git"] or not image["git"].get("index") or files[0] not in image["files"]:
         raise Blocked("The session requires an existing file and local Git index")
@@ -43,7 +47,7 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
         raise Blocked("Register real subscription models for Manager, Developer and Reviewer")
     manager_review = manager.review(runner, project, account, model_by_role["Manager"], expires)[0]
     sections = ("global", "project", "manager-planning", "developer", "reviewer", "verifier", "manager-final")
-    return {"contract": "subscription-session-v1", "project_id": project, "account": account,
+    scope = {"contract": "subscription-session-v1", "project_id": project, "account": account,
             "generation": len(events) + 1, "ledger_head": head, "expires": expires,
             "seconds": seconds, "tokens": tokens, "work_limit": 1, "max_reworks": reworks,
             "replica": setup["replica"], "git_head": developer._head(Path(setup["replica"])),
@@ -53,6 +57,14 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
             "vectors_sha256": digest(vectors), "models": model_by_role,
             "backend": manager.BACKEND, "tools": ["controller-replace-one-file", "fixed-python-vectors-v1"],
             "instructions": {name: public_instruction(name)["sha256"] for name in sections}}
+    if gui:
+        replica = Path(setup["replica"])
+        data = developer._read(replica / files[0], developer.LIMIT)
+        if sha256(data).hexdigest() != image["files"][files[0]]["sha256"]:
+            raise Blocked("GUI descriptor changed during session review")
+        scope["gui_contract"] = subscription_gui.contract(vectors, project, replica, baseline["project_revision"], data)
+        scope["tools"] = ["controller-replace-one-file", subscription_gui.TOOL]
+    return scope
 
 
 class _Session:
@@ -129,6 +141,7 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
         roles, failures, outputs = [], set(), set()
         attempts = 0
         outcome, reason = "BLOCKED", None
+        gui_receipt = None
 
         def execute(phase, transport, *args):
             session.phase = phase
@@ -160,6 +173,8 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                     failure, feedback = reviewed, cycle._model_output(runner.ledger, reviewed, "reviewer")["findings"]
                 elif reviewed["decision"] == "ACCEPT_FOR_VERIFICATION":
                     verified = execute("verifier", cycle, *prefix, "verifier", None, None, expires, vectors)
+                    if scope.get("gui_contract"):
+                        gui_receipt = verified
                     if verified["verdict"] == "PASS":
                         final = execute("manager-final", cycle, *prefix, "manager-final", account,
                                         models["Manager"], expires, None)
@@ -169,9 +184,14 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                         raise Blocked("Verifier could not verify this change")
                     failure = verified
                     feedback = [item for item in verified["observations"] if item["actual"] != item["expected"]]
+                    if scope.get("gui_contract"):
+                        feedback = {"observations": feedback, "reason": verified.get("reason"),
+                                    "provenance": verified.get("provenance")}
                 else:
                     raise Blocked("Reviewer blocked the change")
-                fingerprint = digest([failure["phase"], feedback])
+                fingerprint = digest([failure["phase"], [
+                    [item["title"], item["expected"], item["actual"]] for item in feedback["observations"]
+                ] if isinstance(feedback, dict) else feedback])
                 if fingerprint in failures:
                     raise Blocked("NO_PROGRESS")
                 if attempts >= reworks:
@@ -188,7 +208,10 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                   "roles": roles, "reworks": attempts, "remaining_reported_tokens": session.remaining,
                   "used_reported_tokens": session.reported, "usage_complete": session.usage_complete,
                   "owned_tree": "UNRESOLVED" if native_unresolved(current) else "DRAINED",
-                  "gui": "NOT_LINKED", "provider_token_limit": "UNAVAILABLE_PREVIEW"}
+                  "gui": (gui_receipt.get("gui", "NOT_VERIFIED") if gui_receipt else
+                          "NOT_VERIFIED" if scope.get("gui_contract") else "NOT_LINKED"),
+                  "gui_receipt_sha256": digest(gui_receipt) if gui_receipt else None,
+                  "provider_token_limit": "UNAVAILABLE_PREVIEW"}
         runner.ledger.append(len(current), tail, result, allow_shutdown=True)
         return result
 

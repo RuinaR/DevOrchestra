@@ -14,6 +14,7 @@ from .replica_evidence import snapshot
 from .role_contract import OUTPUT_SCHEMAS, parse_role_output
 from .subscription_developer import LIMIT, _head, _read, read_diff
 from .subscription_manager import BACKEND, _text, read_plan
+from . import subscription_gui
 
 PHASES = {"reviewer": "Reviewer", "verifier": "Verifier", "manager-final": "Manager"}
 FINAL_DECISIONS = {"GOAL_COMPLETE": "COMPLETED", "REWORK": "REWORK_REQUIRED",
@@ -125,6 +126,13 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
     if session:
         scope.update(session.binding())
     if phase == "verifier":
+        if session and (frozen := session.scope.get("gui_contract")):
+            if (account is not None or model is not None or spec != subscription_gui.SPEC
+                    or developer["file"] != "gui-test.json"):
+                raise Blocked("GUI verification is outside the session scope")
+            subscription_gui.validate_change(source, frozen)
+            return ({**scope, "backend": subscription_gui.TOOL, "gui_contract": frozen},
+                    None, source, replica, developer)
         if account is not None or model is not None or not developer["file"].endswith(".py"):
             raise Blocked("The fixed Verifier supports only a Python file and owner test vectors")
         validate_vectors(spec, baseline["acceptance"])
@@ -135,13 +143,30 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
         raise Blocked("Select the registered subscription role model and an authorized account")
     instructions = [public_instruction(part) for part in ("global", "project", phase)]
     role_instruction = ""
+    if phase == "reviewer" and session and session.scope.get("gui_contract"):
+        context["verification_pending"] = {"tool": subscription_gui.TOOL,
+                                           "scenario_sha256": session.scope["gui_contract"]["scenario_sha256"]}
+        role_instruction = (" Review the actual change for concrete defects. GUI execution is deliberately "
+                            "pending until Verifier. If the change is sound and needs only runtime confirmation, "
+                            "use ACCEPT_FOR_VERIFICATION and record the pending GUI check as a coverage gap.")
     if phase == "manager-final":
+        if session and (frozen := session.scope.get("gui_contract")):
+            provenance = verifier.get("provenance", {})
+            if (verifier.get("gui") != "GUI_PASS" or verifier.get("job_active") != 0
+                    or len(verifier.get("scenes", [])) != 3
+                    or provenance.get("changed_file_sha256") != developer["after_sha256"]
+                    or provenance.get("replica_sha256") != developer["after_replica_sha256"]
+                    or provenance.get("scenario_sha256") != frozen["scenario_sha256"]
+                    or any(verifier.get(key) != value for key, value in session.binding().items())):
+                raise Blocked("Final Manager requires a GUI PASS for the same session and change")
         context.update(reviewer=_model_output(ledger, reviewer, "reviewer"),
                        verifier={key: verifier[key] for key in ("verdict", "exit_code", "syntax", "observations")},
                        goal_hash=digest(baseline["goal"]), evidence_ref=digest(verifier),
                        approved_scope={key: scope[key] for key in (
                            "task_id", "generation", "budget", "developer_sha256", "reviewer_sha256",
                        )})
+        if "provenance" in verifier:
+            context["verifier"].update(gui=verifier["gui"], provenance=verifier["provenance"])
         role_instruction = (" Use only GOAL_COMPLETE, REWORK, APPROVAL, or BLOCK. "
                             f"Copy goal_hash exactly: {context['goal_hash']}. "
                             f"Copy evidence_ref exactly: {context['evidence_ref']}. "
@@ -204,12 +229,21 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
         try:
             if phase == "verifier":
                 before_send()
+                frozen = scope.get("gui_contract")
                 try:
-                    result.update(run_vectors(source, spec))
+                    if frozen:
+                        result.update(subscription_gui.run_bound(runner.ledger, developer, source, replica, frozen,
+                                                                 run_id, check, cancelled, scope["budget"]["seconds"]))
+                        result.update(harness=subscription_gui.TOOL, syntax="NOT_APPLICABLE", owned_processes_started=None)
+                    else:
+                        result.update(run_vectors(source, spec))
                 except Blocked as error:
+                    if frozen:
+                        raise
                     result.update(verdict="NOT_VERIFIED", exit_code=None, syntax="PASS",
                                   observations=[], reason=str(error))
-                result.update(harness="RESTRICTED_AST_RUNTIME", vectors_sha256=scope["vectors_sha256"])
+                if "vectors_sha256" in scope:
+                    result.update(harness="RESTRICTED_AST_RUNTIME", vectors_sha256=scope["vectors_sha256"])
                 result["artifact_sha256"] = digest(result["observations"])
             else:
                 token = AccountStore(runner.ledger).access(account)
@@ -244,7 +278,7 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
             if result.get("decision") in {"REWORK", "REWORK_REQUIRED"}:
                 result["next_action"] = "OWNER_REWORK_APPROVAL_REQUIRED"
         except (Blocked, KeyboardInterrupt) as error:
-            if not started:
+            if not started or (phase == "verifier" and scope.get("gui_contract") and "provenance" not in result):
                 raise
             result.update(outcome="FAILED" if result["response_completed"] else "UNKNOWN",
                           reason=str(error) if isinstance(error, Blocked) else "CANCELLED")

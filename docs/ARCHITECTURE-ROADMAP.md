@@ -15,6 +15,10 @@ Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택�
 
 ### 구독 Manager 실행
 
+P2.96의 통합 GUI 모드는 `--vectors '{"gui":"embedded-winforms-v1","mutable":"opened"}'`과 기존 `gui-test.json`을 사용한다. 소유자 승인 시 시나리오와 나머지 폼 필드를 동결한다. 검토된 C# 호스트에는 검증한 폼을 Base64 데이터 리터럴로만 삽입한다. Compiler Job과 앱 Job을 차례로 회수한다. 같은 세션·작업·개정·시나리오에 귀속된 GUI PASS만 최종 Manager 입력으로 사용한다. GUI 상태 불일치의 실제 관측값과 이미지 해시는 기존 재작업 경로로 전달한다.
+
+일반 AI 소스의 빌드 도구 실행과 임의 EXE 실행은 별도 OS 격리가 필요하다. 여러 파일 수정에는 승인 경계와 적용·복구 계약이 추가로 필요하다. SDK는 작업공간 샌드박스를 제공하는 후보이고 MXC는 프로세스 격리 후보지만, 개별 승인 파일과 온라인 송신·소유 창 경계의 실측이 필요하다. 다른 UI 프레임워크와 개발 네트워크는 별도 승인 및 구현 대상이다. VM은 선택적 강화 경로다. [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk) · [Windows MXC](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+
 P2.95의 `subscription-session`은 한 프로젝트, 기존 루트 Python 파일 한 개, 고정 테스트 벡터와 전체 한도에 바인딩된다. 검토 해시 한 번 승인 후 역할별 실행기가 같은 전역 슬롯을 차례로 사용한다. Reviewer 반려 또는 Verifier FAIL이면 같은 파일만 재작업한다. 기본 한도는 2회이며 동일 산출물·실패, 모르는 모델 사용량이나 미확정 결과에서는 중단한다. 역할 사이에 끊긴 세션은 `subscription-session-recover`로 재전송 없이 닫을 수 있다. GUI 검증은 기존 브로커에서 별도 실행하며 현재 통합 Python 세션에 귀속하지 않는다.
 
 P2.94의 `cycle-role`은 동일한 Developer 변경을 `reviewer` → `verifier` → `manager-final` 순서로 처리한다. 각 역할은 별도의 만료 가능한 검토 해시가 필요하다. Verifier는 승인한 `--vectors` JSON의 함수명·완료 기준·정수 입력/출력을 고정해 작은 Python 반환식만 해석한다. 생성 소스를 일반 Python 프로세스에서 실행하지 않는다. 기존 GUI 브로커는 별도 승인 경로로 유지한다. 재작업은 `cycle-rework`로 보호된 근거를 읽을 수 있고, 새 승인 없이는 디스패치하지 않는다.
