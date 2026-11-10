@@ -521,9 +521,9 @@ class Runner:
 
     def build_verifier_scope(self, project_id, kind, launcher, sources, vectors, seconds, expires):
         from pathlib import Path
-        from . import mxc_dotnet
+        from . import mxc_dotnet, mxc_sdk_project
 
-        if kind not in (mxc_dotnet.KIND, mxc_dotnet.ONBOARDED_KIND):
+        if kind not in (mxc_dotnet.KIND, mxc_dotnet.ONBOARDED_KIND, mxc_sdk_project.KIND):
             raise Blocked("Build tool adapter is not supported")
         catalog = Catalog(self.ledger).read()
         setup = catalog["setups"].get(project_id)
@@ -538,8 +538,10 @@ class Runner:
 
         replica = Path(setup["replica"])
         onboarded = kind == mxc_dotnet.ONBOARDED_KIND
-        scope = mxc_dotnet.review(replica, launcher, sources, vectors, seconds,
-                                  registered(self.ledger, project_id, replica), arithmetic=onboarded, nested=onboarded)
+        tool_root = registered(self.ledger, project_id, replica)
+        scope = (mxc_sdk_project.review(replica, launcher, sources, vectors, seconds, tool_root)
+                 if kind == mxc_sdk_project.KIND else mxc_dotnet.review(
+                     replica, launcher, sources, vectors, seconds, tool_root, arithmetic=onboarded, nested=onboarded))
         if onboarded:
             from .replica_readiness import bind
 
@@ -549,7 +551,7 @@ class Runner:
 
     def build_verify(self, project_id, kind, launcher, sources, vectors, seconds, expires, approved_scope,
                      cancelled=lambda: False):
-        from . import mxc_dotnet
+        from . import mxc_dotnet, mxc_sdk_project
         from .mxc_host_probe import OwnedMxcStopped
         from .owned_artifacts import cleanup, workspace
 
@@ -580,7 +582,8 @@ class Runner:
             scratch.mkdir()
             identity = scratch.stat().st_ino
             try:
-                evidence = mxc_dotnet.run(self.ledger, scope, check, workspace=scratch)
+                adapter = mxc_sdk_project if kind == mxc_sdk_project.KIND else mxc_dotnet
+                evidence = adapter.run(self.ledger, scope, check, workspace=scratch)
             except OwnedMxcStopped as error:
                 evidence = {"result": "NOT_VERIFIED", "reason": str(error), "job_active": 0}
             self._check_diagnostic_fence(count, fence)

@@ -31,7 +31,7 @@ def check_names(names, create, extension="py"):
         raise Blocked(f"Batch requires two to four exact .{extension} paths and explicit creation paths")
 
 
-def replacement(output, names, *, csharp=False):
+def replacement(output, names, *, csharp=False, sdk_project=False):
     try:
         if len(output) > BATCH_LIMIT * 2:
             raise ValueError
@@ -50,7 +50,7 @@ def replacement(output, names, *, csharp=False):
             result[name] = data
         if sum(map(len, result.values())) > BATCH_LIMIT:
             raise ValueError
-        if csharp:
+        if csharp and not sdk_project:
             from .csharp_sources import validate
 
             if len({Path(name).name.casefold() for name in result}) != len(result):

@@ -13,7 +13,7 @@ from .lease import Blocked, development_session_scope, execution_slot, held_exec
 from .ledger import digest
 from .python_vectors import validate_vectors
 from .replica_evidence import snapshot
-from . import csharp_sources
+from . import csharp_sources, mxc_sdk_project
 
 
 def review(runner, project, account, expires, seconds, tokens, reworks, vectors):
@@ -29,7 +29,9 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
     baseline = runner.native_manager_context(project)
     gui = isinstance(vectors, dict) and "gui" in vectors
     batch = isinstance(vectors, dict) and "files" in vectors
-    csharp = batch and isinstance(vectors.get("runtime"), dict) and vectors["runtime"].get("kind") == csharp_sources.KIND
+    runtime_kind = vectors["runtime"].get("kind") if batch and isinstance(vectors.get("runtime"), dict) else None
+    sdk_project = runtime_kind == mxc_sdk_project.KIND
+    csharp = runtime_kind in {csharp_sources.KIND, mxc_sdk_project.KIND}
     if not gui and not batch:
         validate_vectors(vectors, baseline["acceptance"])
     catalog = Catalog(runner.ledger).read()
@@ -45,7 +47,12 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
                 or type(vectors["files"]) is not dict or set(vectors["files"]) != set(files)):
             raise Blocked("Batch Verifier requires vectors for every approved file")
         check_names(files, vectors["create"], "cs" if csharp else "py")
-        if csharp:
+        if sdk_project:
+            if (set(vectors["runtime"]) != {"kind", "launcher", "project", "tests"}
+                    or type(vectors["runtime"]["launcher"]) is not str
+                    or any(item != baseline["acceptance"] for item in vectors["files"].values())):
+                raise Blocked("SDK projects require a fixed test entry and frozen acceptance")
+        elif csharp:
             if ({Path(name).name for name in files} != csharp_sources.FILES or len(files) != len(csharp_sources.FILES)
                     or vectors["create"]
                     or set(vectors["runtime"]) != {"kind", "launcher", "vectors"}
@@ -90,7 +97,21 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
                           "delete": False, "move": False, "max_bytes": BATCH_LIMIT,
                           "before_sha256": {name: image["files"].get(name, {}).get("sha256") for name in files}}
         scope["tools"] = ["controller-replace-batch", "fixed-python-vectors-v1"]
-        if csharp:
+        if sdk_project:
+            from .dotnet_install import registered
+
+            replica = Path(scope["replica"])
+            spec = vectors["runtime"]
+            build = mxc_sdk_project.review(replica, spec["launcher"], [spec["project"]], spec["tests"],
+                                           min(seconds, 90), registered(runner.ledger, project, replica))
+            test_root = Path(build["entry"]).parent
+            library_roots = [Path(name).parent for name in build["graph"] if name != build["entry"]]
+            if any(Path(name).is_relative_to(test_root) or
+                   not any(Path(name).is_relative_to(root) for root in library_roots) for name in files):
+                raise Blocked("Developer SDK scope must be inside a library project and outside frozen tests")
+            scope["runtime"] = {"kind": mxc_sdk_project.KIND, "build": build}
+            scope["tools"] = ["controller-replace-batch", mxc_sdk_project.KIND]
+        elif csharp:
             from . import mxc_dotnet
             from .dotnet_install import registered
 

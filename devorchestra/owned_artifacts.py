@@ -2,6 +2,7 @@
 import ctypes as c
 from ctypes import wintypes as w
 import re
+from pathlib import Path
 from shutil import rmtree
 
 from .lease import Blocked
@@ -44,13 +45,14 @@ def _remove_owned_tree(root, identity):
         check_path(root)
         if root.stat().st_ino != identity:
             raise Blocked("Disposable workspace ownership changed")
+        native = Path("\\\\?\\" + str(root))
         count = size = 0
-        pending = [root]
+        pending = [native]
         while pending:
             folder = pending.pop()
-            check_path(folder)
+            check_path(root / folder.relative_to(native), long_local=True)
             for path in folder.iterdir():
-                check_path(path)
+                check_path(root / path.relative_to(native), long_local=True)
                 if path.is_dir():
                     pending.append(path)
                 elif path.is_file():
@@ -62,7 +64,7 @@ def _remove_owned_tree(root, identity):
         check_path(root)
         if root.stat().st_ino != identity:
             raise Blocked("Disposable workspace ownership changed")
-        rmtree(root)
+        rmtree(native)
         if root.exists():
             raise Blocked("Disposable workspace still present")
     except (Blocked, OSError):

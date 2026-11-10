@@ -147,7 +147,7 @@ def review(runner, project, manager_run, account, model, expires, *, session=Non
             f"\nReturn one JSON object mapping every exact approved filename to its full UTF-8 {language} text. "
             "Null input means approved creation. No deletion, move, tool request, or execution claims.")
         runtime = session.scope.get("runtime", {})
-        if language == "C#":
+        if language == "C#" and runtime.get("kind") != "mxc-dotnet-sdk-project-v1":
             from .csharp_sources import INSTRUCTION
 
             body["instructions"] += " " + INSTRUCTION
@@ -273,7 +273,9 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                     raise Blocked("Developer reported usage exceeds the approved budget")
             if "batch" in approval:
                 replacement = developer_batch.replacement(_text(completed), original,
-                                                          csharp=approval["batch"]["formats"] == [".cs"])
+                                                          csharp=approval["batch"]["formats"] == [".cs"],
+                                                          sdk_project=bool(session and session.scope.get("runtime", {}).get(
+                                                              "kind") == "mxc-dotnet-sdk-project-v1"))
                 replica = Path(approval["replica"])
                 before = snapshot(replica)
                 if digest(before) != approval["replica_sha256"]:
@@ -288,7 +290,8 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                 result.update(outcome="COMPLETED", after_sha256=digest(after_files), after_files=after_files,
                               diff_sha256=digest(diff), protected_diff_ref=artifact, reviewer_admission="BLOCKED",
                               after_replica_sha256=digest(after), changed_files=sorted(observed),
-                              verification="PYTHON_SYNTAX_ONLY", file_applied=True)
+                              verification=("C_SHARP_BUILD_PENDING" if approval["batch"]["formats"] == [".cs"]
+                                            else "PYTHON_SYNTAX_ONLY"), file_applied=True)
                 runner.ledger.append(count, fence, result, allow_shutdown=True)
                 journal.unlink()
                 return result

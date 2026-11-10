@@ -3,7 +3,7 @@ from concurrent.futures import Future
 import json
 from pathlib import Path
 from shutil import which
-from threading import Thread
+from threading import Event, Thread
 from time import time
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -38,16 +38,21 @@ def show_panel(center, initial):
     examples = center.editor_box(panel, height=3)
     actions = ttk.Frame(panel)
     actions.pack(fill="x")
-    ttk.Label(panel, text="오프라인 .NET 검증 · C# 상대 경로 두 개를 쉼표로 구분").pack(anchor="w", pady=(6, 0))
+    ttk.Label(panel, text="오프라인 .NET 검증").pack(anchor="w", pady=(6, 0))
+    build_type = ttk.Combobox(panel, state="readonly", values=("SDK 프로젝트", "기존 Roslyn 계약"))
+    build_type.current(0)
+    build_type.pack(anchor="w")
+    ttk.Label(panel, text="SDK 테스트 .csproj 경로 또는 Roslyn C# 상대 경로 두 개").pack(anchor="w")
     build_paths = ttk.Entry(panel)
     build_paths.pack(fill="x")
-    ttk.Label(panel, text="기대 벡터 JSON · 예: [[9, 31]]").pack(anchor="w")
+    ttk.Label(panel, text='SDK 테스트 이름 ["example"] 또는 Roslyn 기대 벡터 [[9, 31]]').pack(anchor="w")
     build_vectors = ttk.Entry(panel)
     build_vectors.pack(fill="x")
     verification = ttk.Frame(panel)
     verification.pack(fill="x")
     report = center.editor_box(panel, height=15, state="disabled")
     busy, approved, build_approved = False, None, None
+    cancellation = Event()
 
     def display(text):
         report.configure(state="normal")
@@ -75,7 +80,9 @@ def show_panel(center, initial):
         return "\n".join(lines)
 
     def close():
-        if not busy:
+        if busy:
+            cancellation.set()
+        else:
             panel.destroy()
 
     def run(mode):
@@ -92,30 +99,35 @@ def show_panel(center, initial):
             if not center.confirm("기존 Git 프로젝트 복제", "검토된 파일만 새 경로에 복사합니다. 원본 Git 이력은 그대로 보존됩니다.",
                                   parent=panel):
                 return
-        build_input = (build_paths.get(), build_vectors.get())
+        build_input = (build_paths.get(), build_vectors.get(), build_type.current())
         build_args = None
         if mode == "build-review":
             try:
                 from .mxc_dotnet import ONBOARDED_KIND
+                from .mxc_sdk_project import KIND
 
                 launcher = which("codex.exe")
                 if not launcher:
                     raise ValueError
                 names = [name.strip() for name in build_input[0].split(",") if name.strip()]
-                build_args = (project, ONBOARDED_KIND, launcher, names, json.loads(build_input[1]), 20, int(time()) + 180)
+                sdk = build_input[2] == 0
+                build_args = (project, KIND if sdk else ONBOARDED_KIND, launcher, names, json.loads(build_input[1]),
+                              90 if sdk else 20, int(time()) + 240)
             except ValueError:
-                display("Codex 실행기, 쉼표로 구분한 두 파일 경로와 [[입력, 기대값]] JSON을 확인하세요.")
+                display("Codex 실행기, 프로젝트 또는 소스 경로, 기대 결과 JSON을 확인하세요.")
                 return
         if mode == "build":
             if not build_approved or build_approved[0] != build_input:
                 display("실행 범위를 다시 검토하세요.")
                 return
-            if not center.confirm("격리 빌드·테스트 승인", "검토한 파일과 기대 벡터만 오프라인 MXC에서 실행합니다.",
+            if not center.confirm("격리 빌드·테스트 승인", "검토한 입력과 테스트만 오프라인 MXC에서 실행합니다.",
                                   parent=panel):
                 return
             build_args = build_approved[1]
         build_digest = build_approved[2] if build_approved else None
         busy = True
+        cancellation.clear()
+        cancel_button.configure(state="normal" if mode == "build" else "disabled")
         for button in buttons:
             button.configure(state="disabled")
         display("검토 또는 검증 진행 중 · 원본 변경과 네트워크 연결은 허용하지 않습니다.")
@@ -131,8 +143,9 @@ def show_panel(center, initial):
                 elif mode == "build-review":
                     value = runner.build_verifier_scope(*build_args)
                 elif mode == "build":
-                    runner.build_verify(*build_args, build_digest)
-                    value = project_onboarding.status(runner.ledger, project)
+                    value = runner.build_verify(*build_args, build_digest, cancelled=cancellation.is_set)
+                    if build_input[2] != 0:
+                        value = project_onboarding.status(runner.ledger, project)
                 else:
                     value = project_onboarding.create(runner, project, path, include, approval)
             except Exception as error:
@@ -148,6 +161,7 @@ def show_panel(center, initial):
                 panel.after(100, poll)
                 return
             busy = False
+            cancel_button.configure(state="disabled")
             for button in buttons:
                 button.configure(state="normal")
             value, failure = future.result()
@@ -160,6 +174,13 @@ def show_panel(center, initial):
                 display(review_text(value))
             elif mode == "build-review":
                 build_approved = (build_input, build_args, digest(value))
+                if build_input[2] == 0:
+                    display("\n".join(("실행 승인 대기 · 오프라인 SDK 프로젝트",
+                                       f'SDK {value["sdk"]} · 런타임 {value["runtime"]}',
+                                       "프로젝트 · " + ", ".join(value["graph"]),
+                                       "테스트 · " + ", ".join(value["tests"]),
+                                       "외부 패키지 없음 · 네트워크 OFF")))
+                    return
                 display("\n".join((
                     "ENVIRONMENT_READY · 이 실행 계약의 도구와 의존성 확인",
                     f'범위 · {value["readiness"]["coverage"]}',
@@ -171,6 +192,16 @@ def show_panel(center, initial):
                     "네트워크 OFF · 패키지 복원 및 프로젝트 빌드 스크립트 없음",
                     f'시간 {value["limits"]["max_seconds"]}초 · 메모리 {value["limits"]["memory_bytes"]}B',
                 )))
+            elif mode == "build" and build_input[2] == 0:
+                build_approved = None
+                display("\n".join((f'{value["result"]} · {value.get("reason") or "빌드와 테스트 확인 완료"}',
+                                    f'SDK {value["scope"]["sdk"]} · 소유 Job 활성 {value["job_active"]}',
+                                    *(str(item) for item in value.get("tests", [])),
+                                    *(f'{name} · 종료 {step["exitCode"]}'
+                                      for name, step in value.get("steps", {}).items()),
+                                    f'정리 · {value["cleanup"]["status"]}',
+                                    *(log["stdout"][-2500:] + log["stderr"][-1000:]
+                                      for log in value.get("logs", {}).values()))))
             else:
                 display("\n".join(f"{key} · {value[key]}" for key in (
                     "status", "replica", "original_head", "replica_head", "environment", "development",
@@ -195,6 +226,8 @@ def show_panel(center, initial):
         button = ttk.Button(verification, text=name, command=lambda mode=mode: run(mode))
         button.pack(side="left", padx=(0, 6))
         buttons.append(button)
+    cancel_button = ttk.Button(verification, text="실행 취소", command=cancellation.set, state="disabled")
+    cancel_button.pack(side="left")
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: close())
     run("review" if initial else "status")

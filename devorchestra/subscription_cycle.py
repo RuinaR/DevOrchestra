@@ -243,7 +243,7 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                   "scope_sha256": approved, "model": model, "source_sha256": developer["after_sha256"]}
         if session:
             fields.update(session.binding())
-        if phase == "verifier" and scope["backend"] == "mxc-dotnet-arithmetic-v1":
+        if phase == "verifier" and scope["backend"] in ("mxc-dotnet-arithmetic-v1", "mxc-dotnet-sdk-project-v1"):
             fields["cleanup_plan"] = {"workspace": "build-verifier-" + run_id, "classification": "AUTO_CLEAN"}
         started = False
 
@@ -274,12 +274,15 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                                                                  run_id, check, cancelled, scope["budget"]["seconds"]))
                         result.update(harness=subscription_gui.TOOL, syntax="NOT_APPLICABLE", owned_processes_started=None)
                     elif scope.get("runtime"):
-                        from . import csharp_sources, mxc_python
+                        from . import csharp_sources, mxc_python, mxc_sdk_project
 
                         if scope["runtime"]["kind"] == csharp_sources.KIND:
                             from .mxc_dotnet import run_arithmetic
 
                             result.update(run_arithmetic(runner.ledger, scope["runtime"], replica, source, run_id, check))
+                        elif scope["runtime"]["kind"] == mxc_sdk_project.KIND:
+                            result.update(mxc_sdk_project.run_session(
+                                runner.ledger, scope["runtime"], replica, source, run_id, check))
                         else:
                             result.update(mxc_python.run(runner.ledger, scope["runtime"], source,
                                                          spec["files"], check, scope["budget"]["seconds"]))

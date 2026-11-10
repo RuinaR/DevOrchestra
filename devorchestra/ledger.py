@@ -21,7 +21,7 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
-def check_path(path):
+def check_path(path, *, long_local=False):
     if not path.is_absolute() or path.drive.startswith("\\\\") or ".." in path.parts:
         raise Blocked("Ledger requires a local absolute path")
     candidates = (*reversed(path.parents), path, *(
@@ -29,7 +29,7 @@ def check_path(path):
     ))
     for candidate in candidates:
         try:
-            info = candidate.lstat()
+            info = (Path("\\\\?\\" + str(candidate)) if long_local else candidate).lstat()
         except FileNotFoundError:
             continue
         if info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:

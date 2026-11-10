@@ -1,5 +1,9 @@
 # 개발 인수인계
 
+P2.108의 오프라인 SDK 어댑터는 **검증 센터 → 복제본 빌드·테스트 → SDK 프로젝트**에서 검토한다. 테스트 진입점에 `tests/Checks.csproj`, 기대 이름에 `["case-name"]` 형식의 배열을 입력한다. 해당 프로젝트는 종료 코드 0과 이름별 `PASS case-name` 출력이 필요한 콘솔 테스트 실행 파일이다. CLI는 `build-verify --kind mxc-dotnet-sdk-project-v1 --source tests/Checks.csproj --vectors '["case-name"]'`와 기존 프로젝트·실행기·예산·승인 옵션을 사용한다. 승인된 소스만 격리 스테이징에 복사하고 실제 SDK 복원·Release 빌드·테스트를 순서대로 실행한다. 패키지 소스는 비어 있으며 사용자 설정과 별도의 임시 프로필을 사용한다.
+
+구독 세션의 배치 검증 명세에서 `runtime`은 `{"kind":"mxc-dotnet-sdk-project-v1","launcher":"<절대 Codex 경로>","project":"tests/Checks.csproj","tests":["case-name"]}` 형식이다. `files`는 승인된 라이브러리 C# 경로별로 기존 완료 기준 배열을 지정하고 `create`에는 별도 승인된 새 파일만 지정한다. 테스트와 프로젝트 구성은 모델 수정 범위 밖에 고정한다. P2.107의 격리 Verifier 영수증과 원본 승인 절차를 재사용한다. 패키지 의존성, 사용자 타깃·import, 기존 테스트 프레임워크 어댑터, 새 디렉터리, 파일 삭제·이동은 별도 작업이다.
+
 P2.107은 승인된 하위 경로의 Python/C# 배치와 검증 센터의 **원본 반영 검토**를 연결한다. CLI는 `original-apply --project ID --expires UNIX_SECONDS`로 diff와 승인 해시를 검토하고, 동일 인자에 `--approve HASH`를 추가해 한 번 반영한다. 원본 Git 및 작업 트리, 온보딩 기준, 동일 세션의 리뷰·격리 런타임·최종 판정, 변경 바이트가 일치해야 한다. 중단된 intent와 로컬 DPAPI 복구 자료를 보존하며 자동 재실행하지 않는다. 삭제·이동, 새 디렉터리, 임의 MSBuild와 범용 Python 패키지 실행은 지원 범위 밖이다.
 
 P2.105 Command Center의 일곱 작업 공간은 기존 Controller 메서드를 호출한다. `ui_design.py`가 토큰과 버튼 스킨을 제공하고, 정적 폰트·아이콘과 고지는 EXE 패키지에 포함된다. 프레임워크 교체·모든 모달 리디자인·OS 수준 접근성 인증은 별도 작업이다.

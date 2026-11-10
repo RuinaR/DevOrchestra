@@ -35,7 +35,7 @@ class BuildExecution:
         report = _observe(
             self.launcher, _args(self.tool, *arguments), self.work, scratch, self.environment,
             seconds=remaining, memory=self.policy["memory_bytes"], check=self.check,
-            output_limit=self.policy["output_limit"],
+            output_limit=self.policy["output_limit"], encoding=self.policy.get("encoding", "ascii"),
         )
         receipt = {key: report[key] for key in ("exitCode", "job_active", "job_total")}
         for stream in ("stdout", "stderr"):
