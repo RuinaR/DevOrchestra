@@ -9,7 +9,7 @@ from .catalog import Catalog, new_project
 from .dashboard import project_view, render
 from .development import session_view
 from .lease import Blocked
-from .ledger import Ledger, canonical
+from .ledger import Ledger, canonical, digest
 from .policy import DEFAULT_BACKEND, DevelopmentMode, ExecutionBackend, live_preflight
 from .runtime import Runner, Scenario
 
@@ -19,6 +19,9 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("init")
     commands.add_parser("local-status", help="Inspect project-local storage without creating it")
+    gui_verify = commands.add_parser("gui-verify", help="Review or run the fixed Windows GUI fixture")
+    gui_verify.add_argument("--project", required=True)
+    gui_verify.add_argument("--approve", metavar="SCOPE_SHA256")
     shutdown = commands.add_parser("shutdown")
     shutdown.add_argument("transition", choices=("request", "cancel", "finalize", "resume"))
     shutdown.add_argument("--request-id")
@@ -66,6 +69,15 @@ def main():
         return 2
     try:
         ledger = Ledger.for_project()
+        if args.action == "gui-verify":
+            runner = Runner(ledger)
+            if args.approve is None:
+                scope = runner.gui_verification_scope(args.project)
+                print(canonical({"scope": scope, "scope_sha256": digest(scope)}))
+                return
+            receipt = runner.verify_gui_fixture(args.project, args.approve)
+            print(canonical(receipt))
+            return 0 if receipt["result"] == "PASS" else 2
         if args.action == "local-status":
             status = ledger.storage_status()
             print(canonical(status))

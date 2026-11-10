@@ -14,7 +14,7 @@ from .event_audit import Binding, FIXTURE_USAGE, Packet
 from .event_journal import EventJournal, OPEN_ROLE_EVENTS
 
 from .lease import Blocked, SlotBlocked, execution_slot
-from .ledger import canonical, digest
+from .ledger import canonical, check_path, digest
 from .mxc_diagnostic import diagnostic_unresolved
 from .policy import Capability, Grant, Request
 from .questions import AUTHORIZATION_TYPES, new_question, pending_question, validate_response
@@ -100,7 +100,8 @@ def last_run(events):
         if events[index]["kind"] == "run_started":
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
-                                                 "native_inspection_", "native_manager_", "supervised_"))]
+                                                 "native_inspection_", "native_manager_", "supervised_",
+                                                 "gui_validation_"))]
     return []
 
 
@@ -119,6 +120,10 @@ def native_unresolved(events):
             pending.add(("manager", event["request_id"]))
         elif event["kind"] == "native_manager_result":
             pending.discard(("manager", event["request_id"]))
+        elif event["kind"] == "gui_validation_intent":
+            pending.add(("gui", event["approval_id"]))
+        elif event["kind"] == "gui_validation_result":
+            pending.discard(("gui", event["approval_id"]))
     return bool(pending)
 
 
@@ -295,6 +300,75 @@ class Runner:
 
     def supervised_handoff(self, action, project_id, **arguments):
         return handoff(self, action, project_id, **arguments)
+
+    def gui_verification_scope(self, project_id):
+        from .gui_verification import scope
+
+        catalog = Catalog(self.ledger).read()
+        record = catalog["projects"].get(project_id)
+        if not record and project_id not in PROJECTS:
+            raise Blocked("Register the project before approving GUI verification")
+        seconds = min(20, catalog["global_budget"]["seconds"])
+        if record:
+            data = record["data"]
+            seconds = min(seconds, data["budget"]["seconds"], data["roles"]["Verifier"]["budget"]["seconds"])
+        return scope(project_id, record["revision"] if record else None, seconds)
+
+    def verify_gui_fixture(self, project_id, approved_scope, cancelled=lambda: False):
+        """Run the fixed Verifier scenario under a fresh owner authorization."""
+        from contextlib import ExitStack
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from .gui_verification import run_fixture
+        from .system_powershell import hold_system_powershell
+
+        with execution_slot() as abandoned, ExitStack() as resources:
+            events, tail = self.ledger.snapshot(recover_journal=True)
+            require_admission(events)
+            run = last_run(events)
+            development = session_view(events)
+            if (abandoned or (run and State(run[-1]["state"]) not in TERMINAL)
+                    or (development and not development["end"]) or cancelled()):
+                raise Blocked("GUI verification requires an idle Controller")
+            scope = self.gui_verification_scope(project_id)
+            if digest(scope) != approved_scope:
+                raise Blocked("GUI verification scope changed; review it again")
+            executable = resources.enter_context(hold_system_powershell(scope["exe_sha256"]))
+            identifier = uuid4().hex
+            binding = {"project_id": project_id, "run_id": identifier, "task_id": identifier,
+                       "agent_run_id": identifier, "approval_id": uuid4().hex,
+                       "generation": len(events) + 1, "role": "Verifier", "state": "DIAGNOSTIC",
+                       "source": "WINDOWS_OWNED_GUI_FIXTURE", "scope": scope,
+                       "scope_sha256": approved_scope}
+            count, fence = self.ledger.append(len(events), tail, {
+                **binding, "kind": "gui_validation_intent", "timestamp": datetime.now(timezone.utc).isoformat(),
+            }, admission=require_admission)
+
+            def check():
+                current, actual = self.ledger.snapshot()
+                if len(current) != count or actual != fence:
+                    raise Blocked("GUI verification fence changed")
+
+            temp = self.ledger.local_directory("temp", create=True)
+            with TemporaryDirectory(prefix="gui-verification-", dir=temp) as staging:
+                receipt = run_fixture(scope, Path(staging), cancelled, check, executable)
+                if receipt["scenes"]:
+                    artifacts = self.ledger.local_directory("logs", create=True) / f"gui-{identifier}"
+                    check_path(artifacts)
+                    artifacts.mkdir()
+                    images = [scene[key] for scene in receipt["scenes"] for key in ("original", "processed")]
+                    if receipt["comparison"]:
+                        images.append(receipt["comparison"])
+                    for image in images:
+                        name = image["file"]
+                        (Path(staging) / name).replace(artifacts / name)
+                    receipt["artifact_dir"] = artifacts.name
+            resources.close()
+            result = {**binding, **receipt, "kind": "gui_validation_result",
+                      "timestamp": datetime.now(timezone.utc).isoformat()}
+            self.ledger.append(count, fence, result, allow_shutdown=True)
+            return result
 
     def manager_context(self, project_id, development_id):
         """Assemble owner-selected documents in memory from a frozen session."""

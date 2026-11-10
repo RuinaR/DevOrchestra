@@ -252,6 +252,7 @@ class ShutdownWindowTests(unittest.TestCase):
             center = CommandCenter.__new__(CommandCenter)
             center.root = Mock()
             center.view = view
+            center.gui_verification_cancel = None
             center.shutdown_future = None
             center.shutdown_command = Mock()
             center.close_requested()
@@ -263,6 +264,7 @@ class ShutdownWindowTests(unittest.TestCase):
         center.root = Mock()
         center.refresh = Mock()
         center.view = {"shutdown": {"state": "SCHEDULED", "request_id": "key"}}
+        center.gui_verification_cancel = None
         center.shutdown_command = Mock()
         pending = center.shutdown_future = Future()
         center.close_requested()

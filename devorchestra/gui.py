@@ -1,21 +1,22 @@
 """DevOrchestra Command Center. Read-only desktop viewer for Windows."""
 from datetime import datetime, timezone
+from base64 import b64encode
 from concurrent.futures import Future
 import json
 from pathlib import Path
 import sqlite3
-from threading import Thread
+from threading import Event, Thread
 from time import monotonic, time
 import tkinter as tk
 from tkinter import filedialog, font, ttk
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .catalog import Catalog, REQUIREMENT_ROLES, new_project, read_frozen_requirements
 from .build_info import build_label
 from .default_instructions import defaults_text, public_instruction
 from .lease import Blocked
 from .instructions import InstructionStore, selected_source, source_ref
-from .ledger import Ledger, check_path
+from .ledger import Ledger, check_path, digest
 from .projection import ProjectionReader
 from .questions import AUTHORIZATION_TYPES
 from .runtime import PROJECTS, Runner
@@ -137,6 +138,7 @@ class CommandCenter:
         self.run_options = {}
         self.controller = Runner(reader.ledger)
         self.shutdown_future = None
+        self.gui_verification_cancel = None
         self.shutdown_notice = None
         self.question_window = None
         root.title(f"DevOrchestra | Command Center · {build_label()}")
@@ -172,6 +174,7 @@ class CommandCenter:
         ttk.Button(projects, text="요구사항 문서", command=self.requirement_settings).pack(fill="x")
         ttk.Button(projects, text="초기 설정", command=self.setup_wizard).pack(fill="x")
         ttk.Button(projects, text="작업 지침", command=self.instruction_settings).pack(fill="x")
+        ttk.Button(projects, text="GUI 검증 보고서", command=self.gui_verification_report).pack(fill="x")
         advanced = tk.Frame(projects, bg=PANEL)
         for mode, title in (("edit", "프로젝트 설정"), ("limits", "공용 예산"), ("reserve", "토큰 예비량")):
             ttk.Button(advanced, text=title, command=lambda mode=mode: self.edit_settings(mode)).pack(fill="x")
@@ -812,6 +815,9 @@ class CommandCenter:
             button.configure(state="normal" if enabled else "disabled")
 
     def close_requested(self):
+        if self.gui_verification_cancel is not None:
+            self.gui_verification_cancel.set()
+            return
         if self.shutdown_future is not None:
             return
         if self.view is None:
@@ -1259,6 +1265,141 @@ class CommandCenter:
         refresh()
         show_applied()
 
+    def gui_verification_report(self):
+        from .gui_verification import verified_image
+
+        project_id = self.project_ids[self.project.current()]
+        panel = self.panel()
+        panel.title("DevOrchestra · GUI 검증 보고서")
+        panel.geometry("860x445")
+        panel.minsize(775, 415)
+        status = tk.StringVar(value="고정 Windows 테스트 앱 · Verifier")
+        ttk.Label(panel, textvariable=status, wraplength=810).pack(fill="x", pady=(0, 8))
+        controls = ttk.Frame(panel)
+        controls.pack(fill="x")
+        gallery = ttk.Frame(panel)
+        gallery.pack(fill="both", expand=True)
+        thumbnails = []
+
+        def load(receipt, image):
+            if receipt["artifact_dir"] != f"gui-{UUID(receipt['run_id']).hex}":
+                raise Blocked("GUI artifact directory invalid")
+            if image["file"] not in {"comparison.png", *(
+                    f"{prefix}-{index}.png" for prefix in ("scene", "report") for index in range(1, 4)
+            )}:
+                raise Blocked("GUI artifact filename invalid")
+            path = self.reader.ledger.local_directory("logs") / receipt["artifact_dir"] / image["file"]
+            data, _ = verified_image(path, image["sha256"])
+            return tk.PhotoImage(master=panel, data=b64encode(data))
+
+        def open_image(receipt, title, image):
+            try:
+                photo = load(receipt, image)
+                viewer = self.panel()
+                viewer.title(title)
+                shown = photo if photo.width() <= viewer.winfo_screenwidth() - 80 else photo.subsample(2)
+                picture = ttk.Label(viewer, image=shown)
+                picture.image = shown
+                picture.pack()
+                ttk.Label(viewer, text=f"{image['file']} · SHA-256 {image['sha256']}").pack(fill="x")
+            except (Blocked, OSError, ValueError, KeyError, tk.TclError):
+                status.set("이미지 무결성 또는 표시를 확인할 수 없습니다.")
+
+        def render(receipt):
+            for child in gallery.winfo_children():
+                child.destroy()
+            thumbnails.clear()
+            if receipt is None:
+                status.set("이 프로젝트의 GUI 검증 영수증이 없습니다.")
+                return
+            result = receipt.get("result", "NOT_VERIFIED")
+            status.set(f"{result} · Verifier · 영수증 {receipt['run_id']}\n"
+                       f"종료 코드 {receipt.get('exit_code')} · Job 활성 {receipt.get('job_active')}"
+                       + (f"\n{receipt['reason']}" if receipt.get("reason") else ""))
+            try:
+                for column, scene in enumerate(receipt.get("scenes", ())):
+                    card = ttk.Frame(gallery, padding=5)
+                    card.grid(row=0, column=column, sticky="n")
+                    thumbnail = load(receipt, scene["processed"]).subsample(4)
+                    thumbnails.append(thumbnail)
+                    ttk.Button(card, image=thumbnail, command=lambda scene=scene: open_image(
+                        receipt, scene["title"], scene["processed"],
+                    )).pack()
+                    ttk.Label(card, text=f"{scene['title']} · {scene['observed']}\n{scene['input']}"
+                                         f"\n{scene['captured_at'][:19]} UTC", wraplength=240).pack()
+                    ttk.Button(card, text="원본 보기", command=lambda scene=scene: open_image(
+                        receipt, scene["title"], scene["original"],
+                    )).pack()
+                if receipt.get("comparison"):
+                    ttk.Button(gallery, text="전후 비교 보기", command=lambda: open_image(
+                        receipt, "전후 비교", receipt["comparison"],
+                    )).grid(row=1, column=0, columnspan=3, pady=6)
+            except (Blocked, OSError, ValueError, KeyError, tk.TclError):
+                status.set(status.get() + "\n일부 이미지의 무결성 또는 표시를 확인할 수 없습니다.")
+
+        def close():
+            if self.gui_verification_cancel is not None and future is not None and not future.done():
+                self.gui_verification_cancel.set()
+                status.set("취소 요청됨 · 소유 자원 회수 대기")
+            else:
+                panel.destroy()
+
+        def start():
+            nonlocal future
+            if self.gui_verification_cancel is not None:
+                status.set("다른 GUI 검증이 진행 중입니다.")
+                return
+            try:
+                scope = self.controller.gui_verification_scope(project_id)
+            except (Blocked, OSError, sqlite3.Error, ValueError):
+                status.set("검증 범위를 확인할 수 없습니다.")
+                return
+            if not self.confirm("고정 GUI 검증 승인",
+                                f"{project_id} · Verifier · {scope['scenario']}\n"
+                                f"대상: {scope['exe']}\nSHA-256 {scope['exe_sha256']}\n"
+                                f"시나리오 SHA-256 {scope['fixture_sha256']}\n"
+                                f"소유 창 조작 및 비공개 캡처 · 최대 {scope['timeout_seconds']}초 실행",
+                                parent=panel):
+                return
+            cancellation = Event()
+            self.gui_verification_cancel = cancellation
+            future = Future()
+            run.configure(state="disabled")
+            status.set("검증 중 · 완료 또는 취소 후 소유 자원 회수 확인")
+
+            def work():
+                try:
+                    future.set_result(self.controller.verify_gui_fixture(project_id, digest(scope), cancellation.is_set))
+                except Exception as error:
+                    future.set_exception(error)
+
+            def poll():
+                if not future.done():
+                    panel.after(80, poll)
+                    return
+                self.gui_verification_cancel = None
+                run.configure(state="normal")
+                if future.exception() is not None:
+                    status.set("검증 차단 · 원장에서 승인 및 회수 상태를 확인하세요.")
+                else:
+                    render(future.result())
+
+            Thread(target=work, daemon=False).start()
+            panel.after(80, poll)
+
+        future = None
+        run = ttk.Button(controls, text="고정 GUI 검증 실행", command=start)
+        run.pack(side="left")
+        ttk.Button(controls, text="닫기 / 실행 취소", command=close).pack(side="right")
+        panel.protocol("WM_DELETE_WINDOW", close)
+        panel.bind("<Escape>", lambda _event: close())
+        try:
+            render(next((event for event in reversed(self.reader.ledger.read())
+                         if event["project_id"] == project_id and event["kind"] in
+                         ("gui_validation_intent", "gui_validation_result")), None))
+        except (Blocked, OSError, sqlite3.Error, ValueError):
+            status.set("원장이 준비되지 않았습니다.")
+
     def development_start(self):
         if not self.view or not self.view["registration"]:
             return
@@ -1290,6 +1431,7 @@ class CommandCenter:
             self.supervised_work()
 
         ttk.Button(panel, text="감독형 Codex 작업으로 계속", command=supervised).pack(anchor="e")
+        ttk.Button(panel, text="고정 GUI 검증 및 보고서", command=self.gui_verification_report).pack(anchor="e")
 
     def supervised_work(self):
         if not self.view or not self.view["registration"]:
