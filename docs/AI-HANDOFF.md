@@ -1,10 +1,12 @@
 # 개발 인수인계
 
+`native-cycle --archive <공식 ZIP> --request-id <32자리 hex> --expires <UTC epoch> --seconds 960 --tokens 270000 --cycles 2`는 실제 두 사이클 시험의 승인 범위를 검토한다. 사용자 동의 후 동일 인자와 `--approve <해시>`를 사용한다. 최대 Codex 호출은 8회다. Manager 계획·Reviewer·Manager 판정은 각 30,000토큰, Developer는 45,000토큰을 입장 전에 남은 예산과 비교한다. Verifier는 모델을 호출하지 않는다. 각 호출의 실제 입력+출력은 사후 판정한다. Developer는 MXC 복제본 내 셸과 쓰기 권한을 사용하며 파일별 변경은 Controller가 사후 대조한다. Reviewer와 두 Manager 단계는 MXC 읽기 전용이다. 미확정 요청은 자동 재송신하지 않고 증거를 보존한다. 프로세스 회수가 미확정이면 원장 의도를 열린 채 두어 신규 입장을 막는다.
+
 공식 Codex 0.167.1 로컬 Code Mode로 첫 온라인 Developer 시험이 `REAL_PASS`였다. `gpt-6.1-sol`이 합성 Git 복제본의 두 파일을 직접 수정했고 모델 명령과 Controller 독립 시험에서 모두 `11`을 확인했다. 사용량 32,588토큰, diff와 소유 Job 회수 결과를 로컬 원장에 기록했다. 이전 `CODE_MODE_HOST_DISABLED` 결과와 로컬 합성 시험은 상태 문서에서 별도로 추적한다.
 
 `native-developer-trial --archive <공식 ZIP> --request-id <32자리 hex> --expires <UTC epoch> --role-tokens <N> --session-tokens <N> [--model <ID>]`는 로컬 명령 검증 영수증과 함께 일회 승인 범위와 해시를 검토한다. 전용 `.ai-local/state/codex-developer-home`의 공식 ChatGPT 로그인을 사용한다. 명시 동의 후 같은 인자와 `--approve <해시>`로 한 턴을 실행한다. 실행은 최대 120초다. 두 토큰 기준은 제공자가 보고한 입력+출력에 적용하는 사후 판정 기준이다. 캐시·추론은 각각 입력·출력에 포함되며 중복 합산하지 않는다. 제공자 쪽 강제 제한이 아니므로 초과가 가능하다. 복제본 전체가 MXC 쓰기 범위이고, 지정한 두 파일 외의 변경은 Controller가 결과에서 거부한다. 합성 `subtotal.cmd`와 `total.cmd`만 바뀌고 모델 명령과 독립 시험이 모두 11을 관측해야 성공한다. UNKNOWN 요청은 자동 재실행하지 않는다.
 
-현 제품은 일반 개발만 제공한다. 공식 Codex가 인증·모델 통신을 맡는다. `native-exec-diagnostic --code-mode --archive <공식 0.167.1 Windows x64 ZIP>`은 자격증명 없는 합성 Git 복제본에서 공식 CLI를 동시 프로세스 16개로 제한한 소유 Job으로 시작해 로컬 도구 실행을 확인한다. 다음 구현은 검증한 Developer 실행을 일반 개발의 순차 역할 계약에 연결하는 것이다. 최초 개발 세션 승인으로 합성 프로젝트에서 실제 두 사이클 이상을 검증한다. [Codex 권한 범위](https://learn.chatgpt.com/docs/permissions#what-the-network-proxy-does-not-control)
+현 제품은 일반 개발만 제공한다. 공식 Codex가 인증·모델 통신을 맡는다. `native-exec-diagnostic --code-mode --archive <공식 0.167.1 Windows x64 ZIP>`은 자격증명 없는 합성 Git 복제본에서 공식 CLI를 동시 프로세스 16개로 제한한 소유 Job으로 시작해 로컬 도구 실행을 확인한다. 실제 구독 두 사이클 검증 뒤 등록 프로젝트 및 Command Center 연결 범위를 확정한다. [Codex 권한 범위](https://learn.chatgpt.com/docs/permissions#what-the-network-proxy-does-not-control)
 
 이하 전용 계정·WFP·프록시·별도 게스트 시험과 복구 지침은 역사 자료다. 제품 실행 승인이나 다음 개발 작업에는 적용하지 않는다.
 

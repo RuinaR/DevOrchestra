@@ -107,6 +107,12 @@ def main():
     developer_trial.add_argument("--role-tokens", type=int)
     developer_trial.add_argument("--session-tokens", type=int)
     developer_trial.add_argument("--approve")
+    native_cycle = commands.add_parser("native-cycle", help="Review or run one approved two-feature Codex fixture session")
+    for option in ("archive", "request-id"):
+        native_cycle.add_argument("--" + option, required=True)
+    for option in ("expires", "seconds", "tokens", "cycles"):
+        native_cycle.add_argument("--" + option, type=int, required=True)
+    native_cycle.add_argument("--approve", metavar="REVIEW_SHA256")
     commands.add_parser("native-egress-preflight", help="Read Windows token facts without modifying network policy")
     egress_trial = commands.add_parser("native-egress-trial", help="Recover an existing historical WFP trial")
     egress_trial.add_argument("--binary", required=True)
@@ -377,6 +383,13 @@ def main():
                     for group in ("direct_controls", "server_commands") for mode in ("read", "write")
                 )) else 2
             return 0 if receipt["file_probe"]["status"] == "PASS" else 2
+        if args.action == "native-cycle":
+            from .native_cycle import run
+
+            receipt = run(ledger, args.archive, args.request_id, args.expires, args.seconds,
+                          args.tokens, args.cycles, args.approve)
+            print(canonical(receipt))
+            return 0 if receipt["status"] in ("NEEDS_OWNER_APPROVAL", "COMPLETED") else 2
         if args.action == "native-developer-trial":
             from .native_developer_trial import run_trial
 

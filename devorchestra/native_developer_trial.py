@@ -75,10 +75,10 @@ def _scope(archive, home, request, expires, ledger_head, model, role_tokens, ses
     }
 
 
-def _cli_evidence(output):
+def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expected="11", retain_message=False):
     """Retain only bounded event classes, command hashes and reported counts."""
     thread = started = terminal = message = False
-    usage, tests = None, []
+    usage, tests, final_message = None, [], None
     for line in output.splitlines():
         row = json.loads(line)
         if type(row) is not dict or terminal:
@@ -98,14 +98,15 @@ def _cli_evidence(output):
                 "agent_message", "reasoning", "command_execution", "file_change", "todo_list",
             ):
                 raise ValueError("Unexpected completed tool item")
-            if item.get("type") == "agent_message" and bool(item.get("text")):
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str) and item["text"]:
                 message = True
+                final_message = item["text"]
             if item.get("type") == "command_execution":
                 command = item.get("command")
                 observed = item.get("aggregated_output")
                 if (isinstance(command, str) and item.get("exit_code") == 0
-                        and re.search(r"\bcall\s+total\.cmd\s+3\b", command, re.I)
-                        and isinstance(observed, str) and "11" in observed.splitlines()):
+                        and re.search(command_pattern, command, re.I)
+                        and isinstance(observed, str) and expected in observed.splitlines()):
                     tests.append(digest(command))
         elif kind in ("turn.completed", "turn.failed", "error"):
             if kind != "turn.completed" or not started:
@@ -119,8 +120,11 @@ def _cli_evidence(output):
                          and type(value) is int and value >= 0}
     if not terminal or not message:
         raise ValueError("Missing completed model response")
-    return {"provider_response": "COMPLETED", "provider_usage": usage or "UNKNOWN",
-            "successful_fixture_command_sha256": tests}
+    result = {"provider_response": "COMPLETED", "provider_usage": usage or "UNKNOWN",
+              "successful_fixture_command_sha256": tests}
+    if retain_message:
+        result["message"] = final_message
+    return result
 
 
 def _read_observation(path, limit):
@@ -175,12 +179,30 @@ def _check_cached_model(home, model):
             raise Blocked("Approved model is absent from the dedicated CLI model catalog")
 
 
-def _verify_output(binary, work, output, environment, check):
+def _verify_output(binary, work, output, environment, check, *, test_command="call total.cmd 3"):
     config = trial_flags(work, writable=False)
     command = Path(environment["SystemRoot"]) / "System32" / "cmd.exe"
-    argv = [*config, *_args(command, "/d", "/q", "/c", "call total.cmd 3", profile=PROFILE)]
+    argv = [*config, *_args(command, "/d", "/q", "/c", test_command, profile=PROFILE)]
     return _observe(binary, argv, work, output, environment, seconds=10, check=check, output_limit=4096,
                     encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
+
+
+def _exec_argv(work, model, prompt, *, writable=True):
+    return [*trial_flags(work, writable=writable, code_mode=True), "exec", "--ignore-user-config", "--json",
+            "--ephemeral", "--model", model, "--cd", str(work), prompt]
+
+
+def _diagnostic(events):
+    diagnostic = next((event for event in reversed(events)
+                       if event.get("kind") == "native_inspection_result"
+                       and event.get("probe_kind") == "GENERAL_CODEX_CODE_MODE"
+                       and event.get("candidate_sha256") == RELEASE_SHA256
+                       and event.get("code_mode_host_sha256") == CODE_MODE_HOST_SHA256
+                       and event.get("flags_sha256") == code_mode_flags_sha256()), None)
+    if (diagnostic is None or diagnostic.get("status") != "SYNTHETIC_PASS"
+            or diagnostic.get("fixture_command_observed") is not True):
+        raise Blocked("Run the local Code Mode command diagnostic successfully before reviewing an online trial")
+    return diagnostic
 
 
 def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT_MODEL,
@@ -195,15 +217,7 @@ def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT
         home = ledger.local_directory("state") / "codex-developer-home"
         check_path(home)
         _check_cached_model(home, model)
-        diagnostic = next((event for event in reversed(events)
-                           if event.get("kind") == "native_inspection_result"
-                           and event.get("probe_kind") == "GENERAL_CODEX_CODE_MODE"
-                           and event.get("candidate_sha256") == RELEASE_SHA256
-                           and event.get("code_mode_host_sha256") == CODE_MODE_HOST_SHA256
-                           and event.get("flags_sha256") == code_mode_flags_sha256()), None)
-        if (diagnostic is None or diagnostic.get("status") != "SYNTHETIC_PASS"
-                or diagnostic.get("fixture_command_observed") is not True):
-            raise Blocked("Run the local Code Mode command diagnostic successfully before reviewing an online trial")
+        diagnostic = _diagnostic(events)
         scope = _scope(archive, home, request, expires, head, model, role_tokens, session_tokens, diagnostic)
         pin = digest(scope)
         standard = live_preflight()
@@ -276,8 +290,7 @@ def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT
                     raise Blocked("Trial approval expired before dispatch")
                 count, fence = ledger.append(count, fence, {**fields, "kind": "native_inspection_dispatch_intent",
                                                              "baseline_sha256": digest(before)})
-                argv = [*trial_flags(work, code_mode=True), "exec", "--ignore-user-config", "--json", "--ephemeral",
-                        "--model", model, "--cd", str(work), PROMPT]
+                argv = _exec_argv(work, model, PROMPT)
                 exec_logs = logs("exec")
                 process_result = "EXITED"
                 try:
