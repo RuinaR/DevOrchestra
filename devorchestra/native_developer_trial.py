@@ -32,12 +32,18 @@ PROFILE = "developer-trial"
 DEFAULT_MODEL = "gpt-6.1-sol"
 
 
-def trial_flags(work, *, writable=True, code_mode=False, tool_root=None, shell_tools=True):
+def trial_flags(work, *, writable=True, code_mode=False, tool_root=None, shell_tools=True,
+                extra_read_roots=(), scratch_root=None):
     """Keep every temporary override on the owned process command line."""
     rules = ((":root", "deny"), (":minimal", "read"), (str(work), "write" if writable else "read"),
              (str(work / ".git"), "read"))
     if tool_root is not None:
         rules += ((str(tool_root), "read"),)
+    rules += tuple((str(root), "read") for root in extra_read_roots)
+    if scratch_root is not None:
+        if not writable:
+            raise Blocked("Only the Developer may write to development scratch")
+        rules += ((str(scratch_root), "write"),)
     filesystem = "{ " + ", ".join(f"{json.dumps(path)} = {json.dumps(access)}" for path, access in rules) + " }"
     enabled = {"code_mode", "code_mode_host"} if code_mode else set()
     if shell_tools:
@@ -195,8 +201,10 @@ def _verify_output(binary, work, output, environment, check, *, test_command="ca
                     encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
 
 
-def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tools=True):
-    return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root, shell_tools=shell_tools),
+def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tools=True,
+               extra_read_roots=(), scratch_root=None):
+    return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root, shell_tools=shell_tools,
+                         extra_read_roots=extra_read_roots, scratch_root=scratch_root),
             "exec", "--ignore-user-config", "--json",
             "--ephemeral", "--model", model, "--cd", str(work), prompt]
 

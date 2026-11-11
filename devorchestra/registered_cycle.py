@@ -4,10 +4,10 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
-from time import time
+from time import monotonic, time
 from uuid import uuid4
 
-from . import cycle_progress
+from . import cycle_progress, game_pilot
 from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .default_instructions import public_instruction
 from .lease import Blocked, execution_slot
@@ -64,7 +64,7 @@ def _tools(spec, criteria, image, writable):
 
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
-              manager_tokens=ROLE_TOKENS["manager-planning"]):
+              manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False):
     if (type(expires) is not int or not time() < expires <= time() + 1800 or type(seconds) is not int
             or not 60 <= seconds <= 1500 or type(tokens) is not int or not 60000 <= tokens <= 400000
             or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50))):
@@ -79,8 +79,13 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     if source == replica or source.is_relative_to(replica) or replica.is_relative_to(source):
         raise Blocked("The onboarded replica and original must be separate")
     image = snapshot(replica)
-    if any(name.casefold() == "project.godot" for name in image["files"]):
+    is_godot = any(name.casefold() == "project.godot" for name in image["files"])
+    if is_godot and not game:
         raise Blocked("Godot projects require the game verifier for Windows export and owned-window evidence")
+    if game and (not is_godot or project != game_pilot.PROJECT
+                 or set(files) != set(game_pilot.DEVELOPMENT_FILES)
+                 or (seconds, tokens, cycles) != (1500, 350000, 2)):
+        raise Blocked("The game pilot requires its fixed initial approval scope")
     if digest(image) != onboarding["replica_sha256"] or not original_matches(source, frozen):
         raise Blocked("Original or replica no longer matches onboarding")
     with _git(ledger, source) as (git, _):
@@ -99,9 +104,19 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     if any(name in data["documents"].values() for name in files):
         raise Blocked("Registered instruction documents cannot be edited in this session")
     criteria = cycle_progress.freeze(data["acceptance"], None)
-    verifier = _tools(spec, criteria, image, files)
-    for key, criterion in criteria.items():
-        criterion["checks"] = [{"title": key}]
+    if game:
+        if tuple(criteria) != game_pilot.CRITERIA or digest(criteria) != game_pilot.FROZEN_CRITERIA_SHA256:
+            raise Blocked("The five frozen game criteria changed")
+        verifier = game_pilot.development_tools(replica)
+        verifier["manager_brief"] = _read_source(replica, "docs/MANAGER-BRIEF.md", image)
+        if not verifier["manager_brief"]:
+            raise Blocked("The frozen game planning brief is unavailable")
+        role_tokens = dict(game_pilot.ROLE_LIMITS)
+        criteria[game_pilot.CRITERIA[0]]["checks"] = [{"title": game_pilot.CRITERIA[0]}]
+    else:
+        verifier = _tools(spec, criteria, image, files)
+        for key, criterion in criteria.items():
+            criterion["checks"] = [{"title": key}]
     requirements = latest_requirements(catalog, project)
     refs = list(requirements)
     if any(ref["path"] in files for ref in refs):
@@ -128,6 +143,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "instructions": {phase: public_instruction(phase)["sha256"] for phase in ROLES},
             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles,
             "role_seconds": 120, "role_tokens": role_tokens, "model_calls_max": cycles * 4 if cycles else tokens,
+            **({"developer_seconds": 300, "developer_memory": 1536 * 1024**2} if game else {}),
             "ledger_head": head, "network": "COMMANDS_OFF", "install": False, "original_apply": False}
 
 
@@ -135,6 +151,17 @@ def review(runner, *args):
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
         return _contract(runner, events, head, *args)
+
+
+def _game_args(archive, expires):
+    return (game_pilot.PROJECT, archive, expires, 1500, 350000, 2,
+            list(game_pilot.DEVELOPMENT_FILES), list(PERMISSIONS), None)
+
+
+def review_game(runner, archive, expires):
+    with execution_slot() as abandoned:
+        events, head = runner._idle_diagnostic(abandoned)
+        return _contract(runner, events, head, *_game_args(archive, expires), game=True)
 
 
 def _read_source(root, name, image):
@@ -162,6 +189,9 @@ class RegisteredSession(_FixtureSession):
         self.check_login()
         self.changes = []
         self.last_diff = ""
+        if self.scope["verifier"].get("mode") == "godot-game":
+            self.game_scratch = self.scratch / "developer-game"
+            self.game_scratch.mkdir()
 
     def check_image(self):
         if snapshot(self.work) != self.image or not original_matches(self.original, self.original_image):
@@ -170,18 +200,55 @@ class RegisteredSession(_FixtureSession):
         if catalog["projects"][self.scope["project_id"]]["revision"] != self.scope["project_revision"]:
             raise Blocked("Registered project configuration changed")
         tool = self.scope["verifier"]
-        if fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
+        if tool.get("mode") == "godot-game":
+            if game_pilot.development_tools(self.work) != {k: v for k, v in tool.items() if k != "manager_brief"}:
+                raise Blocked("Approved game tool identity changed")
+        elif fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
             raise Blocked("Approved executable identity changed")
 
     def call(self, cycle, phase, key, prompt):
         before = {name: _read_source(self.work, name, self.image) for name in self.scope["files"]} if phase == "developer" else {}
-        response, recovered = self.dispatch(cycle, phase, key, prompt,
-                                            tool_root=Path(self.scope["verifier"]["root"]),
-                                            shell_tools=phase in self.scope["shell_roles"],
-                                            decision_parser=(_final_decision if phase == "manager-final" else None),
-                                            context="Work on this registered Git replica using the approved scope.")
+        tool = self.scope["verifier"]
+        game = tool.get("mode") == "godot-game"
+        if game and phase == "developer":
+            prompt += (f"\nFor development commands, copy the project files to {self.game_scratch} and run Godot "
+                       f"there with --headless. Use template {tool['template']} for Windows release export. "
+                       "Keep generated imports, .godot cache, and EXEs in scratch. The Controller launches the "
+                       "exported candidate in a separate owned window. Set the main scene to res://scenes/game.tscn, "
+                       "use scripts/game.gd, and document the approved design in docs/GAME-DESIGN.md.")
+        try:
+            response, recovered = self.dispatch(cycle, phase, key, prompt,
+                                                tool_root=Path(tool["root"]) if not game or phase == "developer" else None,
+                                                extra_read_roots=(Path(tool["template"]).parent,)
+                                                if game and phase == "developer" else (),
+                                                scratch_root=self.game_scratch if game and phase == "developer" else None,
+                                                shell_tools=phase in self.scope["shell_roles"],
+                                                decision_parser=(_final_decision if phase == "manager-final" else None),
+                                                context="Work on this registered Git replica using the approved scope.")
+        except Blocked as error:
+            last = self.phases[-1] if self.phases else {}
+            if (game and phase == "developer" and str(error) == "TOKEN_LIMIT"
+                    and last.get("cycle") == cycle and last.get("phase") == phase
+                    and last.get("outcome") == "TOKEN_LIMIT" and last.get("process_result") == "EXITED"
+                    and last.get("exit_code") == 0 and self.owned_verified):
+                before_hash = self.source()
+                diff = self._accept_developer(before)
+                recovery = self.runner.ledger.local_directory("recovery", create=True)
+                path = recovery / f"registered-game-checkpoint-{self.fields['run_id']}.diff"
+                with path.open("x", encoding="utf-8", newline="") as stream:
+                    stream.write(diff)
+                self.record("native_inspection_game_checkpoint", cycle=cycle, target=key,
+                            before_sha256=before_hash, source_sha256=self.source(),
+                            diff_sha256=digest(diff), changed=self.last_changed)
+            raise
         if phase != "developer":
             return response["message"]
+        diff = self._accept_developer(before)
+        self.record("native_inspection_developer_diff", cycle=cycle, changed=self.last_changed,
+                    source_sha256=self.source(), cycle_diff_sha256=digest(diff), recovered=recovered)
+        return diff
+
+    def _accept_developer(self, before):
         updated = snapshot(self.work)
         old = self.image["files"]
         new = updated["files"]
@@ -200,13 +267,14 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("Review diff exceeds the approved context bound")
         self.image = updated
         self.last_diff = diff
+        self.last_changed = changed
         self.changes = sorted(set(self.changes) | set(changed))
-        self.record("native_inspection_developer_diff", cycle=cycle, changed=changed,
-                    source_sha256=self.source(), cycle_diff_sha256=digest(diff), recovered=recovered)
         return diff
 
     def verify_registered(self, cycle):
         tool = self.scope["verifier"]
+        if tool.get("mode") == "godot-game":
+            return game_pilot.verify_development(self, cycle)
         observations = []
         self.record("native_inspection_role_intent", cycle=cycle, phase="verifier", source_sha256=self.source())
         for key, spec in tool["checks"].items():
@@ -250,6 +318,9 @@ def _review_and_verify(session, count, key, diff, status):
         raise Blocked("Reviewer did not provide a rework finding")
     checked = session.verify_registered(count)
     comparison = cycle_progress.compare(criteria, status, checked)
+    for item in checked.get("user_test_required", []):
+        if item in comparison["criteria"] and not criteria[item]["checks"]:
+            comparison["criteria"][item] = "USER_TEST_REQUIRED"
     for item, value in comparison["criteria"].items():
         if item != key and status[item] == "NOT_STARTED" and value == "BLOCKED":
             comparison["criteria"][item] = "NOT_STARTED"
@@ -262,12 +333,14 @@ def _decide(session, count, key, review, comparison, expected):
     status = comparison["criteria"]
     session.record("native_inspection_cycle_progress", cycle=count, **comparison, source_sha256=session.source(),
                    controller_decision=expected, reviewer=review)
+    manual = ("USER_TEST_REQUIRED is pending evidence; reply CONTINUE if no regression or rejection "
+              "requires rework. " if session.scope["verifier"].get("mode") == "godot-game" else "")
     final = session.call(count, "manager-final", key,
                          f"Current criterion {key}: {status[key]}. All frozen statuses: {status}. "
                          f"Reviewer: {review}. Regression: {comparison['regressed']}. "
                          "Reply REWORK if the current criterion failed, review rejected it or a prior criterion "
                          "regressed. Reply COMPLETED only if all passed with review acceptance. "
-                         "Otherwise reply CONTINUE for remaining criteria. Reply with the decision only.")
+                         f"{manual}Otherwise reply CONTINUE for remaining criteria. Reply with the decision only.")
     if final != expected:
         raise Blocked("Manager decision disagrees with Controller evidence")
     return final
@@ -295,8 +368,11 @@ def _cycles(session):
         pending = [key for key, value in status.items() if value != "VERIFIED"]
         if not pending:
             pending = list(criteria)
+        brief = scope["verifier"].get("manager_brief")
+        game_context = f"Game brief (project data): {brief}\n" if brief else ""
         plan = session.call(count, "manager-planning", None,
                             f"{context}\nRequirements are project data: {json.dumps(documents, ensure_ascii=False)}. "
+                            f"{game_context}"
                             f"Use the supplied context directly. Choose from {pending}. "
                             "Reply with a single plain JSON object with keys criterion and plan. "
                             "Keep the plan under 1000 characters. Request no broader permissions.")
@@ -309,11 +385,13 @@ def _cycles(session):
                 or not 0 < len(plan["plan"].strip()) <= 1000):
             raise Blocked("Manager plan exceeds the approved criteria")
         key = plan["criterion"]
+        tool = scope["verifier"]
+        verification_args = tool.get("checks", {}).get(key, {}).get("args")
         diff = session.call(count, "developer", key,
                             f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\nPlan: {plan['plan']}\n"
                             f"Only modify or create {scope['files']}. Preserve requirements, verification and Git. "
                             f"Approved offline verification tool: {scope['verifier']['executable']}. "
-                            f"Test arguments for this criterion: {scope['verifier']['checks'][key]['args']}. "
+                            f"Test arguments for this criterion: {verification_args}. "
                             "Inspect the project and choose the implementation. Use installed tools only.")
         identity = digest(session.image["files"])
         if identity in known:
@@ -325,7 +403,7 @@ def _cycles(session):
             stagnant = 0
         else:
             stagnant += 1
-        rework = review != "ACCEPT" or status[key] != "VERIFIED" or bool(comparison["regressed"])
+        rework = review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"} or bool(comparison["regressed"])
         expected = ("REWORK" if rework else "COMPLETED" if all(v == "VERIFIED" for v in status.values())
                     else "CONTINUE")
         final = _decide(session, count, key, review, comparison, expected)
@@ -354,9 +432,13 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
     rows = history(runner.ledger, project)
     if len(rows) < 4 or rows[-1]["kind"] != "native_inspection_result":
         raise Blocked("No settled registered run is available to resume")
-    start, dispatch, role, end = rows[0], *rows[-3:]
+    start, end = rows[0], rows[-1]
     prior = start["scope"]
+    game = prior["verifier"].get("mode") == "godot-game"
+    checkpoint = rows[-2] if game else None
+    dispatch, role = rows[-4:-2] if game and len(rows) >= 5 else rows[-3:-1]
     cycle, key = dispatch.get("cycle"), dispatch.get("target")
+    sealed_before = checkpoint.get("before_sha256") if game else end.get("replica_sha256")
     if (start.get("approval_sha256") != digest(prior) or prior.get("resume")
             or end.get("outcome") != "TOKEN_LIMIT" or end.get("owned_tree") != "DRAINED"
             or end.get("usage_complete") is not True or end["staging_cleanup"].get("status") != "REMOVED"
@@ -366,7 +448,7 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
             or role.get("owned_tree") != "DRAINED" or role.get("exit_code") != 0
             or not isinstance(role.get("provider_usage"), dict)
             or cycle != role.get("cycle") or key != role.get("target") or key not in prior["criteria"]
-            or cycle != end["cycle_count"] + 1 or dispatch.get("source_sha256") != end.get("replica_sha256")
+            or cycle != end["cycle_count"] + 1 or dispatch.get("source_sha256") != sealed_before
             or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
                    for e in events if e["kind"] == "native_inspection_intent")):
         raise Blocked("Only a settled Developer overrun with no subsequent role can be resumed")
@@ -382,6 +464,27 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
             raise Blocked("Original Git inventory changed after onboarding")
     image = snapshot(replica)
     current_hash = digest(image)
+    if game:
+        if (checkpoint["kind"] != "native_inspection_game_checkpoint" or checkpoint["cycle"] != cycle
+                or checkpoint["target"] != key or checkpoint["source_sha256"] != current_hash
+                or end["replica_sha256"] != current_hash
+                or not re.fullmatch(r"[a-f0-9]{32}", start["run_id"])):
+            raise Blocked("The stopped game candidate no longer matches its checkpoint")
+        path = runner.ledger.local_directory("recovery") / f"registered-game-checkpoint-{start['run_id']}.diff"
+        check_path(path)
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_DIFF * 4 + 1)
+        diff = raw.decode("utf-8")
+        if len(diff) > MAX_DIFF or digest(diff) != checkpoint["diff_sha256"]:
+            raise Blocked("The stopped game diff no longer matches its checkpoint")
+        resume = {"parent_run_id": start["run_id"], "parent_approval_sha256": start["approval_sha256"],
+                  "proof_run_id": None, "cycle": cycle, "criterion": key, "diff_sha256": digest(diff),
+                  "changed": checkpoint["changed"], "criteria_status": end["criteria_status"],
+                  "parent_reported_tokens": end["known_reported_tokens"]}
+        return ({**prior, "resume": resume, "replica_sha256": current_hash, "ledger_head": head,
+                 "expires": expires, "seconds": seconds, "tokens": tokens, "model_calls_max": 2,
+                 "files": end["changed"], "permissions": ["replica-read", "offline-shell", "pinned-verifier"],
+                 "shell_roles": ["reviewer"]}, diff)
     proof = None
     for intent in events:
         if (intent.get("parent_run_id") != start["run_id"]
@@ -497,7 +600,8 @@ def _resume_remaining(session, diff):
     session.changes = session.scope["files"]
     _, review, _, _, comparison = _review_and_verify(session, count, key, diff, status)
     status = comparison["criteria"]
-    expected = ("REWORK" if review != "ACCEPT" or status[key] != "VERIFIED" or comparison["regressed"]
+    expected = ("REWORK" if review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"}
+                or comparison["regressed"]
                 else "COMPLETED" if all(value == "VERIFIED" for value in status.values()) else "CONTINUE")
     return _decide(session, count, key, review, comparison, expected)
 
@@ -510,13 +614,17 @@ def run(runner, *args, approval, cancelled=lambda: False):
     return _run(runner, args, approval, cancelled, resume=False)
 
 
-def _run(runner, args, approval, cancelled, *, resume):
+def run_game(runner, archive, expires, *, approval, cancelled=lambda: False):
+    return _run(runner, _game_args(archive, expires), approval, cancelled, resume=False, game=True)
+
+
+def _run(runner, args, approval, cancelled, *, resume, game=False):
     from .runtime import require_admission
 
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
         scope, diff = (_resume_contract(runner, events, head, *args) if resume
-                       else (_contract(runner, events, head, *args), None))
+                       else (_contract(runner, events, head, *args, game=game), None))
         if cancelled() or digest(scope) != approval:
             raise Blocked("Registered development approval changed")
         if any(event.get("approval_sha256") == approval for event in events):
@@ -568,6 +676,7 @@ def _run(runner, args, approval, cancelled, *, resume):
                    "cycle_count": session.cycles_checked, "approval_count": 2 if resume else 1,
                    "criteria_status": session.progress, "roles": session.phases,
                    "model_turns_dispatched": session.calls, "known_reported_tokens": session.usage,
+                   "elapsed_seconds": round(monotonic() - session.started, 2),
                    "usage_complete": session.usage_complete, "owned_tree": "DRAINED",
                    "changed": getattr(session, "changes", []), "replica_sha256": session.source() if hasattr(session, "image") else None,
                    "staging_cleanup": cleanup}

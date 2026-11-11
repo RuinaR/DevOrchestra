@@ -4,6 +4,7 @@ from ctypes import wintypes as w
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 from shutil import copyfile
 from struct import unpack
 from time import monotonic, sleep
@@ -25,6 +26,17 @@ from .system_powershell import _api as signature
 
 
 PROJECT = "native-game-pilot"
+CRITERIA = ("C1-555e38d7", "C2-9dcbacb0", "C3-b935f137", "C4-c00426e2", "C5-41940c23")
+FROZEN_CRITERIA_SHA256 = "0aefb917198ad528d5bd4edab0bf778cabb76699f14bac3a600810a8b95413b1"
+DEVELOPMENT_FILES = ("docs/GAME-DESIGN.md", "project.godot", "scenes/game.tscn", "scenes/player.tscn",
+                     "scenes/hud.tscn", "scripts/game.gd", "scripts/player.gd", "scripts/hud.gd")
+ROLE_LIMITS = {"manager-planning": 45000, "developer": 75000, "reviewer": 55000, "manager-final": 45000}
+MANUAL_CHECKS = {
+    CRITERIA[1]: "In the exported game, observe movement, walls and single-count pickups under keyboard input.",
+    CRITERIA[2]: "Play through a hazard failure and a reachable victory and observe the game states.",
+    CRITERIA[3]: "Exercise start, HUD, results and restart, then inspect rendered text, feedback and clipping.",
+    CRITERIA[4]: "Review asset provenance and the accepted design against a recorded 5–10 minute playthrough.",
+}
 ENGINE = "Godot_v4.7.2-stable_win64"
 ENGINE_HASHES = {
     ENGINE + ".exe": "ab1824f85bfd8e0e4128182c000c4003a3e042245b2967848d089b2a04b22424",
@@ -91,6 +103,20 @@ def _template(replica):
             or info["sha256"] != WINDOWS_TEMPLATE_SHA256 or receipt["template_bytes"] != info["bytes"]):
         raise Blocked("Installed Godot export template does not match its receipt")
     return path, info
+
+
+def development_tools(replica):
+    engine = _engine(replica)
+    template, identity = _template(replica)
+    return {"executable": str(engine), "root": str(engine.parent), "template": str(template),
+            "template_identity": identity, "engine_sha256": ENGINE_HASHES, "mode": "godot-game",
+            "manual_checks": MANUAL_CHECKS}
+
+
+def _export_preset(template):
+    return (PACK_PRESET + f'custom_template/release={json.dumps(template.as_posix())}\n'
+            'binary_format/embed_pck=true\ndebug/export_console_wrapper=0\n'
+            'application/modify_resources=false\ncodesign/enable=false\n')
 
 
 def _copy_source(replica, work, image):
@@ -253,9 +279,7 @@ def run(runner, archive, *, cancelled=lambda: False, capture=False, export_windo
             script = work / "devorchestra-bootstrap-probe.gd"
             preset = PACK_PRESET
             if export_windows:
-                preset += (f'custom_template/release={json.dumps(template.as_posix())}\n'
-                           'binary_format/embed_pck=true\ndebug/export_console_wrapper=0\n'
-                           'application/modify_resources=false\ncodesign/enable=false\n')
+                preset = _export_preset(template)
             else:
                 with script.open("x", encoding="utf-8") as stream:
                     stream.write(_probe_script(assets, manifest))
@@ -415,4 +439,84 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
         raise Blocked("Preserved export differs from the executable that was tested")
     result.update(outcome="PASS", gui="EXPORTED_WINDOW_CAPTURED_AND_CLOSED", executable=identity,
                   artifact_directory=output.name, window_image_path=screenshot.name,
-                  input="SPACE_MESSAGES_SENT_NO_GAME_RESPONSE_IMPLEMENTED")
+                  input="SPACE_MESSAGES_SENT_RESPONSE_NOT_VALIDATED")
+
+
+def verify_development(session, cycle):
+    """Build the reviewed candidate under the session fence and preserve independent EXE evidence."""
+    scope = session.scope
+    tool = scope["verifier"]
+    ledger = session.runner.ledger
+    engine, template = Path(tool["executable"]), Path(tool["template"])
+    session.check()
+    session.check_image()
+    source_hash = session.source()
+    session.record("native_inspection_role_intent", cycle=cycle, phase="verifier", source_sha256=source_hash)
+    lab = session.logs(f"{cycle}-godot-verifier")
+    work, data, home = (lab / name for name in ("work", "data", "config"))
+    _copy_source(session.work, work, session.image)
+    data.mkdir()
+    home.mkdir()
+    (home / "config.toml").write_text(_profile(work, data, engine.parent, template), encoding="utf-8")
+    with (work / "export_presets.cfg").open("x", encoding="utf-8") as stream:
+        stream.write(_export_preset(template))
+    env = {**session.verify_env, "APPDATA": str(data), "LOCALAPPDATA": str(data), "HOME": str(data),
+           "USERPROFILE": str(data), "TEMP": str(data), "TMP": str(data), "CODEX_HOME": str(home)}
+    result, workers = {"steps": {}}, []
+
+    def observe(name, args, interact=None, directory=work, executable=None):
+        session.check()
+        logs = lab / name
+        logs.mkdir()
+        argv = _args(executable, *args) if executable else _args(engine, "--path", str(work), *args)
+        response = session.owned(lambda: _observe(session.binary, argv, directory, logs, env,
+                                                  seconds=min(45, session.seconds()), memory=1024**3,
+                                                  check=session.check, output_limit=65536, encoding="utf-8",
+                                                  interact=interact))
+        if response["job_active"]:
+            session.owned_verified = False
+            raise Blocked("Game Verifier Job is unresolved")
+        stderr = _read_observation(logs / "probe.stderr", 65537)
+        result["steps"][name] = {"exit_code": response["exitCode"], "job_active": 0,
+                                 "stdout_sha256": sha256(response["stdout"].encode("utf-8")).hexdigest(),
+                                 "stderr_sha256": sha256(stderr).hexdigest()}
+        if response["exitCode"] or len(stderr) > 65536:
+            raise Blocked(f"Godot {name} failed")
+        return response["stdout"], stderr.decode("utf-8")
+
+    try:
+        _export_release(ledger, f"{session.fields['run_id']}-cycle-{cycle}", session.work,
+                        data, lab, observe, session.check, workers, result)
+    except Blocked as error:
+        if not session.owned_verified:
+            raise
+        result.update(outcome="FAIL", reason=str(error))
+    finally:
+        for worker in workers:
+            worker.join(1)
+            if worker.is_alive():
+                session.owned_verified = False
+                raise Blocked("Game capture thread did not settle")
+    session.check_image()
+    # A successful launch of the original tile sheet is useful evidence but is not C1.
+    settings = _small_file(session.work / "project.godot", 24000).decode("utf-8")
+    changed_game = (
+        re.search(r'^run/main_scene\s*=\s*"res://scenes/game\.tscn"\s*$', settings, re.MULTILINE)
+        and {"scenes/game.tscn", "scripts/game.gd", "docs/GAME-DESIGN.md"} <= session.image["files"].keys()
+        and b'res://scripts/game.gd' in _small_file(session.work / "scenes" / "game.tscn", 24000)
+    )
+    observations = [{"title": CRITERIA[0], "expected": "CANDIDATE_WINDOWS_GAME_LAUNCHED",
+                     "actual": "CANDIDATE_WINDOWS_GAME_LAUNCHED" if result["outcome"] == "PASS" and changed_game
+                     else "BOOTSTRAP_OR_FAILED_EXPORT"}]
+    receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
+               "verdict": "PASS" if observations[0]["actual"] == observations[0]["expected"] else "FAIL",
+               "source_sha256": source_hash, "observations": observations,
+               "user_test_required": list(MANUAL_CHECKS), "game": result}
+    if result.get("artifact_directory"):
+        output = ledger.local_directory("recovery") / result["artifact_directory"] / "verification.json"
+        with output.open("x", encoding="utf-8") as stream:
+            json.dump(receipt, stream, indent=2, ensure_ascii=False)
+    session.record("native_inspection_role_result", cycle=cycle, **receipt)
+    session.phases.append({"cycle": cycle, "phase": "verifier", "outcome": receipt["verdict"],
+                           "artifact_directory": result.get("artifact_directory")})
+    return receipt

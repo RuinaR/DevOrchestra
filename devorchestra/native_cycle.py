@@ -228,11 +228,12 @@ class _FixtureSession:
         self.seconds()
         return False
 
-    def seconds(self):
+    def seconds(self, role=None):
         remaining = min(self.scope["seconds"] - (monotonic() - self.started), self.scope["expires"] - time())
         if remaining <= 0:
             raise Blocked("TIME_LIMIT")
-        return min(self.scope["role_seconds"], remaining)
+        limit = self.scope.get("developer_seconds", self.scope["role_seconds"]) if role == "developer" else self.scope["role_seconds"]
+        return min(limit, remaining)
 
     def logs(self, label):
         path = self.scratch / label
@@ -340,7 +341,7 @@ class _FixtureSession:
 
     def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None, shell_tools=True,
                  decision_parser=None,
-                 context="This is an isolated arithmetic fixture."):
+                 context="This is an isolated arithmetic fixture.", extra_read_roots=(), scratch_root=None):
         self.check()
         self.check_image()
         limit = self.scope["role_tokens"][phase]
@@ -362,9 +363,11 @@ class _FixtureSession:
         process_result = "EXITED"
         try:
             result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
-                                                      tool_root=tool_root, shell_tools=shell_tools),
-                              self.work, role_log, self.env, seconds=self.seconds(), check=self.check,
-                              output_limit=262144, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
+                                                      tool_root=tool_root, shell_tools=shell_tools,
+                                                      extra_read_roots=extra_read_roots, scratch_root=scratch_root),
+                              self.work, role_log, self.env, seconds=self.seconds(phase), check=self.check,
+                              output_limit=262144, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
+                              memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2)
         except OwnedMxcStopped as stopped:
             self.owned_verified = True
             process_result = "TERMINATED_AND_DRAINED"

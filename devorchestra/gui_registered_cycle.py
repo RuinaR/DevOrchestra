@@ -40,9 +40,9 @@ def show(center, project):
     for key, item in criteria.items():
         ttk.Label(panel, text=f"{key} · {item['text']}", wraplength=580).pack(anchor="w")
     if any(name.casefold() == "project.godot" for name in baseline["files"]):
-        state.set("게임 온라인 개발 대기 · Windows 내보내기와 소유 창 검증 계약 필요")
+        state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
         if project == game_pilot.PROJECT:
-            _game_preflight(panel, runner, state)
+            _game_preflight(center, panel, runner, state)
         return
     ttk.Button(panel, text="등록 목표·기준 편집",
                command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
@@ -225,7 +225,7 @@ def show(center, project):
     render()
 
 
-def _game_preflight(panel, runner, state):
+def _game_preflight(center, panel, runner, state):
     cancelled = Event()
     future = None
 
@@ -236,45 +236,93 @@ def _game_preflight(panel, runner, state):
         else:
             panel.destroy()
 
-    def start(export_windows=False):
+    def start(export_windows=False, *, online=False, resume=False):
         nonlocal future
-        archive = filedialog.askopenfilename(parent=panel, filetypes=[("Codex ZIP", "*.zip")])
-        if not archive:
+        archive = None if resume else filedialog.askopenfilename(parent=panel, filetypes=[("Codex ZIP", "*.zip")])
+        if not resume and not archive:
             return
-        future = Future()
         cancelled.clear()
-        button.configure(state="disabled")
-        export_button.configure(state="disabled")
-        state.set("오프라인 MXC 검사 실행 중")
+        expires = int(time()) + 1750
+        resume_args = (game_pilot.PROJECT, expires, 360, 120000)
 
-        def worker():
-            try:
-                future.set_result(game_pilot.run(runner, archive, cancelled=cancelled.is_set, capture=True,
-                                                 export_windows=export_windows))
-            except Exception as error:
-                future.set_exception(error)
+        def submit(approval=None):
+            nonlocal future
+            future = Future()
+            for control in (button, export_button, online_button, resume_button):
+                control.configure(state="disabled")
+            state.set("온라인 실행 범위 검토 중" if online and approval is None else
+                      "온라인 게임 개발 실행 중" if online else "오프라인 MXC 검사 실행 중")
 
-        def poll():
-            if not future.done():
-                panel.after(150, poll)
-                return
-            button.configure(state="normal")
-            export_button.configure(state="normal")
-            try:
-                result = future.result()
-                detail = result.get("reason") or (f"PNG {result.get('imported_textures', 0)}개 · "
-                                                  f"PCK {'PASS' if result.get('resource_pack') else '미검증'} · "
-                                                  f"{result['gui']}")
-                if export_windows:
-                    detail = result.get("reason") or result.get("artifact_directory", result["export"])
-                    state.set(f"Windows EXE 오프라인 검증 {result['outcome']} · {detail}")
-                else:
-                    state.set(f"오프라인 사전 검증 {result['outcome']} · {detail}")
-            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
-                state.set(str(error))
+            def worker():
+                try:
+                    if not online:
+                        result = game_pilot.run(runner, archive, cancelled=cancelled.is_set, capture=True,
+                                                export_windows=export_windows)
+                    elif resume and approval is None:
+                        result = registered_cycle.review_resume(runner, *resume_args)
+                    elif resume:
+                        result = registered_cycle.run_resume(runner, *resume_args, approval=approval,
+                                                             cancelled=cancelled.is_set)
+                    elif approval is None:
+                        result = registered_cycle.review_game(runner, archive, expires)
+                    else:
+                        result = registered_cycle.run_game(runner, archive, expires, approval=approval,
+                                                           cancelled=cancelled.is_set)
+                    future.set_result(result)
+                except Exception as error:
+                    future.set_exception(error)
 
-        Thread(target=worker, daemon=False).start()
-        panel.after(150, poll)
+            def poll():
+                if not future.done():
+                    panel.after(150, poll)
+                    return
+                for control in (button, export_button, online_button, resume_button):
+                    control.configure(state="normal")
+                try:
+                    result = future.result()
+                    if online and approval is None:
+                        if cancelled.is_set():
+                            state.set("검토 취소됨")
+                            return
+                        summary = (f"{result['project_id']}\n복제본 {result['replica']}\n"
+                                   f"{result['seconds']:,}초 · {result['tokens']:,}토큰 · 최대 {result['cycles']}사이클\n"
+                                   f"{result['model']} · {result['role_tokens']}\n"
+                                   f"호출당 시간 · Developer {result.get('developer_seconds', 120)}초 / 기타 120초\n"
+                                   f"편집 파일 {', '.join(result['files'])}\n"
+                                   "Godot 및 템플릿 읽기, Developer 임시 폴더, 오프라인 셸, "
+                                   "Windows 내보내기 및 소유 창 Verifier를 사용합니다. "
+                                   "기존 에셋은 읽기 전용이며 명령 네트워크와 원본 반영은 꺼져 있습니다. "
+                                   "플레이 동작과 시각 품질은 사용자 검증이 필요합니다.")
+                        title = "게임 온라인 개발 1회 승인"
+                        if resume:
+                            title = "게임 후보 검토 재개 승인"
+                            summary = (f"{result['replica']}\n추가 360초 · 120,000토큰 · 모델 최대 2회\n"
+                                       "이전 후보의 Reviewer → Verifier → 최종 Manager만 실행합니다. "
+                                       "Reviewer 55,000 · 최종 Manager 45,000토큰. 복제본 편집은 꺼져 있습니다.")
+                        if center.confirm(title, summary, parent=panel):
+                            submit(digest(result))
+                        else:
+                            state.set("온라인 실행 승인 취소됨")
+                    elif online:
+                        statuses = ", ".join(f"{key} {status}" for key, status in result.get("criteria_status", {}).items())
+                        state.set(f"{result['outcome']} · {result.get('cycle_count', 0)}사이클 · "
+                                  f"{result.get('elapsed_seconds', 0):g}초 · "
+                                  f"{result.get('known_reported_tokens', 0):,}토큰 · {statuses}")
+                    elif export_windows:
+                        detail = result.get("reason") or result.get("artifact_directory", result["export"])
+                        state.set(f"Windows EXE 오프라인 검증 {result['outcome']} · {detail}")
+                    else:
+                        detail = result.get("reason") or (f"PNG {result.get('imported_textures', 0)}개 · "
+                                                          f"PCK {'PASS' if result.get('resource_pack') else '미검증'} · "
+                                                          f"{result['gui']}")
+                        state.set(f"오프라인 사전 검증 {result['outcome']} · {detail}")
+                except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                    state.set(str(error))
+
+            Thread(target=worker, daemon=False).start()
+            panel.after(150, poll)
+
+        submit()
 
     ttk.Label(panel, text="등록 기준의 PNG 가져오기, 리소스 팩 실행, 소유 테스트 창 캡처를 검사합니다.",
               wraplength=580).pack(anchor="w")
@@ -282,6 +330,11 @@ def _game_preflight(panel, runner, state):
     button.pack(anchor="w")
     export_button = ttk.Button(panel, text="Windows EXE 내보내기 및 오프라인 검증", command=lambda: start(True))
     export_button.pack(anchor="w")
+    online_button = ttk.Button(panel, text="게임 온라인 개발 검토", command=lambda: start(online=True))
+    online_button.pack(anchor="w")
+    resume_button = ttk.Button(panel, text="게임 중단 후보 재개 검토",
+                               command=lambda: start(online=True, resume=True))
+    resume_button.pack(anchor="w")
     ttk.Button(panel, text="닫기 / 중단", command=close).pack(anchor="w")
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: (close(), "break")[1])
