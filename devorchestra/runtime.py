@@ -100,7 +100,7 @@ def last_run(events):
         if events[index]["kind"] == "run_started":
             return [e for e in events[index:]
                     if not e["kind"].startswith(("session_", "shutdown_", "mxc_diagnostic_",
-                                                 "native_inspection_", "native_manager_", "supervised_",
+                                                 "native_inspection_", "native_manager_", "native_egress_trial_", "supervised_",
                                                  "gui_validation_", "gui_build_", "gui_session_", "build_verifier_", "sdk_install_",
                                                  "subscription_developer_", "subscription_cycle_",
                                                  "subscription_session_", "subscription_usage_", "onboarding_"))]
@@ -122,6 +122,10 @@ def native_unresolved(events):
             pending.add(("manager", event["request_id"]))
         elif event["kind"] == "native_manager_result":
             pending.discard(("manager", event["request_id"]))
+        elif event["kind"] == "native_egress_trial_intent":
+            pending.add(("egress-trial", event["request_id"]))
+        elif event["kind"] == "native_egress_trial_cleanup_verified":
+            pending.discard(("egress-trial", event["request_id"]))
         elif event["kind"] == "subscription_developer_intent":
             pending.add(("subscription-developer", event["run_id"]))
         elif event["kind"] == "subscription_developer_result":

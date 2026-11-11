@@ -39,6 +39,11 @@ struct Handle {
     Handle(const Handle&) = delete;
     Handle& operator=(const Handle&) = delete;
 };
+struct PilotMutex {
+    Handle handle;
+    bool owned = false;
+    ~PilotMutex() { if (owned) ReleaseMutex(handle.value); }
+};
 struct Engine {
     HANDLE value = nullptr;
     Engine() { check(FwpmEngineOpen0(nullptr, RPC_C_AUTHN_WINNT, nullptr, nullptr, &value), "WFP_OPEN"); }
@@ -152,7 +157,7 @@ static void absent(HANDLE engine) {
 }
 
 static void install(HANDLE engine, const std::wstring& sid, const std::wstring& executable,
-                    unsigned short ipv4, unsigned short ipv6) {
+                    unsigned short ipv4, unsigned short ipv6, const std::wstring& tag) {
     Descriptor match(L"D:P(A;;0x00000001;;;" + sid + L")");
     FWP_BYTE_BLOB user{GetSecurityDescriptorLength(match.data), reinterpret_cast<UINT8*>(match.data)};
     FWP_BYTE_BLOB* app = nullptr;
@@ -162,12 +167,12 @@ static void install(HANDLE engine, const std::wstring& sid, const std::wstring& 
         absent(engine);
         FWPM_PROVIDER0 provider{};
         provider.providerKey = Provider;
-        provider.displayData.name = const_cast<wchar_t*>(Tag);
+        provider.displayData.name = const_cast<wchar_t*>(tag.c_str());
         provider.flags = FWPM_PROVIDER_FLAG_PERSISTENT;
         check(FwpmProviderAdd0(engine, &provider, nullptr), "WFP_PROVIDER_ADD");
         FWPM_SUBLAYER0 sub{};
         sub.subLayerKey = Sublayer; sub.providerKey = &Provider;
-        sub.displayData.name = const_cast<wchar_t*>(Tag);
+        sub.displayData.name = const_cast<wchar_t*>(tag.c_str());
         sub.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
         sub.weight = 0x100;
         check(FwpmSubLayerAdd0(engine, &sub, nullptr), "WFP_SUBLAYER_ADD");
@@ -204,7 +209,7 @@ static void install(HANDLE engine, const std::wstring& sid, const std::wstring& 
                 condition[1].matchType = comparison;
                 FWPM_FILTER0 filter{};
                 filter.filterKey = filter_key(index++);
-                filter.displayData.name = const_cast<wchar_t*>(Tag);
+                filter.displayData.name = const_cast<wchar_t*>(tag.c_str());
                 filter.providerKey = &Provider;
                 filter.subLayerKey = Sublayer;
                 filter.layerKey = v6 ? FWPM_LAYER_ALE_AUTH_CONNECT_V6 : FWPM_LAYER_ALE_AUTH_CONNECT_V4;
@@ -224,7 +229,7 @@ static void install(HANDLE engine, const std::wstring& sid, const std::wstring& 
     FwpmFreeMemory0(reinterpret_cast<void**>(&app));
 }
 
-static void verify_filters(HANDLE engine) {
+static void verify_filters(HANDLE engine, const std::wstring& tag) {
     for (unsigned index = 0; index < 16; ++index) {
         auto key = filter_key(index);
         FWPM_FILTER0* filter = nullptr;
@@ -232,15 +237,25 @@ static void verify_filters(HANDLE engine) {
         const bool valid = filter->providerKey && IsEqualGUID(*filter->providerKey, Provider) &&
             IsEqualGUID(filter->subLayerKey, Sublayer) && (filter->flags & FWPM_FILTER_FLAG_PERSISTENT) &&
             filter->action.type == FWP_ACTION_BLOCK && filter->numFilterConditions == 2 &&
-            filter->displayData.name && wcscmp(filter->displayData.name, Tag) == 0;
+            filter->displayData.name && tag == filter->displayData.name;
         FwpmFreeMemory0(reinterpret_cast<void**>(&filter));
         if (!valid) throw Failure{"WFP_OWNERSHIP", ERROR_INVALID_DATA};
     }
 }
 
-static void remove_filters(HANDLE engine) {
+static void remove_filters(HANDLE engine, const std::wstring& tag) {
     Transaction transaction(engine);
-    verify_filters(engine);
+    verify_filters(engine, tag);
+    FWPM_PROVIDER0* provider = nullptr;
+    check(FwpmProviderGetByKey0(engine, &Provider, &provider), "WFP_PROVIDER_READ");
+    const bool same_provider = provider->displayData.name && tag == provider->displayData.name;
+    FwpmFreeMemory0(reinterpret_cast<void**>(&provider));
+    FWPM_SUBLAYER0* sublayer = nullptr;
+    check(FwpmSubLayerGetByKey0(engine, &Sublayer, &sublayer), "WFP_SUBLAYER_READ");
+    const bool same_sublayer = sublayer->displayData.name && tag == sublayer->displayData.name &&
+        sublayer->providerKey && IsEqualGUID(*sublayer->providerKey, Provider);
+    FwpmFreeMemory0(reinterpret_cast<void**>(&sublayer));
+    if (!same_provider || !same_sublayer) throw Failure{"WFP_OWNERSHIP", ERROR_INVALID_DATA};
     for (unsigned index = 0; index < 16; ++index) {
         auto key = filter_key(index);
         check(FwpmFilterDeleteByKey0(engine, &key), "WFP_FILTER_DELETE");
@@ -269,12 +284,12 @@ static DWORD token_elevation(HANDLE process, const std::wstring* expected_sid = 
     return state.TokenIsElevated;
 }
 
-static void open_receipt() {
+static void open_receipt(const wchar_t* name = L"pilot-result.txt") {
     wchar_t path[32768]{};
     const auto size = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
     if (!size || size >= ARRAYSIZE(path)) throw Failure{"RECEIPT_PATH", ERROR_PATH_NOT_FOUND};
     const auto directory = std::wstring(path).substr(0, std::wstring(path).find_last_of(L'\\'));
-    const auto filename = directory + L"\\pilot-result.txt";
+    const auto filename = directory + L"\\" + name;
     PSID owner = nullptr;
     PSECURITY_DESCRIPTOR original = nullptr;
     check(GetNamedSecurityInfoW(const_cast<wchar_t*>(directory.c_str()), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
@@ -394,32 +409,119 @@ static DWORD run_client(const std::wstring& ps, wchar_t* password, const std::ws
     return exit_code;
 }
 
-static bool own_account() {
+static bool own_account(const std::wstring& tag, bool must_be_disabled = false) {
     LPBYTE info = nullptr;
     const auto status = NetUserGetInfo(nullptr, Account, 1, &info);
     if (status == NERR_UserNotFound) return false;
     check(status, "ACCOUNT_READ");
     auto account = reinterpret_cast<USER_INFO_1*>(info);
-    const bool owned = account->usri1_comment && wcscmp(account->usri1_comment, Tag) == 0;
+    const bool owned = account->usri1_comment && tag == account->usri1_comment &&
+        (!must_be_disabled || (account->usri1_flags & UF_ACCOUNTDISABLE));
     NetApiBufferFree(info);
     if (!owned) throw Failure{"ACCOUNT_NAME_IN_USE", ERROR_ALREADY_EXISTS};
     return true;
 }
 
-int wmain(int argc, wchar_t**) {
-    if (argc != 1) { report("UNSUPPORTED_ARGUMENTS", ERROR_INVALID_PARAMETER); return 2; }
+static bool directory_present(const std::wstring& path) {
+    const auto attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const auto error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return false;
+        throw Failure{"PILOT_PATH_QUERY", error};
+    }
+    if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        throw Failure{"UNSAFE_PILOT_DIRECTORY", ERROR_INVALID_DATA};
+    return true;
+}
+
+static void trial_marker(const std::wstring& path, const std::wstring& id, bool create) {
+    Handle file;
+    file.value = CreateFileW(path.c_str(), create ? GENERIC_WRITE : GENERIC_READ, 0, nullptr,
+                             create ? CREATE_NEW : OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file.value == INVALID_HANDLE_VALUE) {
+        file.value = nullptr;
+        throw Failure{"TRIAL_MARKER_OPEN", GetLastError()};
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    require(GetFileInformationByHandle(file.value, &info), "TRIAL_MARKER_IDENTITY");
+    if (info.nNumberOfLinks != 1 || info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+        throw Failure{"UNSAFE_TRIAL_MARKER", ERROR_INVALID_DATA};
+    DWORD transferred = 0;
+    const DWORD bytes = static_cast<DWORD>(id.size() * sizeof(wchar_t));
+    if (create) {
+        require(WriteFile(file.value, id.data(), bytes, &transferred, nullptr) && transferred == bytes &&
+                FlushFileBuffers(file.value), "TRIAL_MARKER_WRITE");
+    } else {
+        wchar_t observed[33]{};
+        require(ReadFile(file.value, observed, sizeof(observed), &transferred, nullptr), "TRIAL_MARKER_READ");
+        if (transferred != bytes || id != std::wstring(observed, 32))
+            throw Failure{"TRIAL_MARKER_MISMATCH", ERROR_INVALID_DATA};
+    }
+}
+
+static void recover_disabled_trial(HANDLE engine, const std::wstring& parent, const std::wstring& root,
+                                   const std::wstring& id, const std::wstring& tag) {
+    const bool exists = directory_present(parent);
+    const auto marker = parent + L"\\P2116-disabled-trial.id";
+    if (exists) trial_marker(marker, id, false);
+    const bool account = own_account(tag, true);
+    FWPM_PROVIDER0* provider = nullptr;
+    const auto status = FwpmProviderGetByKey0(engine, &Provider, &provider);
+    FwpmFreeMemory0(reinterpret_cast<void**>(&provider));
+    if (status == ERROR_SUCCESS) {
+        if (!exists || !account) throw Failure{"TRIAL_OWNERSHIP_INCOMPLETE", ERROR_INVALID_DATA};
+        verify_filters(engine, tag);
+        report("POLICY_PRESENT_AFTER_FAULT", 16);
+        remove_filters(engine, tag);
+    } else {
+        absent(engine);
+    }
+    if (account) {
+        if (!exists) throw Failure{"TRIAL_MARKER_REQUIRED", ERROR_INVALID_DATA};
+        check(NetUserDel(nullptr, Account), "REMOVE_DISABLED_OWNED_ACCOUNT");
+    }
+    if (exists) {
+        if (directory_present(root)) require(RemoveDirectoryW(root.c_str()), "REMOVE_EMPTY_PILOT_DIRECTORY");
+        require(DeleteFileW(marker.c_str()), "REMOVE_OWNED_TRIAL_MARKER");
+        require(RemoveDirectoryW(parent.c_str()), "REMOVE_EMPTY_PILOT_PARENT");
+    }
+    { Engine independent; absent(independent.value); }
+    if (own_account(tag, true) || directory_present(parent)) throw Failure{"RECOVERY_READBACK", ERROR_BUSY};
+    report("DISABLED_TRIAL_ABSENCE_VERIFIED", 1);
+}
+
+static bool valid_id(const std::wstring& id) {
+    return id.size() == 32 && id.find_first_not_of(L"0123456789abcdef") == std::wstring::npos;
+}
+
+int wmain(int argc, wchar_t** argv) {
+    const bool fault = argc == 3 && wcscmp(argv[1], L"--crash-before-enable") == 0;
+    const bool recover = argc == 4 && wcscmp(argv[1], L"--recover-disabled") == 0;
+    const std::wstring id = (fault || recover) ? argv[2] : L"";
+    if (argc != 1 && ((!fault && !recover) || !valid_id(id) || (recover && !valid_id(argv[3])))) {
+        report("UNSUPPORTED_ARGUMENTS", ERROR_INVALID_PARAMETER); return 2;
+    }
+    const std::wstring tag = id.empty() ? Tag : std::wstring(Tag) + L" " + id;
     wchar_t password[44] = L"aB9!";
     bool account_created = false, policy_attempted = false, policy_installed = false;
     bool parent_created = false, root_created = false, home_created = false;
     bool cleanup_allowed = true, passed = false;
-    std::wstring parent, root, home, sid;
+    std::wstring parent, root, home, sid, owner_marker;
+    bool marker_created = false;
+    PilotMutex lease;
     try {
         if (!token_elevation(GetCurrentProcess())) throw Failure{"EXPLICIT_UAC_REQUIRED", ERROR_ACCESS_DENIED};
-        open_receipt();
+        lease.handle.value = CreateMutexW(nullptr, FALSE, L"Global\\DevOrchestra.P2116.WfpPilot.v1");
+        require(lease.handle.value != nullptr, "PILOT_MUTEX");
+        const auto wait = WaitForSingleObject(lease.handle.value, 0);
+        if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED) throw Failure{"PILOT_BUSY", ERROR_BUSY};
+        lease.owned = true;
+        const std::wstring receipt = fault ? L"pilot-fault-result.txt" : recover ?
+            std::wstring(L"pilot-recovery-") + argv[3] + L".txt" : L"pilot-result.txt";
+        open_receipt(receipt.c_str());
+        if (!id.empty()) { std::printf("TRIAL=%ls\n", id.c_str()); std::fflush(stdout); }
         report("ELEVATED_PILOT_STARTED", 1);
         Engine engine;
-        absent(engine.value);
-        if (own_account()) throw Failure{"ACCOUNT_NAME_IN_USE", ERROR_ALREADY_EXISTS};
         wchar_t data[MAX_PATH]{}, system[MAX_PATH]{};
         if (!GetEnvironmentVariableW(L"ProgramData", data, ARRAYSIZE(data)) ||
             !GetSystemDirectoryW(system, ARRAYSIZE(system))) throw Failure{"DIRECTORY_DISCOVERY", ERROR_PATH_NOT_FOUND};
@@ -434,10 +536,18 @@ int wmain(int argc, wchar_t**) {
             throw Failure{"PROGRAMDATA_PATH", ERROR_INVALID_DATA};
         parent = standard + L"\\DevOrchestra";
         root = parent + L"\\P2116";
+        if (recover) { recover_disabled_trial(engine.value, parent, root, id, tag); return 0; }
+        absent(engine.value);
+        if (own_account(tag)) throw Failure{"ACCOUNT_NAME_IN_USE", ERROR_ALREADY_EXISTS};
         Descriptor admins(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
         SECURITY_ATTRIBUTES access{sizeof(access), admins.data, FALSE};
         require(CreateDirectoryW(parent.c_str(), &access), "PARENT_MUST_BE_NEW");
         parent_created = true;
+        if (fault) {
+            owner_marker = parent + L"\\P2116-disabled-trial.id";
+            trial_marker(owner_marker, id, true);
+            marker_created = true;
+        }
         require(CreateDirectoryW(root.c_str(), &access), "PILOT_DIRECTORY_CREATE");
         root_created = true;
         BYTE random[32]{};
@@ -448,11 +558,25 @@ int wmain(int argc, wchar_t**) {
         SecureZeroMemory(random, sizeof(random));
         USER_INFO_1 user{};
         user.usri1_name = const_cast<wchar_t*>(Account); user.usri1_password = password;
-        user.usri1_priv = USER_PRIV_USER; user.usri1_comment = const_cast<wchar_t*>(Tag);
+        user.usri1_priv = USER_PRIV_USER; user.usri1_comment = const_cast<wchar_t*>(tag.c_str());
         user.usri1_flags = UF_SCRIPT | UF_NORMAL_ACCOUNT | UF_DONT_EXPIRE_PASSWD | UF_ACCOUNTDISABLE;
         check(NetUserAdd(nullptr, 1, reinterpret_cast<LPBYTE>(&user), nullptr), "CREATE_DISABLED_STANDARD_ACCOUNT");
         account_created = true;
         sid = account_sid();
+        if (fault) {
+            WSADATA winsock{};
+            check(WSAStartup(MAKEWORD(2, 2), &winsock), "WINSOCK_INIT");
+            const Listener allow4(AF_INET), allow6(AF_INET6);
+            const auto ps = std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+            policy_attempted = true;
+            install(engine.value, sid, ps, allow4.port, allow6.port, tag);
+            policy_installed = true;
+            { Engine independent; verify_filters(independent.value, tag); }
+            if (!own_account(tag, true)) throw Failure{"DISABLED_ACCOUNT_REQUIRED", ERROR_INVALID_DATA};
+            report("FAULT_BEFORE_ACCOUNT_ENABLE", 1);
+            require(TerminateProcess(GetCurrentProcess(), 86), "FAULT_INJECTION");
+            throw Failure{"FAULT_PROCESS_STILL_RUNNING", ERROR_BUSY};
+        }
         Descriptor work_access(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200A9;;;" + sid + L")");
         require(SetFileSecurityW(root.c_str(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                                  work_access.data), "PILOT_DIRECTORY_ACL");
@@ -466,10 +590,10 @@ int wmain(int argc, wchar_t**) {
         const Listener allow4(AF_INET), deny4(AF_INET), allow6(AF_INET6), deny6(AF_INET6);
         const auto ps = std::wstring(system) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
         policy_attempted = true;
-        install(engine.value, sid, ps, allow4.port, allow6.port);
+        install(engine.value, sid, ps, allow4.port, allow6.port, tag);
         policy_installed = true;
         report("POLICY_INSTALLED", 16);
-        { Engine independent; verify_filters(independent.value); }
+        { Engine independent; verify_filters(independent.value, tag); }
         report("POLICY_READBACK", 16);
         USER_INFO_1008 flags{UF_SCRIPT | UF_NORMAL_ACCOUNT | UF_DONT_EXPIRE_PASSWD};
         check(NetUserSetInfo(nullptr, Account, 1008, reinterpret_cast<LPBYTE>(&flags), nullptr), "ENABLE_STANDARD_ACCOUNT");
@@ -502,7 +626,7 @@ int wmain(int argc, wchar_t**) {
     SecureZeroMemory(password, sizeof(password));
     try {
         if (account_created) {
-            if (!own_account() || (!sid.empty() && account_sid() != sid))
+            if (!own_account(tag) || (!sid.empty() && account_sid() != sid))
                 throw Failure{"ACCOUNT_OWNERSHIP_CHANGED", ERROR_INVALID_DATA};
             USER_INFO_1008 flags{UF_SCRIPT | UF_NORMAL_ACCOUNT | UF_DONT_EXPIRE_PASSWD | UF_ACCOUNTDISABLE};
             check(NetUserSetInfo(nullptr, Account, 1008, reinterpret_cast<LPBYTE>(&flags), nullptr), "DISABLE_OWNED_ACCOUNT");
@@ -510,14 +634,14 @@ int wmain(int argc, wchar_t**) {
         if (!cleanup_allowed) throw Failure{"RECOVERY_REQUIRED", ERROR_BUSY};
         if (policy_attempted) {
             Engine engine;
-            if (policy_installed) remove_filters(engine.value);
+            if (policy_installed) remove_filters(engine.value, tag);
             else absent(engine.value);
             report("WFP_ABSENCE_VERIFIED", 1);
         }
         if (account_created) {
-            if (!own_account()) throw Failure{"ACCOUNT_OWNERSHIP_CHANGED", ERROR_INVALID_DATA};
+            if (!own_account(tag)) throw Failure{"ACCOUNT_OWNERSHIP_CHANGED", ERROR_INVALID_DATA};
             check(NetUserDel(nullptr, Account), "REMOVE_OWNED_ACCOUNT");
-            if (own_account()) throw Failure{"ACCOUNT_STILL_PRESENT", ERROR_BUSY};
+            if (own_account(tag)) throw Failure{"ACCOUNT_STILL_PRESENT", ERROR_BUSY};
             report("ACCOUNT_ABSENCE_VERIFIED", 1);
         }
         if (home_created) {
@@ -527,6 +651,7 @@ int wmain(int argc, wchar_t**) {
             require(RemoveDirectoryW(home.c_str()), "REMOVE_EMPTY_PILOT_HOME");
         }
         if (root_created) require(RemoveDirectoryW(root.c_str()), "REMOVE_EMPTY_PILOT_DIRECTORY");
+        if (marker_created) require(DeleteFileW(owner_marker.c_str()), "REMOVE_OWNED_TRIAL_MARKER");
         if (parent_created) require(RemoveDirectoryW(parent.c_str()), "REMOVE_EMPTY_PILOT_PARENT");
         if (root_created) report("PILOT_DIRECTORIES_REMOVED", 1);
     } catch (Failure error) { report(error.operation, error.error); return 3; }

@@ -95,6 +95,11 @@ def main():
     native_command.add_argument("--archive", required=True)
     native_command.add_argument("--powershell-sha256", required=True)
     commands.add_parser("native-egress-preflight", help="Read Windows token facts without modifying network policy")
+    egress_trial = commands.add_parser("native-egress-trial", help="Review or explicitly approve a disabled-account WFP trial")
+    egress_trial.add_argument("--binary", required=True)
+    egress_trial.add_argument("--expires", type=int, required=True)
+    egress_trial.add_argument("--approve")
+    egress_trial.add_argument("--recover")
     gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
     gui_verify.add_argument("--registered", action="store_true")
@@ -190,6 +195,12 @@ def main():
             print(canonical(preflight()))
             return 2
         ledger = Ledger.for_project()
+        if args.action == "native-egress-trial":
+            from .native_egress_trial import trial
+
+            result = trial(ledger, args.binary, args.expires, args.approve, args.recover)
+            print(canonical(result))
+            return 2 if result["status"] == "CLEANUP_BLOCKED" else 0
         if args.action == "original-apply":
             from . import original_apply
 
