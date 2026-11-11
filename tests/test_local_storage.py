@@ -38,6 +38,22 @@ class LocalStorageTests(unittest.TestCase):
         finally:
             os.chdir(original)
 
+    def test_portable_update_shares_user_state_and_retains_existing_sidecar(self):
+        portable = self.root / "v1"
+        portable.mkdir()
+        updated = self.root / "v2"
+        updated.mkdir()
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "user")}), \
+                patch("sys.frozen", True, create=True):
+            with patch("sys.executable", str(portable / "DevOrchestra.exe")):
+                initial = Ledger.for_project()
+                Runner(initial).command("init")
+            with patch("sys.executable", str(updated / "DevOrchestra.exe")):
+                self.assertEqual(Ledger.for_project().path, initial.path)
+                self.assertEqual(Ledger.for_project().storage_status()["status"], "READY")
+                (updated / ".ai-local").mkdir()
+                self.assertEqual(Ledger.for_project().state_boundary, updated / ".ai-local")
+
     def test_new_layout_preserves_ledger_instructions_and_shutdown(self):
         ledger = Ledger.for_project(self.root)
         self.assertFalse(ledger.state_boundary.exists())

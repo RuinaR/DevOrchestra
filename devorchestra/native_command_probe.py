@@ -5,7 +5,6 @@ from hashlib import file_digest
 import json
 from pathlib import Path
 import re
-from shutil import which
 import socket
 import stat
 from tempfile import mkdtemp
@@ -90,14 +89,9 @@ def _general_thread(server, work):
 
 
 def _fixture_git_binary():
-    from .mxc_launcher import _signed_offline
+    from .project_onboarding import _git_tools
 
-    entry = Path(which("git.exe") or "")
-    tool = entry.parent.parent / "ucrt64" / "bin" / "git.exe"
-    if (not entry.is_relative_to(_known_folder(0x26) / "WindowsApps")
-            or entry.parent.name.casefold() != "cmd" or not _signed_offline(tool)):
-        raise Blocked("Signed packaged Git fixture tool unavailable")
-    return tool
+    return _git_tools()[1]
 
 
 def _prepare_git_fixture(work, original, scratch, environment, check):

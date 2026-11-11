@@ -1,5 +1,5 @@
 """Build a windowed x64 release with an already installed PyInstaller."""
-from hashlib import sha256
+from hashlib import file_digest, sha256
 from importlib.metadata import PackageNotFoundError, version
 import json
 import os
@@ -11,12 +11,14 @@ import subprocess
 import sys
 from uuid import uuid4
 from time import monotonic
+from zipfile import ZIP_DEFLATED, ZipFile
 
 
 def _package(root, output, argv):
     import ctypes as c
     from ctypes import wintypes as w
     import msvcrt
+    import PyInstaller
     from devorchestra.job_probe import (
         ExtendedLimits, ProcessInfo, _api, _cleanup, _create_owned, _require, _wait_empty,
         JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -32,10 +34,12 @@ def _package(root, output, argv):
         limits.basic.active_limit = 8
         limits.job_memory = 1024 * 1024 * 1024
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
-        environment = {key: os.environ[key] for key in ("SystemRoot", "WINDIR", "PATH") if key in os.environ}
+        environment = {key: os.environ[key] for key in
+                       ("SystemRoot", "WINDIR", "PATH", "TCL_LIBRARY", "TK_LIBRARY") if key in os.environ}
         build_home = output / "home"
         build_home.mkdir()
         environment.update(TEMP=str(output), TMP=str(output), USERPROFILE=str(build_home),
+                           PYTHONPATH=str(Path(PyInstaller.__file__).resolve().parent.parent),
                            PYINSTALLER_CONFIG_DIR=str(output / "cache"))
         with (open(os.devnull, "rb") as stdin, (output / "build.stdout.log").open("xb") as stdout,
               (output / "build.log").open("xb") as stderr):
@@ -149,7 +153,18 @@ def main():
         executable.with_suffix(".json").write_text(json.dumps(info, indent=2), encoding="utf-8")
         if removal["status"] != "REMOVED":
             raise SystemExit("PACKAGE_CLEANUP_UNCONFIRMED")
-        print(executable)
+        bundle = output / f"DevOrchestra-{release}-windows-x64.zip"
+        with ZipFile(bundle, "x", compression=ZIP_DEFLATED) as archive:
+            archive.write(executable, "DevOrchestra.exe")
+            archive.write(executable.with_suffix(".json"), "DevOrchestra.json")
+            archive.write(root / "README.md", "README.md")
+        with ZipFile(bundle) as archive:
+            if archive.testzip() is not None:
+                raise SystemExit("PORTABLE_ZIP_INVALID")
+        with bundle.open("rb") as stream:
+            archive_hash = file_digest(stream, "sha256").hexdigest()
+        bundle.with_suffix(".zip.sha256").write_text(f"{archive_hash}  {bundle.name}\n", encoding="ascii")
+        print(bundle)
         print(json.dumps(info))
 
 

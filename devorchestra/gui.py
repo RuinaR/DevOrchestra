@@ -287,6 +287,7 @@ class CommandCenter:
         settings = section(body, "설정")
         settings.grid(row=3, column=0, sticky="ew", padx=18)
         self.action_grid(settings, (("초기 설정", self.setup_wizard), ("작업 지침", self.instruction_settings),
+                                    ("Codex 환경 및 로그인", self.codex_setup_panel),
                                     ("프로젝트 설정", lambda: self.edit_settings("edit")),
                                     ("공용 예산", lambda: self.edit_settings("limits")),
                                     ("토큰 예비량", lambda: self.edit_settings("reserve")),
@@ -1088,9 +1089,9 @@ class CommandCenter:
         wizard = self.panel()
         wizard.title("DevOrchestra · 초기 설정")
         wizard.configure(bg=PANEL, padx=12, pady=12)
-        label(wizard, "저장소 준비 → 프로젝트 등록 → 요구사항 추가 → 감독형 Codex 작업",
+        label(wizard, "저장소 준비 → Codex 연결 → 프로젝트 등록 → 개발 검토",
               size=12, bold=True, wraplength=520).pack(fill="x", pady=6)
-        label(wizard, "기본 작업 지침은 포함되어 있습니다. 개인 지침은 프로젝트 등록 후 연결할 수 있습니다.",
+        label(wizard, f"사용자 저장 위치\n{self.reader.ledger.state_boundary}",
               wraplength=520).pack(fill="x", pady=6)
         storage = self.reader.ledger.storage_status()
         status = label(wizard, "저장소가 준비됐습니다." if storage["status"] == "READY"
@@ -1109,11 +1110,16 @@ class CommandCenter:
             wizard.destroy()
             self.refresh()
             if self.view and not any(key not in PROJECTS for key in self.view["project_names"]):
-                self.register_project()
+                self.codex_setup_panel()
 
         ttk.Button(wizard, text="저장소 준비", command=save,
                    state="normal" if storage["status"] != "BLOCKED"
                    else "disabled").pack(anchor="e")
+
+    def codex_setup_panel(self):
+        from .gui_codex_setup import show
+
+        show(self)
 
     def register_project(self, *, edit=False):
         if self.view is None:
@@ -1750,6 +1756,27 @@ class CommandCenter:
             status.set("원장이 준비되지 않았습니다.")
 
     def development_start(self):
+        if not self.view or not self.view["registration"]:
+            return
+        project_id = self.view["project_id"]
+        panel = self.panel()
+        panel.title("DevOrchestra · 개발 시작")
+        label(panel, "등록 프로젝트의 개발 범위를 검토하고 실행을 승인하세요.",
+              bg=BG, wraplength=480).pack(fill="x", pady=8)
+
+        def native():
+            from .gui_registered_cycle import show
+
+            panel.destroy()
+            show(self, project_id)
+
+        for title, action in (("등록 프로젝트 Codex 자동 개발", native),
+                              ("Git 온보딩", self.onboarding_panel),
+                              ("Codex 환경 및 로그인", self.codex_setup_panel),
+                              ("고급 실행 및 진단", self._advanced_development_start)):
+            ttk.Button(panel, text=title, command=action).pack(fill="x", pady=2)
+
+    def _advanced_development_start(self):
         from .adapter import ModelBackend, manager_backend_status
 
         if not self.view or not self.view["registration"]:
@@ -1794,13 +1821,6 @@ class CommandCenter:
         ttk.Button(panel, text="감독형 Codex 작업으로 계속", command=supervised).pack(anchor="e")
         ttk.Button(panel, text="GUI 검증 및 보고서", command=self.gui_verification_report).pack(anchor="e")
         ttk.Button(panel, text="구독 Manager 계획 승인", command=lambda: self.subscription_manager(project_id)).pack(anchor="e")
-        def native():
-            from .gui_registered_cycle import show
-
-            panel.destroy()
-            show(self, project_id)
-
-        ttk.Button(panel, text="등록 프로젝트 Codex 자동 개발", command=native).pack(anchor="e")
 
     def subscription_manager(self, project_id):
         from .chatgpt_subscription import AccountStore
@@ -2598,7 +2618,8 @@ def main():
     except (Blocked, OSError):
         root = tk.Tk()
         root.title("DevOrchestra")
-        ttk.Label(root, text="로컬 저장소 · BLOCKED · .ai-local 경로를 확인하세요.").pack(padx=20, pady=20)
+        ttk.Label(root, text="사용자 저장소를 열 수 없습니다. 로컬 AppData 또는 기존 .ai-local 폴더의 권한을 확인하세요.",
+                  wraplength=470).pack(padx=20, pady=20)
         root.mainloop()
         return
     root = tk.Tk()

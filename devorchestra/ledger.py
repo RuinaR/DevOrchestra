@@ -49,13 +49,20 @@ class Ledger:
         """Resolve default state from this source checkout, independent of cwd."""
         if os.name != "nt":
             raise Blocked("Windows local storage required")
-        if project_root is None:
-            project_root = (Path(sys.executable).absolute().parent if getattr(sys, "frozen", False)
-                            else Path(__file__).absolute().parent.parent)
-        check_path(project_root)
-        if not project_root.is_dir():
-            raise Blocked("DevOrchestra project root unavailable")
-        root = project_root / ".ai-local"
+        if project_root is None and getattr(sys, "frozen", False):
+            legacy = Path(sys.executable).absolute().parent / ".ai-local"
+            if legacy.exists():
+                root = legacy
+            else:
+                local = Path(os.environ.get("LOCALAPPDATA", ""))
+                check_path(local)
+                root = local / "DevOrchestra" / ".ai-local"
+        else:
+            project_root = project_root or Path(__file__).absolute().parent.parent
+            check_path(project_root)
+            if not project_root.is_dir():
+                raise Blocked("DevOrchestra project root unavailable")
+            root = project_root / ".ai-local"
         check_path(root)
         if root.exists() and not root.is_dir():
             raise Blocked("Local storage root conflicts with a file")
@@ -133,7 +140,7 @@ class Ledger:
                 return
             if status != "NOT_INITIALIZED":
                 raise Blocked("Local storage is incomplete or damaged; initialization blocked")
-            self.local_root.mkdir()
+            self.local_root.mkdir(parents=True)
             for name in LOCAL_DIRECTORIES:
                 self.local_directory(name, create=True)
         self.path.parent.mkdir(parents=True, exist_ok=True)

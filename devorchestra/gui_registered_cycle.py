@@ -7,7 +7,7 @@ from time import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from . import cycle_progress, game_pilot, registered_cycle, replica_readiness
+from . import codex_setup, cycle_progress, game_pilot, registered_cycle, replica_readiness
 from .catalog import Catalog
 from .ledger import digest
 
@@ -67,6 +67,9 @@ def show(center, project):
         entry.insert(0, default)
         entry.grid(row=index, column=1, sticky="ew")
     inputs.columnconfigure(1, weight=1)
+    saved_archive = codex_setup.archive_path(runner.ledger)
+    if saved_archive.is_file():
+        entries["archive"].insert(0, str(saved_archive))
 
     def archive():
         path = filedialog.askopenfilename(parent=panel, filetypes=[("Codex ZIP", "*.zip")])
@@ -279,7 +282,11 @@ def _game_preflight(center, panel, runner, state):
             except (RuntimeError, ValueError) as error:
                 state.set(f"실행 한도 확인 · {error}")
                 return
-        archive = None if resume else filedialog.askopenfilename(parent=panel, filetypes=[("Codex ZIP", "*.zip")])
+        archive = None
+        if not resume:
+            saved_archive = codex_setup.archive_path(runner.ledger)
+            archive = (str(saved_archive) if saved_archive.is_file() else
+                       filedialog.askopenfilename(parent=panel, filetypes=[("Codex ZIP", "*.zip")]))
         if not resume and not archive:
             return
         cancelled.clear()

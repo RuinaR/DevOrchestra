@@ -59,23 +59,38 @@ def _git_scratch(ledger):
         raise Blocked("Onboarding Git scratch cleanup is unconfirmed")
 
 
+def _git_tools():
+    programs = _known_folder(0x26)
+    packaged = Path(which("git.exe") or "")
+    roots = [programs / "Git", _known_folder(0x1C) / "Programs" / "Git"]
+    if packaged.is_relative_to(programs / "WindowsApps") and packaged.parent.name.casefold() == "cmd":
+        roots.insert(0, packaged.parent.parent)
+    for root in roots:
+        entry = root / "cmd" / "git.exe"
+        for runtime in ("ucrt64", "mingw64"):
+            executable = root / runtime / "bin" / "git.exe"
+            if entry.is_file() and executable.is_file() and _signed_offline(entry) and _signed_offline(executable):
+                return entry, executable
+    raise Blocked("서명된 Git for Windows를 설치한 뒤 다시 실행하세요.")
+
+
 @contextmanager
 def _git(ledger, source, staging=None):
-    git = Path(which("git.exe") or "")
-    launcher = Path(which("codex.exe") or "")
-    trusted = _known_folder(0x26) / "WindowsApps"
-    if not git.is_relative_to(trusted) or git.parent.name.casefold() != "cmd":
-        raise Blocked("Onboarding needs the packaged signed Git for Windows")
+    git, executable = _git_tools()
     tool = git.parent.parent
-    executables = (git, tool / "ucrt64" / "bin" / "git.exe")
     identity = {}
-    for exe in executables:
-        if not _signed_offline(exe):
-            raise Blocked("Packaged Git signature is unverified")
-        identity["cmd/git.exe" if exe == git else "ucrt64/bin/git.exe"] = fingerprint(
-            exe, installed_executable=True)["sha256"]
-    verify_app_server_binary(launcher, approved_sha256=LAUNCHER_PIN)
+    for exe in (git, executable):
+        identity[exe.relative_to(tool).as_posix()] = fingerprint(exe, installed_executable=True)["sha256"]
     with _git_scratch(ledger) as scratch:
+        from .codex_setup import archive_path
+        from .native_command_probe import _stage_release
+
+        archive = archive_path(ledger)
+        if archive.is_file():
+            launcher = _stage_release(archive, scratch / "codex")
+        else:
+            launcher = Path(which("codex.exe") or "")
+            verify_app_server_binary(launcher, approved_sha256=LAUNCHER_PIN)
         home, output = scratch / "home", scratch / "output"
         home.mkdir()
         output.mkdir()
