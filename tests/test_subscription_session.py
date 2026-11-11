@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import ExitStack
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -6,10 +7,25 @@ from unittest.mock import patch
 from devorchestra.lease import Blocked, development_session_scope, execution_slot, held_execution_slot
 from devorchestra.ledger import Ledger, digest
 from devorchestra.runtime import Runner, require_admission
-from devorchestra import session_permissions, subscription_session
+from devorchestra import cycle_progress, session_permissions, subscription_session
+from devorchestra.replica_evidence import snapshot
 
 
 class SubscriptionSessionTests(unittest.TestCase):
+    def test_reversion_is_rejected_before_writing_an_earlier_source(self):
+        with TemporaryDirectory() as folder:
+            replica = Path(folder).resolve()
+            source = replica / "logic.py"
+            source.write_bytes(b"answer = 1\n")
+            before = snapshot(replica)
+            scope = {"seconds": 30, "tokens": 500, "replica_sha256": digest(before)}
+            session = subscription_session._Session(None, scope, "fixture", "approval", lambda: False)
+            session.check_replacement(before, {"logic.py": b"answer = 2\n"})
+            source.write_bytes(b"answer = 2\n")
+            with self.assertRaisesRegex(Blocked, "REPEATED_SOURCE"):
+                session.check_replacement(snapshot(replica), {"logic.py": b"answer = 1\n"})
+            self.assertEqual(b"answer = 2\n", source.read_bytes())
+
     def test_wall_time_expiry_and_token_limit_gate_new_roles(self):
         scope = {"project_id": "fixture-a", "seconds": 30, "tokens": 500, "replica_sha256": "initial",
                  "expires": 2000}
@@ -64,12 +80,15 @@ class SubscriptionSessionTests(unittest.TestCase):
             scope = {"ledger_head": head, "replica_sha256": "initial", "seconds": 30, "tokens": 5000,
                      "expires": 9999999999, "work_limit": None,
                      "models": dict.fromkeys(("Manager", "Developer", "Reviewer"), "fixture")}
+            criterion = next(iter(cycle_progress.freeze(["returns five"], None)))
+            scope["criteria"] = cycle_progress.freeze(["returns five"], {criterion: [{"input": 2}]})
             calls = []
 
             def execute(*args, session):
                 phase = session.phase
                 calls.append((phase, session.approval))
-                result = {"run_id": str(len(calls)), "outcome": "COMPLETED", "owned_tree": "DRAINED", "usage": 1,
+                result = {"run_id": str(len(calls)), "phase": phase, "outcome": "COMPLETED",
+                          "owned_tree": "DRAINED", "usage": 1,
                           **session.binding()}
                 if phase == "developer":
                     result["after_replica_sha256"] = f"source-{len(calls)}"
@@ -77,6 +96,7 @@ class SubscriptionSessionTests(unittest.TestCase):
                     result["decision"] = "ACCEPT_FOR_VERIFICATION"
                 if phase == "verifier":
                     result["verdict"] = "PASS"
+                    result["observations"] = [{"input": 2, "expected": 5, "actual": 5}] if len(calls) == 4 else []
                 if phase == "manager-final":
                     result["decision"] = "CONTINUE" if len(calls) == 5 else "COMPLETED"
                 return result
@@ -95,8 +115,44 @@ class SubscriptionSessionTests(unittest.TestCase):
                                                   0, {}, approval)
             expected = ["manager-planning", "developer", "reviewer", "verifier", "manager-final"]
             self.assertEqual([(phase, approval) for phase in expected * 2], calls)
-            self.assertEqual(("COMPLETED", 2, 8),
+            self.assertEqual(("USER_TEST_REQUIRED", 2, 8),
                              (result["outcome"], result["cycle_count"], result["used_reported_tokens"]))
+            events, _ = ledger.snapshot()
+            progress = [row for row in events if row["kind"] == "subscription_cycle_progress"]
+            self.assertEqual(["VERIFIED", "NOT_VERIFIED"], [row["criteria"][criterion] for row in progress])
+
+    def test_repeated_source_gets_one_new_plan_then_stops(self):
+        with TemporaryDirectory() as folder, ExitStack() as patches:
+            ledger = Ledger.for_project(Path(folder))
+            ledger.initialize()
+            _, head = ledger.snapshot()
+            scope = {"ledger_head": head, "replica_sha256": "initial", "seconds": 30, "tokens": 5000,
+                     "expires": 9999999999, "work_limit": None,
+                     "models": dict.fromkeys(("Manager", "Developer", "Reviewer"), "fixture")}
+            phases = []
+
+            def execute(*_args, session):
+                phases.append(session.phase)
+                receipt = {**session.binding(), "run_id": str(len(phases)), "owned_tree": "DRAINED", "usage": 1}
+                if session.phase == "developer":
+                    return receipt | {"outcome": "FAILED", "reason": "REPEATED_SOURCE", "response_completed": True,
+                                      "file_applied": False}
+                if len(phases) == 3:
+                    self.assertEqual("REPEATED_SOURCE", session.previous_cycle["replan_reason"])
+                return receipt | {"outcome": "COMPLETED"}
+
+            patches.enter_context(patch.object(subscription_session, "review", return_value=scope))
+            patches.enter_context(patch.object(subscription_session._Session, "check_scope"))
+            patches.enter_context(patch.object(subscription_session.manager, "read_plan", side_effect=[
+                {"approach": "replace function"}, {"approach": "check boundary condition"},
+            ]))
+            for transport in (subscription_session.manager, subscription_session.developer):
+                patches.enter_context(patch.object(transport, "review", return_value={}))
+                patches.enter_context(patch.object(transport, "run", side_effect=execute))
+            result = subscription_session.run(Runner(ledger), "fixture-a", "fixture", 0, 30, 5000, 2, {}, digest(scope))
+            self.assertEqual(["manager-planning", "developer"] * 2, phases)
+            self.assertEqual(("NO_PROGRESS", 1, 4, "DRAINED"),
+                             (result["outcome"], result["reworks"], result["used_reported_tokens"], result["owned_tree"]))
 
     def test_cancelled_session_records_stop_without_launching_role(self):
         with TemporaryDirectory() as folder:

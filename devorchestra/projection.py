@@ -139,9 +139,15 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
                      "reviewer": "Verifier", "verifier": "Manager"}.get(phase)
         if unified_role.get("decision") == "REWORK" or unified_role.get("verdict") == "FAIL":
             next_role = "Developer"
+        progress = next((event for event in reversed(tracked)
+                         if event["kind"] == "subscription_cycle_progress" and "criteria" in event), {})
+        replan = next((event for event in reversed(tracked) if event.get("replan_reason")), {})
         unified = {"run_id": unified_start["run_id"], "status": terminal["outcome"] if terminal else "RUNNING_OR_UNSETTLED",
                    "current": phase, "next": None if terminal else next_role,
                    "reworks": max(0, attempts - 1), "reported_tokens": used,
+                   "criteria_status": (terminal or {}).get("criteria_status", progress.get("criteria", {})),
+                   "newly_verified": progress.get("newly_verified", []), "regressed": progress.get("regressed", []),
+                   "replan_reason": replan.get("replan_reason"),
                    "remaining_tokens": max(0, unified_start["scope"]["tokens"] - used)}
     if selected_question:
         next_action = "ANSWER_QUESTION"

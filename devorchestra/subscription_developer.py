@@ -281,6 +281,8 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
                 before = snapshot(replica)
                 if digest(before) != approval["replica_sha256"]:
                     raise Blocked("Developer replica changed before batch apply")
+                if session:
+                    session.check_replacement(before, replacement)
                 journal = runner.ledger.local_directory("recovery", create=True) / fields["batch_journal_ref"]
                 after, observed = developer_batch.apply(replica, before, original, replacement, journal, check)
                 applied = True
@@ -308,6 +310,8 @@ def run(runner, project, manager_run, account, model, expires, approved, cancell
             before = snapshot(replica)
             if digest(before) != approval["replica_sha256"]:
                 raise Blocked("Developer replica changed before apply")
+            if session:
+                session.check_replacement(before, {approval["file"]: replacement})
             diff = "".join(unified_diff(original.decode().splitlines(keepends=True),
                                         replacement.decode().splitlines(keepends=True),
                                         f"a/{target.name}", f"b/{target.name}"))

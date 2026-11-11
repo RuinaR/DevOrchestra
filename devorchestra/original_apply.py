@@ -39,6 +39,9 @@ def _prepare(runner, project, expires):
             or digest(session["scope"]) != session["session_approval_sha256"]
             or end["session_approval_sha256"] != session["session_approval_sha256"]):
         raise Blocked("Development must start from this exact onboarding baseline")
+    criteria = session["scope"].get("criteria")
+    if criteria is not None and end.get("criteria_status") != dict.fromkeys(criteria, "VERIFIED"):
+        raise Blocked("Original write requires evidence for every frozen criterion")
     expected = [("developer", "subscription_developer_result"), *[
         (phase, "subscription_cycle_result") for phase in ("reviewer", "verifier", "manager-final")
     ]]

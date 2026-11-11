@@ -1,6 +1,7 @@
 """One owner approval for a bounded subscription development task."""
 from contextlib import ExitStack
 from hashlib import sha256
+from hashlib import sha256
 from pathlib import Path
 from time import monotonic, time
 from uuid import uuid4
@@ -13,10 +14,11 @@ from .lease import Blocked, development_session_scope, execution_slot, held_exec
 from .ledger import digest
 from .python_vectors import validate_vectors
 from .replica_evidence import snapshot
-from . import csharp_sources, mxc_sdk_project, session_permissions
+from . import csharp_sources, cycle_progress, mxc_sdk_project, session_permissions
 
 
-def review(runner, project, account, expires, seconds, tokens, reworks, vectors, *, permissions=None, cycles=None):
+def review(runner, project, account, expires, seconds, tokens, reworks, vectors, *, permissions=None, cycles=None,
+           criterion_checks=None, max_stagnant=2):
     from .runtime import require_admission
 
     if (type(expires) is not int or not time() < expires <= time() + 300
@@ -24,7 +26,8 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors,
             or (seconds is not None and (type(seconds) is not int or not 1 <= seconds <= 300))
             or (tokens is not None and (type(tokens) is not int or not 1 <= tokens <= 100_000))
             or type(reworks) is not int or not 0 <= reworks <= 5
-            or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 100))):
+            or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 100))
+            or type(max_stagnant) is not int or not 1 <= max_stagnant <= 5):
         raise Blocked("Invalid session expiry, time, token or rework limit")
     events, head = runner.ledger.snapshot()
     require_admission(events)
@@ -89,6 +92,8 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors,
             "replica_sha256": digest(image), "file": files[0], "readable_files": files, "writable_files": files,
             "baseline_sha256": digest(baseline), "manager_request_sha256": manager_review["request_sha256"],
             "goal": baseline["goal"], "acceptance": baseline["acceptance"],
+            "criteria": cycle_progress.freeze(baseline["acceptance"], criterion_checks),
+            "max_stagnant": max_stagnant, "original_apply": "SEPARATE_APPROVAL",
             "vectors_sha256": digest(vectors), "models": model_by_role,
             "permissions": authorization,
             "backend": manager.BACKEND, "tools": ["controller-replace-one-file", "fixed-python-vectors-v1"],
@@ -173,10 +178,19 @@ class _Session:
         self.usage_complete = True
         self.phase, self.rework = None, None
         self.previous_cycle = None
+        self.progress = {key: "NOT_STARTED" for key in scope.get("criteria", {})}
+        self.last_comparison = None
         self.replica_sha256 = scope["replica_sha256"]
+        self.seen_replicas = {self.replica_sha256}
 
     def binding(self):
         return {"development_session_id": self.id, "session_approval_sha256": self.approval}
+
+    def check_replacement(self, before, replacement):
+        files = {**before["files"], **{name: {"sha256": sha256(data).hexdigest(), "bytes": len(data)}
+                                      for name, data in replacement.items()}}
+        if digest({**before, "files": files}) in self.seen_replicas:
+            raise Blocked("REPEATED_SOURCE")
 
     def slot(self):
         return held_execution_slot()
@@ -237,6 +251,13 @@ class _Session:
                 raise Blocked("TOKEN_LIMIT")
         elif self.phase != "verifier":
             self.usage_complete = False
+        if (self.phase == "developer" and receipt.get("reason") in {"REPEATED_SOURCE", "Developer proposed no file change"}
+                and receipt.get("outcome") == "FAILED" and receipt.get("owned_tree") == "DRAINED"
+                and receipt.get("response_completed") is True and receipt.get("file_applied") is False
+                and all(receipt.get(key) == value for key, value in self.binding().items())):
+            if type(receipt.get("usage")) is not int:
+                raise Blocked("USAGE_UNKNOWN")
+            return
         if (receipt["outcome"] != "COMPLETED" or receipt.get("owned_tree") != "DRAINED"
                 or any(receipt.get(key) != value for key, value in self.binding().items())):
             if receipt.get("provider_usage_status") == "LIMIT_REACHED":
@@ -252,7 +273,8 @@ class _Session:
 
 
 def run(runner, project, account, expires, seconds, tokens, reworks, vectors, approved, cancelled=lambda: False, *,
-        permissions=None, revoked=lambda: False, cycles=None, on_progress=lambda _progress: None):
+        permissions=None, revoked=lambda: False, cycles=None, on_progress=lambda _progress: None,
+        criterion_checks=None, max_stagnant=2):
     from .runtime import native_unresolved, require_admission
 
     with execution_slot() as abandoned, ExitStack() as resources:
@@ -260,6 +282,10 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
         options = {"permissions": permissions} if permissions is not None else {}
         if cycles is not None:
             options["cycles"] = cycles
+        if criterion_checks is not None:
+            options["criterion_checks"] = criterion_checks
+        if max_stagnant != 2:
+            options["max_stagnant"] = max_stagnant
         scope = review(runner, project, account, expires, seconds, tokens, reworks, vectors, **options)
         if digest(scope) != approved or scope["ledger_head"] != head:
             raise Blocked("Unified development approval changed")
@@ -269,7 +295,12 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
         runner.ledger.append(len(events), head, {**fields, "kind": "subscription_session_started", "scope": scope},
                              admission=require_admission)
         resources.enter_context(development_session_scope(session_id))
-        roles, failures, outputs = [], set(), {scope["replica_sha256"]}
+        roles, failures = [], set()
+        comparisons = []
+        stagnant = 0
+        replanned = False
+        runtime = scope.get("runtime", {})
+        environment = digest(runtime.get("build", {}).get("toolchain_sha256", runtime))
         attempts = 0
         cycle_count = 0
         outcome, reason = "BLOCKED", None
@@ -278,17 +309,47 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
         def execute(phase, transport, *args):
             session.phase = phase
             session.check_scope()
-            on_progress({"phase": phase, "cycle": max(1, cycle_count), "remaining_tokens": session.remaining})
+            on_progress({"phase": phase, "cycle": max(1, cycle_count), "remaining_tokens": session.remaining,
+                         "criteria": dict(session.progress), "comparison": session.last_comparison})
+            started = monotonic()
             scope = transport.review(*args, session=session)
             if isinstance(scope, tuple):
                 scope = scope[0]
             result = transport.run(*args, digest(scope), session.stopped, session=session)
             if isinstance(result, tuple):
                 result = result[0]
+            if phase == "manager-planning" and session.progress.get(result.get("criterion_id")) == "NOT_STARTED":
+                session.progress[result["criterion_id"]] = "IN_PROGRESS"
             roles.append({"phase": phase, "run_id": result["run_id"], "sha256": digest(result),
+                          "cycle": max(1, cycle_count), "elapsed_seconds": round(monotonic() - started, 3),
                           "usage": result["usage"], "outcome": result["outcome"]})
             session.accept_receipt(result)
             return result
+
+        def record_progress(details):
+            current, tail = runner.ledger.snapshot()
+            runner.ledger.append(len(current), tail, {**fields, "kind": "subscription_cycle_progress",
+                                 "cycle": cycle_count, **details}, allow_shutdown=True)
+            comparisons.append(details)
+
+        def replan(planned, cause, feedback):
+            nonlocal replanned, attempts
+            record_progress({"replan_reason": cause, "source_sha256": session.replica_sha256,
+                             "failure_evidence_sha256": digest(feedback)})
+            if replanned or attempts >= reworks:
+                raise Blocked("NO_PROGRESS")
+            replanned = True
+            attempts += 1
+            previous = manager.read_plan(runner.ledger, project, planned["run_id"])
+            session.previous_cycle = {"replan_reason": cause, "previous_approach": previous["approach"],
+                                      "failure_evidence": feedback, "source_sha256": session.replica_sha256,
+                                      "criteria": session.progress}
+            session.rework = None
+            revised = execute("manager-planning", manager, runner, project, account, models["Manager"], expires)
+            revised_plan = manager.read_plan(runner.ledger, project, revised["run_id"])
+            if " ".join(revised_plan["approach"].casefold().split()) == " ".join(previous["approach"].casefold().split()):
+                raise Blocked("NO_PROGRESS")
+            return revised
 
         try:
             models = scope["models"]
@@ -297,28 +358,48 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
             while True:
                 changed = execute("developer", developer, runner, project, planned["run_id"],
                                   account, models["Developer"], expires)
+                if changed["outcome"] == "FAILED":
+                    planned = replan(planned, "REPEATED_SOURCE", {"developer_sha256": digest(changed)})
+                    continue
                 session.replica_sha256 = changed["after_replica_sha256"]
-                if changed["after_replica_sha256"] in outputs:
-                    raise Blocked("NO_PROGRESS")
-                outputs.add(changed["after_replica_sha256"])
+                if session.replica_sha256 in session.seen_replicas:
+                    planned = replan(planned, "REPEATED_SOURCE", {"developer_sha256": digest(changed)})
+                    continue
+                session.seen_replicas.add(session.replica_sha256)
                 prefix = runner, project, changed["run_id"]
                 reviewed = execute("reviewer", cycle, *prefix, "reviewer", account, models["Reviewer"], expires, None)
                 if reviewed["decision"] == "REWORK":
                     failure, feedback = reviewed, cycle._model_output(runner.ledger, reviewed, "reviewer")["findings"]
                 elif reviewed["decision"] == "ACCEPT_FOR_VERIFICATION":
                     verified = execute("verifier", cycle, *prefix, "verifier", None, None, expires, vectors)
+                    if "criteria" in scope:
+                        comparison = cycle_progress.compare(scope["criteria"], session.progress, verified)
+                        session.progress = comparison["criteria"]
+                        session.last_comparison = comparison
+                        stagnant = 0 if comparison["newly_verified"] and not comparison["regressed"] else stagnant + 1
+                        record_progress({**comparison, "source_sha256": session.replica_sha256,
+                                         "developer_sha256": digest(changed), "reviewer_sha256": digest(reviewed)})
                     if scope.get("gui_contract") or verified.get("sdk_gui"):
                         gui_receipt = verified
                     if verified["verdict"] == "PASS":
                         final = execute("manager-final", cycle, *prefix, "manager-final", account,
                                         models["Manager"], expires, None)
                         outcome = final["decision"]
+                        if outcome == "COMPLETED" and "criteria" in scope and any(
+                                state != "VERIFIED" for state in session.progress.values()):
+                            outcome, reason = "USER_TEST_REQUIRED", "Frozen criteria lack independent evidence"
+                            break
                         if outcome == "CONTINUE":
                             if scope["work_limit"] is not None and cycle_count >= scope["work_limit"]:
                                 outcome = "CYCLE_LIMIT"
                                 reason = "Cycle budget exhausted"
                                 break
-                            session.previous_cycle = {"final": cycle._model_output(runner.ledger, final, "manager-final"),
+                            if stagnant >= scope.get("max_stagnant", 2):
+                                planned = replan(planned, "UNCHANGED_VERIFICATION", session.last_comparison)
+                                cycle_count += 1
+                                continue
+                            final_output = cycle._model_output(runner.ledger, final, "manager-final")
+                            session.previous_cycle = {"next_task": final_output.get("next_task_or_rework"),
                                                       "verification_sha256": digest(verified),
                                                       "replica_sha256": session.replica_sha256}
                             session.rework = None
@@ -343,12 +424,11 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                                 feedback["screenshots"] = [scene["original"]["sha256"] for scene in gui_failure["scenes"]]
                 else:
                     raise Blocked("Reviewer blocked the change")
-                fingerprint = digest([failure["phase"], [
-                    [item.get("title", item.get("file")), item.get("input"), item["expected"], item["actual"]]
-                    for item in feedback["observations"]
-                ] if isinstance(feedback, dict) else feedback])
+                fingerprint = cycle_progress.failure_fingerprint(failure["phase"], feedback, environment)
                 if fingerprint in failures:
-                    raise Blocked("NO_PROGRESS")
+                    planned = replan(planned, "REPEATED_" + failure["phase"].upper(),
+                                     {"receipt_sha256": digest(failure), "feedback": feedback})
+                    continue
                 if attempts >= reworks:
                     raise Blocked("Session rework limit reached")
                 failures.add(fingerprint)
@@ -365,6 +445,7 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
         current, tail = runner.ledger.snapshot()
         result = {**fields, "kind": "subscription_session_ended", "outcome": outcome, "reason": reason,
                   "roles": roles, "reworks": attempts, "cycle_count": cycle_count,
+                  "criteria_status": session.progress, "progress_events": len(comparisons),
                   "elapsed_seconds": round(monotonic() - session.started_at, 3),
                   "remaining_reported_tokens": session.remaining,
                   "used_reported_tokens": session.reported, "usage_complete": session.usage_complete,
@@ -466,15 +547,21 @@ def run_winforms_reverification(runner, project, account, expires, seconds, toke
                     session.accept_receipt(result)
                     if phase == "verifier":
                         verified = result
+                        if "criteria" in scope:
+                            session.last_comparison = cycle_progress.compare(scope["criteria"], session.progress, result)
+                            session.progress = session.last_comparison["criteria"]
                         if verified["verdict"] != "PASS":
                             raise Blocked("Supplemental GUI verification did not pass")
                     else:
                         outcome = result["decision"]
+                        if outcome == "COMPLETED" and any(state != "VERIFIED" for state in session.progress.values()):
+                            outcome, reason = "USER_TEST_REQUIRED", "Frozen criteria lack independent evidence"
             except (Blocked, KeyboardInterrupt) as error:
                 reason = str(error) if isinstance(error, Blocked) else "CANCELLED"
         current, tail = runner.ledger.snapshot()
         result = {**fields, "kind": "subscription_session_ended", "outcome": outcome, "reason": reason,
-                  "roles": roles, "reworks": 0, "remaining_reported_tokens": session.remaining,
+                  "roles": roles, "reworks": 0, "criteria_status": session.progress,
+                  "remaining_reported_tokens": session.remaining,
                   "used_reported_tokens": session.reported, "usage_complete": session.usage_complete,
                   "owned_tree": "UNRESOLVED" if native_unresolved(current) else "DRAINED",
                   "gui": "GUI_PASS" if verified and verified["verdict"] == "PASS" else "NOT_VERIFIED",

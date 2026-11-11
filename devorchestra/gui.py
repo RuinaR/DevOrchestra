@@ -775,6 +775,13 @@ class CommandCenter:
                          f" · 다음 {unified['next'] or '없음'}"
                          f"\n재작업 {unified['reworks']}회 · 보고 사용량 {unified['reported_tokens']} 토큰"
                          f" · 남은 예산 {unified['remaining_tokens']} 토큰")
+                if unified.get("criteria_status"):
+                    goal += "\n" + " · ".join(f"{key} {state}" for key, state in unified["criteria_status"].items())
+                if unified.get("newly_verified") or unified.get("regressed"):
+                    goal += ("\n새 검증 " + ", ".join(unified["newly_verified"])
+                             + " · 회귀 " + ", ".join(unified["regressed"]))
+                if unified.get("replan_reason"):
+                    goal += f"\n재계획 · {unified['replan_reason']}"
         session = view["development"]
         if session and getattr(self, "details_visible", False):
             start, end = session["start"], session["end"]
@@ -1921,7 +1928,7 @@ class CommandCenter:
     def subscription_development(self, project_id, account, baseline):
         from queue import Empty, SimpleQueue
 
-        from . import session_permissions, subscription_session
+        from . import cycle_progress, session_permissions, subscription_session
 
         panel = self.panel()
         panel.title("구독 개발 세션 · 승인 한 번")
@@ -1954,6 +1961,13 @@ class CommandCenter:
         granted_frame, other_frame = ttk.Frame(permission_tabs), ttk.Frame(permission_tabs)
         permission_tabs.add(granted_frame, text="세션 권한")
         permission_tabs.add(other_frame, text="별도 승인 및 제한")
+        criteria_frame = ttk.Frame(permission_tabs)
+        permission_tabs.add(criteria_frame, text="완료 기준")
+        for key, criterion in cycle_progress.freeze(baseline["acceptance"], None).items():
+            ttk.Label(criteria_frame, text=f"{key} · {criterion['text']}", wraplength=490).pack(anchor="w")
+        ttk.Label(criteria_frame, text='관측 연결 JSON · {"기준 ID":[{"input":1}]}').pack(anchor="w")
+        bindings_field = ttk.Entry(criteria_frame, width=64)
+        bindings_field.pack(fill="x")
         choices = {}
         checkboxes = []
         for index, (key, title) in enumerate(session_permissions.AVAILABLE.items()):
@@ -1989,7 +2003,9 @@ class CommandCenter:
                 cycle_label = str(cycles) if cycles is not None else "시간·토큰 한도까지"
                 fields = self.controller, project_id, account, int(time()) + 300, seconds, tokens, reworks, spec
                 permissions = [key for key, choice in choices.items() if choice.get()]
-                scope = subscription_session.review(*fields, permissions=permissions, cycles=cycles)
+                criterion_checks = json.loads(bindings_field.get()) if bindings_field.get().strip() else None
+                scope = subscription_session.review(*fields, permissions=permissions, cycles=cycles,
+                                                    criterion_checks=criterion_checks)
             except (Blocked, ValueError, OSError, sqlite3.Error) as error:
                 status.set(str(error))
                 return
@@ -1998,11 +2014,16 @@ class CommandCenter:
                             else "파일별 고정 Python 벡터" if scope.get("batch") else "고정 Python 벡터")
             allowed = ", ".join(scope["writable_files"])
             status.set(f"권한 검토 완료 · {len(permissions)}개 · 사이클 {cycle_label}")
+            criteria_summary = "\n".join(f"{key} · {criterion['text']} · "
+                                         + (json.dumps(criterion['checks'], ensure_ascii=False)
+                                            if criterion['checks'] else "미연결")
+                                         for key, criterion in scope["criteria"].items())
             if not self.confirm("통합 개발 세션 승인",
                                 f"{project_id} · {allowed} · {scope['seconds']}초 · {scope['tokens']} 토큰\n"
                                 f"목표: {scope['goal']}\n"
                                 f"복제본 {scope['replica']}\n사이클 {cycle_label} · 재작업 최대 {reworks}회 · {verification}\n"
                                 f"권한 · {', '.join(session_permissions.AVAILABLE[key] for key in permissions)}\n"
+                                f"완료 기준과 관측 연결\n{criteria_summary}\n"
                                 "승인된 문맥과 지정한 소스를 OpenAI에 전송합니다. 모델 셸 권한은 없습니다.",
                                 parent=panel):
                 return
@@ -2019,7 +2040,8 @@ class CommandCenter:
                 try:
                     future.set_result(subscription_session.run(*fields, digest(scope), cancellation.is_set,
                                                                permissions=permissions, revoked=revocation.is_set,
-                                                               cycles=cycles, on_progress=updates.put))
+                                                               cycles=cycles, on_progress=updates.put,
+                                                               criterion_checks=criterion_checks))
                 except Exception as error:
                     future.set_exception(error)
 

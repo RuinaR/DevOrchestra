@@ -55,6 +55,9 @@ def review(runner, project, account, model, expires, *, session=None):
                                               "clarifications")}
     if session and session.previous_cycle:
         context["previous_cycle"] = session.previous_cycle
+    if session and session.progress:
+        context["criteria"] = {key: {"text": item["text"], "state": session.progress[key]}
+                               for key, item in session.scope["criteria"].items()}
     if any(event["kind"] == "onboarding_result" and event.get("project_id") == project for event in events):
         from .replica_readiness import baseline as onboarding_baseline
 
@@ -82,6 +85,9 @@ def review(runner, project, account, model, expires, *, session=None):
         body["instructions"] += (" For this batch, proposed_paths must name every approved file exactly once: "
                                  + canonical(baseline["proposed_files_ceiling"])
                                  + ". Copy acceptance_checks literally from the approved acceptance list.")
+    if session and session.progress:
+        body["instructions"] += (" Begin task_spec with [criterion ID] for the existing criterion advanced by this "
+                                 "task. Keep the frozen goal. If replanning, give a distinct approach and a check.")
     budget = {**baseline["budget_ceiling"], "seconds": min(60, baseline["budget_ceiling"]["seconds"]),
               "cost_microunits": 0}
     if session:
@@ -190,6 +196,12 @@ def run(runner, project, account, model, expires, approved, cancelled=lambda: Fa
                 raise Blocked("Subscription Manager output exceeded the local limit")
             proposal = parse_role_output(ROLE, output)
             if proposal["disposition"] == "PROPOSED":
+                if session and session.progress:
+                    task = proposal["task_spec"]
+                    criterion = task[1:task.find("]")] if task.startswith("[") and "]" in task else ""
+                    if criterion not in session.progress or not task[task.find("]") + 1:].strip():
+                        raise Blocked("Manager plan is missing a frozen criterion ID")
+                    result["criterion_id"] = criterion
                 candidate = confirm_task_plan(
                     canonical(proposal).encode(), allowed_files=baseline["proposed_files_ceiling"],
                     acceptance=baseline["acceptance"], budget=baseline["budget_ceiling"],

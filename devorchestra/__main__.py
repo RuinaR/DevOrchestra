@@ -68,6 +68,8 @@ def main():
     unified.add_argument("--approve", metavar="REVIEW_SHA256")
     unified.add_argument("--permission", action="append", dest="permissions")
     unified.add_argument("--cycles", type=int, help="Optional maximum number of development cycles")
+    unified.add_argument("--criterion-checks", type=json.loads, help="Approved criterion-to-observation bindings")
+    unified.add_argument("--max-stagnant", type=int, default=2)
     reverify = commands.add_parser("subscription-reverify-winforms",
                                    help="Approve supplemental GUI verification for a reviewed change")
     reverify.add_argument("--project", required=True)
@@ -254,10 +256,12 @@ def main():
             fields = (Runner(ledger), args.project, args.account, args.expires, args.seconds, args.tokens,
                       args.reworks, args.vectors)
             if args.approve is None:
-                scope = subscription_session.review(*fields, permissions=args.permissions, cycles=args.cycles)
+                scope = subscription_session.review(*fields, permissions=args.permissions, cycles=args.cycles,
+                                                    criterion_checks=args.criterion_checks, max_stagnant=args.max_stagnant)
                 print(canonical({"review": scope, "review_sha256": digest(scope)}))
                 return
-            receipt = subscription_session.run(*fields, args.approve, permissions=args.permissions, cycles=args.cycles)
+            receipt = subscription_session.run(*fields, args.approve, permissions=args.permissions, cycles=args.cycles,
+                                                criterion_checks=args.criterion_checks, max_stagnant=args.max_stagnant)
             print(canonical(receipt))
             return 0 if receipt["outcome"] == "COMPLETED" else 2
         if args.action == "cycle-rework":
