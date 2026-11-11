@@ -244,6 +244,10 @@ def _game_preflight(center, panel, runner, state):
         cancelled.clear()
         expires = int(time()) + 1750
         resume_args = (game_pilot.PROJECT, expires, 360, 120000)
+        if resume:
+            rows = registered_cycle.history(runner.ledger, game_pilot.PROJECT)
+            if rows and rows[-1].get("reason") == "Manager plan exceeds the approved criteria":
+                resume_args = (game_pilot.PROJECT, expires, *registered_cycle.game_plan_remaining(rows))
 
         def submit(approval=None):
             nonlocal future
@@ -296,9 +300,14 @@ def _game_preflight(center, panel, runner, state):
                         title = "게임 온라인 개발 1회 승인"
                         if resume:
                             title = "게임 후보 검토 재개 승인"
-                            summary = (f"{result['replica']}\n추가 360초 · 120,000토큰 · 모델 최대 2회\n"
-                                       "이전 후보의 Reviewer → Verifier → 최종 Manager만 실행합니다. "
-                                       "Reviewer 55,000 · 최종 Manager 45,000토큰. 복제본 편집은 꺼져 있습니다.")
+                            if result["resume"].get("mode") == "after-manager-planning":
+                                title = "게임 계획 이후 재개 승인"
+                                summary += (f"\n저장된 계획을 재사용합니다. 첫 Developer부터 시작하며 "
+                                            f"추가 모델 호출은 최대 {result['model_calls_max']}회입니다.")
+                            else:
+                                summary = (f"{result['replica']}\n추가 360초 · 120,000토큰 · 모델 최대 2회\n"
+                                           "이전 후보의 Reviewer → Verifier → 최종 Manager만 실행합니다. "
+                                           "Reviewer 55,000 · 최종 Manager 45,000토큰. 복제본 편집은 꺼져 있습니다.")
                         if center.confirm(title, summary, parent=panel):
                             submit(digest(result))
                         else:

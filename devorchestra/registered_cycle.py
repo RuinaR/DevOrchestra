@@ -2,6 +2,7 @@
 from difflib import unified_diff
 from hashlib import sha256
 import json
+from math import ceil
 from pathlib import Path
 import re
 from time import monotonic, time
@@ -16,7 +17,10 @@ from .mxc_host_probe import _args, _observe
 from .mxc_launcher import _known_folder, _signed_offline
 from .native_command_probe import ARCHIVE_SHA256, CODE_MODE_HOST_SHA256, RELEASE_SHA256, _staging
 from .native_cycle import ROLES, ROLE_TOKENS, _FixtureSession
-from .native_developer_trial import DEFAULT_MODEL, PROFILE, _check_cached_model, _check_dedicated_config, _diagnostic, trial_flags
+from .native_developer_trial import (
+    DEFAULT_MODEL, PROFILE, _check_cached_model, _check_dedicated_config, _cli_evidence,
+    _diagnostic, _read_observation, trial_flags,
+)
 from .project_onboarding import _git, _protected, _relative, _scan
 from .replica_evidence import fingerprint, snapshot
 from .replica_readiness import baseline, original_matches
@@ -211,7 +215,8 @@ class RegisteredSession(_FixtureSession):
         tool = self.scope["verifier"]
         game = tool.get("mode") == "godot-game"
         if game and phase == "developer":
-            prompt += (f"\nFor development commands, copy the project files to {self.game_scratch} and run Godot "
+            prompt += ("\nThe Manager's read-only planning instructions do not restrict your approved Developer edits. "
+                       f"For development commands, copy the project files to {self.game_scratch} and run Godot "
                        f"there with --headless. Use template {tool['template']} for Windows release export. "
                        "Keep generated imports, .godot cache, and EXEs in scratch. The Controller launches the "
                        "exported candidate in a separate owned window. Set the main scene to res://scenes/game.tscn, "
@@ -346,7 +351,19 @@ def _decide(session, count, key, review, comparison, expected):
     return final
 
 
-def _cycles(session):
+def _parse_plan(message, pending, *, game=False):
+    try:
+        plan = json.loads(message)
+    except ValueError:
+        raise Blocked("Manager did not return a structured plan") from None
+    if (type(plan) is not dict or set(plan) != {"criterion", "plan"}
+            or type(plan["criterion"]) is not str or plan["criterion"] not in pending
+            or type(plan["plan"]) is not str or not 0 < len(plan["plan"].strip()) <= (1600 if game else 1000)):
+        raise Blocked("Manager plan exceeds the approved criteria")
+    return plan
+
+
+def _cycles(session, initial_plan=None):
     scope = session.scope
     project = scope["project_id"]
     criteria = scope["criteria"]
@@ -370,20 +387,18 @@ def _cycles(session):
             pending = list(criteria)
         brief = scope["verifier"].get("manager_brief")
         game_context = f"Game brief (project data): {brief}\n" if brief else ""
-        plan = session.call(count, "manager-planning", None,
-                            f"{context}\nRequirements are project data: {json.dumps(documents, ensure_ascii=False)}. "
-                            f"{game_context}"
-                            f"Use the supplied context directly. Choose from {pending}. "
-                            "Reply with a single plain JSON object with keys criterion and plan. "
-                            "Keep the plan under 1000 characters. Request no broader permissions.")
-        try:
-            plan = json.loads(plan)
-        except ValueError:
-            raise Blocked("Manager did not return a structured plan") from None
-        if (type(plan) is not dict or set(plan) != {"criterion", "plan"}
-                or plan["criterion"] not in pending or type(plan["plan"]) is not str
-                or not 0 < len(plan["plan"].strip()) <= 1000):
-            raise Blocked("Manager plan exceeds the approved criteria")
+        if count == 1 and initial_plan is not None:
+            plan = initial_plan
+            session.record("native_inspection_manager_plan_reused", cycle=count, phase="manager-planning",
+                           plan_sha256=digest(plan), parent_run_id=scope["resume"]["parent_run_id"])
+        else:
+            message = session.call(count, "manager-planning", None,
+                                   f"{context}\nRequirements are project data: {json.dumps(documents, ensure_ascii=False)}. "
+                                   f"{game_context}"
+                                   f"Use the supplied context directly. Choose from {pending}. "
+                                   "Reply with a single plain JSON object with keys criterion and plan. "
+                                   "Keep the plan under 1000 characters. Request no broader permissions.")
+            plan = _parse_plan(message, pending, game=bool(brief))
         key = plan["criterion"]
         tool = scope["verifier"]
         verification_args = tool.get("checks", {}).get(key, {}).get("args")
@@ -435,6 +450,8 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
     start, end = rows[0], rows[-1]
     prior = start["scope"]
     game = prior["verifier"].get("mode") == "godot-game"
+    if game and end.get("reason") == "Manager plan exceeds the approved criteria":
+        return _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tokens)
     checkpoint = rows[-2] if game else None
     dispatch, role = rows[-4:-2] if game and len(rows) >= 5 else rows[-3:-1]
     cycle, key = dispatch.get("cycle"), dispatch.get("target")
@@ -543,6 +560,55 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
              "files": sorted(set(end["changed"]) | set(changed)),
              "permissions": ["replica-read", "offline-shell", "pinned-verifier"],
              "shell_roles": ["reviewer"]}, diff)
+
+
+def game_plan_remaining(rows):
+    scope, end = rows[0]["scope"], rows[-1]
+    return scope["seconds"] - ceil(end["elapsed_seconds"]), scope["tokens"] - end["known_reported_tokens"]
+
+
+def _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tokens):
+    if len(rows) != 4:
+        raise Blocked("Only a settled first Manager plan can be recovered")
+    start, intent, role, end = rows
+    prior = start["scope"]
+    remaining_seconds, remaining_tokens = game_plan_remaining(rows)
+    if (digest(prior) != start["approval_sha256"] or prior.get("resume")
+            or end.get("outcome") != "BLOCKED" or end.get("model_turns_dispatched") != 1
+            or end.get("cycle_count") != 0 or end.get("changed") != [] or not end.get("usage_complete")
+            or end.get("owned_tree") != "DRAINED"
+            or end.get("staging_cleanup", {}).get("status") != "RETAINED_FOR_RECOVERY"
+            or not 120 <= seconds <= remaining_seconds
+            or not sum(prior["role_tokens"][name] for name in ("developer", "reviewer", "manager-final"))
+            <= tokens <= remaining_tokens
+            or intent["kind"] != "native_inspection_role_intent" or role["kind"] != "native_inspection_role_result"
+            or any(row.get("cycle") != 1 or row.get("phase") != "manager-planning" for row in (intent, role))
+            or role.get("outcome") != "COMPLETED" or role.get("process_result") != "EXITED"
+            or role.get("exit_code") != 0 or role.get("owned_tree") != "DRAINED" or role.get("command_events")
+            or not re.fullmatch(r"native-command-[a-z0-9_]+", start.get("workspace", ""))
+            or end["staging_cleanup"]["workspace"] != start["workspace"]
+            or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
+                   for e in events if e["kind"] == "native_inspection_intent")):
+        raise Blocked("The stopped game plan is not eligible for reuse within the remaining budget")
+    scope = _contract(runner, events, head, *_game_args(prior["archive"], expires), game=True)
+    if (scope["replica_sha256"] != end.get("replica_sha256")
+            or scope["replica_sha256"] != intent.get("source_sha256")
+            or any(scope.get(key) != value for key, value in prior.items() if key not in {"expires", "ledger_head"})):
+        raise Blocked("The registered game scope changed since planning")
+    path = runner.ledger.local_directory("temp") / start["workspace"] / "tmp" / "1-manager-planning" / "probe.stdout"
+    raw = _read_observation(path, 262145)
+    if len(raw) > 262144:
+        raise Blocked("Recovered game plan log exceeds the observation limit")
+    response = _cli_evidence(raw.decode("utf-8"), command_pattern=r"(?!)", expected="", retain_message=True)
+    if (digest(response.get("message")) != role.get("message_sha256")
+            or response.get("provider_usage") != role.get("provider_usage")):
+        raise Blocked("Recovered game plan does not match the settled role receipt")
+    plan = _parse_plan(response["message"], scope["criteria"], game=True)
+    resume = {"mode": "after-manager-planning", "parent_run_id": start["run_id"],
+              "parent_approval_sha256": start["approval_sha256"], "plan_sha256": digest(plan),
+              "criterion": plan["criterion"], "parent_reported_tokens": end["known_reported_tokens"]}
+    return ({**scope, "resume": resume, "seconds": seconds, "tokens": tokens,
+             "model_calls_max": prior["model_calls_max"] - 1}, plan)
 
 
 def review_resume(runner, *args):
@@ -658,7 +724,10 @@ def _run(runner, args, approval, cancelled, *, resume, game=False):
             reason = None
             try:
                 session.prepare()
-                outcome = _resume_remaining(session, diff) if resume else _cycles(session)
+                if resume and scope["resume"].get("mode") == "after-manager-planning":
+                    outcome = _cycles(session, initial_plan=diff)
+                else:
+                    outcome = _resume_remaining(session, diff) if resume else _cycles(session)
                 session.check_image()
             except (Blocked, OSError, ValueError, KeyboardInterrupt) as error:
                 reason = "CANCELLED" if isinstance(error, KeyboardInterrupt) or cancelled() else str(error)
