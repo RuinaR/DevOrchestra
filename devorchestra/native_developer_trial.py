@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import re
 from time import time
+import tomllib
 
 from .job_probe import CODEX_DEVELOPER_PROCESS_LIMIT
 from .lease import Blocked, execution_slot
@@ -10,7 +11,7 @@ from .ledger import check_path, digest
 from .mxc_host_probe import _args, _observe
 from .mxc_launcher import _known_folder
 from .native_command_probe import (
-    ARCHIVE_SHA256, GENERAL_MODEL, RELEASE_SHA256, SOURCE_NAMES, SUBTOTAL, TOTAL,
+    ARCHIVE_SHA256, RELEASE_SHA256, SOURCE_NAMES, SUBTOTAL, TOTAL,
     _fixture_git_binary, _prepare_git_fixture, _release_fixture_git_objects, _stage_release, _staging,
 )
 from .native_manager import DISABLED_FEATURES
@@ -27,6 +28,7 @@ PROMPT = (
 SECONDS = 120
 TOKEN_ALLOWANCE = 12000
 PROFILE = "developer-trial"
+DEFAULT_MODEL = "gpt-6.1-sol"
 
 
 def trial_flags(work, *, writable=True):
@@ -45,13 +47,13 @@ def trial_flags(work, *, writable=True):
     return [arg for value in values for arg in ("-c", value)]
 
 
-def _scope(archive, home, request, expires, ledger_head):
+def _scope(archive, home, request, expires, ledger_head, model):
     if not re.fullmatch(r"[a-f0-9]{32}", request) or not time() < expires <= time() + 900:
         raise Blocked("Use a new 32-hex request ID and an expiry within 15 minutes")
     return {
         "request_id": request, "expires": expires, "archive": str(archive), "archive_sha256": ARCHIVE_SHA256,
         "binary_sha256": RELEASE_SHA256, "auth_home": str(home), "auth": "CHATGPT_ONLY",
-        "backend": "CODEX_EXEC", "model": GENERAL_MODEL, "mode": "general",
+        "backend": "CODEX_EXEC", "model": model, "mode": "general",
         "temporary_exception": "GENERAL_ADMISSION_UNVERIFIED_FOR_THIS_SYNTHETIC_TURN_ONLY",
         "sandbox": "MXC_REPLICA_WRITE_GIT_READ_COMMAND_NETWORK_OFF", "approval_policy": "never",
         "files": list(SOURCE_NAMES), "prompt_sha256": digest(PROMPT),
@@ -111,6 +113,57 @@ def _cli_evidence(output):
             "successful_fixture_command_sha256": tests}
 
 
+def _read_observation(path, limit):
+    check_path(path)
+    with path.open("rb") as stream:
+        return stream.read(limit)
+
+
+def _failure_evidence(stdout, stderr):
+    event_types = set()
+    for line in stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if type(row) is dict and row.get("type") in ("thread.started", "turn.started", "turn.failed", "turn.completed"):
+            event_types.add(row["type"])
+    output = (stdout + "\n" + stderr.decode("utf-8", errors="replace")).casefold()
+    signals = {
+        "MXC_PROCESS_QUOTA_1816": r"createprocessw failed with error code 1816",
+        "MODEL_UNAVAILABLE": r"model_not_found|model.{0,120}(?:not supported|not available|does not exist)",
+        "PROVIDER_RATE_LIMIT": r"429 too many requests|rate limit exceeded|usage limit",
+        "AUTH_REJECTED": r"401 unauthorized|403 forbidden|token refresh failed|not logged in",
+        "TRANSPORT_FAILURE": r"error sending request|stream disconnected|certificate verify failed",
+    }
+    return {"cli_events": sorted(event_types),
+            "cli_failure_signals": [label for label, pattern in signals.items() if re.search(pattern, output)]}
+
+
+def _check_dedicated_config(home, temporary):
+    config = home / "config.toml"
+    check_path(config)
+    if config.exists():
+        data = tomllib.loads(_read_observation(config, 16384).decode("utf-8"))
+        # Codex itself can remember trust for its disposable replica.
+        if (set(data) != {"projects"} or type(data["projects"]) is not dict
+                or any(not Path(path).is_relative_to(temporary)
+                       or entry != {"trust_level": "trusted"} for path, entry in data["projects"].items())):
+            raise Blocked("Dedicated Codex home contains settings outside trial-generated trust entries")
+
+
+def _check_cached_model(home, model):
+    if not re.fullmatch(r"[a-z0-9_.-]{1,64}", model):
+        raise Blocked("Invalid Codex model identifier")
+    path = home / "models_cache.json"
+    check_path(path)
+    if path.exists():
+        cache = json.loads(_read_observation(path, 2 * 1024 * 1024))
+        if not any(row.get("slug") == model and row.get("visibility") == "list"
+                   for row in cache.get("models", []) if type(row) is dict):
+            raise Blocked("Approved model is absent from the dedicated CLI model catalog")
+
+
 def _verify_output(binary, work, output, environment, check):
     config = trial_flags(work, writable=False)
     command = Path(environment["SystemRoot"]) / "System32" / "cmd.exe"
@@ -119,7 +172,7 @@ def _verify_output(binary, work, output, environment, check):
                     encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
 
 
-def run_trial(ledger, archive, request, expires, approval=None):
+def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT_MODEL):
     from .runtime import Runner, require_admission
 
     with execution_slot() as abandoned:
@@ -129,7 +182,8 @@ def run_trial(ledger, archive, request, expires, approval=None):
         check_path(archive)
         home = ledger.local_directory("state") / "codex-developer-home"
         check_path(home)
-        scope = _scope(archive, home, request, expires, head)
+        _check_cached_model(home, model)
+        scope = _scope(archive, home, request, expires, head, model)
         pin = digest(scope)
         standard = live_preflight()
         if approval is None:
@@ -142,7 +196,8 @@ def run_trial(ledger, archive, request, expires, approval=None):
         if not home.is_dir():
             raise Blocked("Dedicated Codex home requires official ChatGPT sign-in")
         check_path(home / "auth.json")  # Identity only. The official CLI reads its login.
-        for name in ("AGENTS.md", "AGENTS.override.md", "rules", "config.toml"):
+        _check_dedicated_config(home, ledger.local_directory("temp"))
+        for name in ("AGENTS.md", "AGENTS.override.md", "rules"):
             target = home / name
             check_path(target)
             if target.exists():
@@ -162,7 +217,7 @@ def run_trial(ledger, archive, request, expires, approval=None):
                            "HOME": str(scratch), "ProgramData": str(_known_folder(0x23)),
                            "PATH": str(windows / "System32"), "CODEX_HOME": str(home),
                            "TEMP": str(scratch), "TMP": str(scratch)}
-            verification_home = scratch / "verification-home"
+            verification_home = lab / "verification-home"
             verification_home.mkdir()
             verification_env = {**environment, "CODEX_HOME": str(verification_home)}
             count, fence = ledger.append(len(events), head, {**fields, "kind": "native_inspection_intent"},
@@ -188,10 +243,11 @@ def run_trial(ledger, archive, request, expires, approval=None):
             with stderr.open("rb") as stream:
                 status_text = auth["stdout"].encode("utf-8") + b"\n" + stream.read(4096)
             result = {"status": "BLOCKED_AUTH", "provider_response": "NOT_STARTED", "provider_usage": "UNKNOWN"}
-            if auth["exitCode"] == 0 and b"Logged in using ChatGPT" in status_text.splitlines():
+            signed_in = auth["exitCode"] == 0 and b"Logged in using ChatGPT" in status_text.splitlines()
+            if signed_in:
                 negative = _verify_output(binary, work, logs("baseline"), verification_env, check)
-                if negative["exitCode"] != 0 or negative["stdout"].strip() != "9" or negative["stderr"]:
-                    raise Blocked("Frozen fixture baseline could not be verified")
+                result["status"] = "BASELINE_UNVERIFIED"
+            if signed_in and negative["exitCode"] == 0 and negative["stdout"].strip() == "9" and not negative["stderr"]:
                 check()
                 remaining = expires - time()
                 if remaining <= 0:
@@ -199,15 +255,17 @@ def run_trial(ledger, archive, request, expires, approval=None):
                 count, fence = ledger.append(count, fence, {**fields, "kind": "native_inspection_dispatch_intent",
                                                              "baseline_sha256": digest(before)})
                 argv = [*trial_flags(work), "exec", "--ignore-user-config", "--json", "--ephemeral",
-                        "--model", GENERAL_MODEL, "--cd", str(work), PROMPT]
-                observed = _observe(binary, argv, work, logs("exec"), environment, seconds=min(SECONDS, remaining), check=check,
+                        "--model", model, "--cd", str(work), PROMPT]
+                exec_logs = logs("exec")
+                observed = _observe(binary, argv, work, exec_logs, environment, seconds=min(SECONDS, remaining), check=check,
                                     output_limit=262144, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
                 result = {"status": "UNVERIFIED", "provider_response": "UNKNOWN", "provider_usage": "UNKNOWN",
                           "exit_code": observed["exitCode"], "job_active": observed["job_active"]}
                 try:
                     result.update(_cli_evidence(observed["stdout"]))
                 except (KeyError, TypeError, ValueError):
-                    pass
+                    result.update(_failure_evidence(observed["stdout"],
+                                                    _read_observation(exec_logs / "probe.stderr", 65536)))
                 after = snapshot(work)
                 changed = sorted(name for name in before["files"].keys() | after["files"].keys()
                                  if before["files"].get(name) != after["files"].get(name))

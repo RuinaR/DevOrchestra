@@ -1,6 +1,6 @@
 # 개발 인수인계
 
-`native-developer-trial --archive <공식 ZIP> --request-id <32자리 hex> --expires <UTC epoch>`는 일회 승인 범위와 해시를 검토한다. 전용 `.ai-local/state/codex-developer-home`에는 공식 CLI로 같은 ChatGPT 계정에 로그인한다. 기본 홈의 개인 지침·토큰 파일을 복사하지 않는다. 명시 동의 후 같은 인자와 `--approve <해시>`로 한 턴을 실행한다. 120초 이내, 제공자 보고 12,000토큰을 완료 후 판정에 적용하며 서버 측 실시간 토큰 상한은 확인되지 않았다. 합성 `subtotal.cmd`와 `total.cmd`만 바뀌고 모델 도구 시험·독립 시험이 모두 11을 관측해야 성공한다. 미확정 요청은 자동 재실행하지 않는다.
+`native-developer-trial --archive <공식 ZIP> --request-id <32자리 hex> --expires <UTC epoch> [--model <ID>]`는 일회 승인 범위와 해시를 검토한다. 전용 `.ai-local/state/codex-developer-home`에서 공식 CLI ChatGPT 로그인을 확인했다. 기본 홈의 개인 지침·토큰 파일은 복사하지 않는다. 명시 동의 후 같은 인자와 `--approve <해시>`로 한 턴을 실행한다. 120초 이내, 제공자 보고 12,000토큰을 완료 후 판정에 적용한다. 합성 `subtotal.cmd`와 `total.cmd`만 바뀌고 모델 도구 시험·독립 시험이 모두 11을 관측해야 성공한다. 첫 시도는 응답·사용량 UNKNOWN으로 보존했다. 현재 전용 홈 목록에는 `gpt-6.1-sol`이 있으며 새로운 명시 승인 전까지 자동 재실행하지 않는다.
 
 현 제품은 일반 개발만 제공한다. 공식 Codex가 인증·모델 통신을 맡는다. `native-exec-diagnostic --archive <공식 0.167.1 Windows x64 ZIP>`은 자격증명 없는 합성 Git 복제본에서 공식 CLI를 동시 프로세스 16개로 제한한 소유 Job으로 시작한다. 이 구성은 오류 1816을 해소하고 합성 루프백까지 도달했다. 다음은 첫 구독 Developer 턴의 승인, 직접 수정·테스트, 도구 이벤트, 제공자 토큰, diff와 Job 종료를 같은 원장에 연결하는 작업이다. 그 뒤 다섯 역할 순차 인계와 2사이클 이상 반복을 검증한다. [Codex 권한 범위](https://learn.chatgpt.com/docs/permissions#what-the-network-proxy-does-not-control)
 

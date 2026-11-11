@@ -102,6 +102,7 @@ def main():
     developer_trial.add_argument("--archive", required=True)
     developer_trial.add_argument("--request-id", required=True)
     developer_trial.add_argument("--expires", type=int, required=True)
+    developer_trial.add_argument("--model")
     developer_trial.add_argument("--approve")
     commands.add_parser("native-egress-preflight", help="Read Windows token facts without modifying network policy")
     egress_trial = commands.add_parser("native-egress-trial", help="Recover an existing historical WFP trial")
@@ -376,7 +377,8 @@ def main():
         if args.action == "native-developer-trial":
             from .native_developer_trial import run_trial
 
-            receipt = run_trial(ledger, args.archive, args.request_id, args.expires, args.approve)
+            options = {"model": args.model} if args.model is not None else {}
+            receipt = run_trial(ledger, args.archive, args.request_id, args.expires, args.approve, **options)
             print(canonical(receipt))
             return 0 if receipt["status"] in ("REAL_PASS", "NEEDS_OWNER_APPROVAL") else 2
         if args.action == "native-exec-diagnostic":
