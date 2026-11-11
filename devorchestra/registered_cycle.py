@@ -340,7 +340,15 @@ def run(runner, *args, approval, cancelled=lambda: False):
         ledger = runner.ledger
         auth = Path(scope["auth_home"])
         check_path(auth / "auth.json")
-        _check_dedicated_config(auth, ledger.local_directory("temp"))
+        approved_replicas = {Path(scope["replica"])}
+        for event in events:
+            if event.get("kind") != "native_inspection_intent" or event.get("probe_kind") != KIND:
+                continue
+            prior = event.get("scope", {})
+            if (prior.get("auth_home") == str(auth) and digest(prior) == event.get("approval_sha256")
+                    and isinstance(prior.get("replica"), str)):
+                approved_replicas.add(Path(prior["replica"]))
+        _check_dedicated_config(auth, ledger.local_directory("temp"), approved_replicas=approved_replicas)
         for name in ("AGENTS.md", "AGENTS.override.md", "rules"):
             path = auth / name
             check_path(path)

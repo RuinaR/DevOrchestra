@@ -163,14 +163,14 @@ def _failure_evidence(stdout, stderr):
             "cli_failure_signals": [label for label, pattern in signals.items() if re.search(pattern, output)]}
 
 
-def _check_dedicated_config(home, temporary):
+def _check_dedicated_config(home, temporary, *, approved_replicas=()):
     config = home / "config.toml"
     check_path(config)
     if config.exists():
         data = tomllib.loads(_read_observation(config, 16384).decode("utf-8"))
         # Codex itself can remember trust for its disposable replica.
         if (set(data) != {"projects"} or type(data["projects"]) is not dict
-                or any(not Path(path).is_relative_to(temporary)
+                or any((not Path(path).is_relative_to(temporary) and Path(path) not in approved_replicas)
                        or entry != {"trust_level": "trusted"} for path, entry in data["projects"].items())):
             raise Blocked("Dedicated Codex home contains settings outside trial-generated trust entries")
 

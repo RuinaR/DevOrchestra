@@ -14,6 +14,24 @@ from devorchestra.catalog import Catalog, new_project
 from devorchestra.ledger import Ledger, digest
 from devorchestra.lease import Blocked
 from devorchestra.runtime import Runner
+from devorchestra.native_developer_trial import _check_dedicated_config
+
+
+class RegisteredTrustTests(unittest.TestCase):
+    def test_only_approved_registered_replica_trust_is_accepted(self):
+        with TemporaryDirectory(dir=Path.cwd()) as folder:
+            root = Path(folder)
+            replica = root / "old-replica"
+            config = root / "config.toml"
+            config.write_text(f"[projects.{json.dumps(str(replica))}]\ntrust_level = \"trusted\"\n",
+                              encoding="utf-8")
+            with self.assertRaises(Blocked):
+                _check_dedicated_config(root, root / "temp")
+            _check_dedicated_config(root, root / "temp", approved_replicas={replica})
+            config.write_text(config.read_text(encoding="utf-8") + "[mcp_servers.example]\ncommand = \"ignored\"\n",
+                              encoding="utf-8")
+            with self.assertRaises(Blocked):
+                _check_dedicated_config(root, root / "temp", approved_replicas={replica})
 
 
 @unittest.skipUnless(os.environ.get("DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"), "Requires signed local Windows tools")
