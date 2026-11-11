@@ -72,7 +72,11 @@ class NativeCycleTests(unittest.TestCase):
             rows.append({"type": "item.completed", "item": {"type": "agent_message", "text": message}})
             rows.append({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5,
                                                                "cached_input_tokens": 20}})
-            return {"stdout": "\n".join(map(json.dumps, rows)), "exitCode": 0, "job_active": 0}
+            stream = "\n".join(map(json.dumps, rows))
+            if interrupted is None and target == "A" and phase == "manager-final":
+                (scratch / "probe.stdout").write_text(stream, encoding="utf-8")
+                raise native_cycle.OwnedMxcStopped("MXC probe timeout")
+            return {"stdout": stream, "exitCode": 0, "job_active": 0}
 
         approved_temp = Path(__file__).resolve().parents[1] / ".ai-local" / "temp"
         with TemporaryDirectory(prefix="cycle-test-", dir=approved_temp) as folder:
@@ -97,6 +101,11 @@ class NativeCycleTests(unittest.TestCase):
                 self.assertEqual(result["cycle_count"], 2)
                 self.assertEqual(result["known_reported_tokens"], 840)
                 self.assertEqual(result["staging_cleanup"]["status"], "REMOVED")
+                decision = next(role for role in result["roles"]
+                                if role["cycle"] == 1 and role["phase"] == "manager-final")
+                self.assertEqual(decision["manager_decision"], "CONTINUE")
+                self.assertEqual(decision["process_result"], "TERMINATED_AND_DRAINED")
+                self.assertIsNone(decision["exit_code"])
                 rows = [event for event in ledger.read() if event["kind"] == "native_inspection_cycle_progress"]
                 self.assertEqual([list(row["criteria"].values()).count("VERIFIED") for row in rows], [1, 2])
                 self.assertEqual(list(rows[0]["criteria"].values()), ["VERIFIED", "NOT_STARTED"])

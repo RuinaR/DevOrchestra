@@ -336,21 +336,32 @@ class _FixtureSession:
         self.check()
         self.owned_verified = False
         self.usage_complete = False
+        process_result = "EXITED"
         try:
             result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable),
                               self.work, role_log, self.env, seconds=self.seconds(), check=self.check,
                               output_limit=262144, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
-        except OwnedMxcStopped:
+        except OwnedMxcStopped as stopped:
             self.owned_verified = True
-            self.record("native_inspection_role_result", cycle=cycle, phase=phase, target=target,
-                        outcome="REQUEST_UNKNOWN", owned_tree="DRAINED", process_result="TERMINATED",
-                        provider_usage="UNKNOWN")
-            raise Blocked("REQUEST_UNKNOWN") from None
+            process_result = "TERMINATED_AND_DRAINED"
+            result = {"stdout": "", "exitCode": None, "job_active": 0}
+            if not writable and str(stopped) == "MXC probe timeout":
+                # _observe raises this only after proving that the owned Job is empty.
+                # A read-only role can settle from a complete event stream after drain.
+                try:
+                    self.check()
+                    self.check_image()
+                    raw = _read_observation(role_log / "probe.stdout", 262145)
+                    if len(raw) <= 262144:
+                        result["stdout"] = raw.decode("utf-8")
+                except (Blocked, OSError, UnicodeError):
+                    pass
         self.owned_verified = result["job_active"] == 0
         if not self.owned_verified:
             raise Blocked("Owned Job is unresolved")
         task = TASKS[target]
-        details = _failure_evidence(result["stdout"], _read_observation(role_log / "probe.stderr", 65536))
+        stderr = role_log / "probe.stderr"
+        details = _failure_evidence(result["stdout"], _read_observation(stderr, 65536) if stderr.is_file() else b"")
         try:
             response = _cli_evidence(result["stdout"], command_pattern=rf"\bcall\s+{re.escape(task['file'])}\s+3\b",
                                      expected=task["expected"], retain_message=True)
@@ -361,10 +372,12 @@ class _FixtureSession:
         tokens = usage["input_tokens"] + usage["output_tokens"] if self.usage_complete else None
         if tokens is not None:
             self.usage += tokens
-        outcome = ("REQUEST_UNKNOWN" if result["exitCode"] != 0 or "message" not in response else
+        settled_process = result["exitCode"] == 0 or process_result == "TERMINATED_AND_DRAINED"
+        outcome = ("REQUEST_UNKNOWN" if not settled_process or "message" not in response else
                    "USAGE_UNKNOWN" if tokens is None else "TOKEN_LIMIT" if tokens > limit else "COMPLETED")
         message = response.get("message")
         receipt = {"outcome": outcome, "exit_code": result["exitCode"], "owned_tree": "DRAINED",
+                   "process_result": process_result,
                    "provider_usage": usage, "message_sha256": digest(message),
                    "test_commands": response.get("successful_fixture_command_sha256", []), **details}
         if phase == "manager-final" and isinstance(message, str):
