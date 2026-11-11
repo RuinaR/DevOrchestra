@@ -74,8 +74,10 @@ class NativeCycleTests(unittest.TestCase):
                 self.assertIn("+++ b/total.cmd", argv[-1])
                 self.assertNotIn("+++ b/subtotal.cmd", argv[-1])
             rows.append({"type": "item.completed", "item": {"type": "agent_message", "text": message}})
-            rows.append({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5,
-                                                               "cached_input_tokens": 20}})
+            usage = {"input_tokens": 100, "output_tokens": 5, "cached_input_tokens": 20}
+            if phase == "reviewer" and target == "B":
+                usage = {"input_tokens": 33246, "output_tokens": 167, "cached_input_tokens": 19200}
+            rows.append({"type": "turn.completed", "usage": usage})
             stream = "\n".join(map(json.dumps, rows))
             if interrupted is None and target == "A" and phase == "manager-final":
                 (scratch / "probe.stdout").write_text(stream, encoding="utf-8")
@@ -103,7 +105,7 @@ class NativeCycleTests(unittest.TestCase):
             self.assertEqual(result["owned_tree"], "DRAINED")
             if outcome == "COMPLETED":
                 self.assertEqual(result["cycle_count"], 2)
-                self.assertEqual(result["known_reported_tokens"], 840)
+                self.assertEqual(result["known_reported_tokens"], 7 * 105 + 33413)
                 self.assertEqual(result["staging_cleanup"]["status"], "REMOVED")
                 decision = next(role for role in result["roles"]
                                 if role["cycle"] == 1 and role["phase"] == "manager-final")

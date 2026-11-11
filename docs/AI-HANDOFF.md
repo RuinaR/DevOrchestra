@@ -1,12 +1,14 @@
 # 개발 인수인계
 
+변경 범위를 바로잡은 온라인 시험에서 두 번째 Reviewer가 `ACCEPT`를 반환했다. 역할별 토큰 한도 초과로 후속 Verifier와 최종 Manager는 미실행이다. 다음 시험은 Reviewer와 Developer의 예약량을 각각 55,000 및 60,000토큰으로 검토한다. 세션 예산과 사이클·시간·호출 한도는 동일하다. 이번 시험의 스테이징은 정리가 미확인 상태이며 소유 Job은 회수됐다.
+
 승인 한 번으로 실제 자동 두 사이클과 두 기능의 독립 검사를 완료했다. 최종 완료를 막은 원인은 두 번째 Reviewer에 전달한 누적 diff였다. Reviewer에는 해당 사이클의 시작 상태와 종료 상태를 비교한 변경을 전달하고, 원장에는 그 변경과 전체 Git diff의 해시를 각각 남긴다. 온라인 재시험의 완료 조건에는 두 번째 독립 Reviewer 승인과 최종 Manager의 `COMPLETED`가 포함된다.
 
 온라인 재시험의 최종 Manager는 `CONTINUE`를 반환했다. 완료 이벤트 이후 CLI 종료 지연으로 원래 세션은 멈췄고 해당 스테이징을 보존했다. 읽기 전용 역할에 한해 정상 종료와 강제 회수를 구분해 기록하고, Job 회수·완료 이벤트·사용량·복제본 불변을 모두 확인하면 다음 역할을 허용한다. 오프라인에서 확인했으며 실제 두 사이클은 새 승인 후 검증한다.
 
 첫 온라인 통합 시험에서는 다섯 역할이 한 사이클을 수행했고 A가 검증됐다. 최종 Manager가 아직 착수하지 않은 B를 보고 `REWORK`를 반환해 Controller가 자동 전환을 중단했다. 현재 기능의 독립 검사 결과, 다음 사이클의 미착수 기준, 회귀 여부를 최종 Manager에게 명시적으로 전달한다. 결과의 불일치 차단은 유지한다. 기존 시험 승인과 복제본은 종료됐으며 온라인 재시험에는 새 승인이 필요하다.
 
-`native-cycle --archive <공식 ZIP> --request-id <32자리 hex> --expires <UTC epoch> --seconds 960 --tokens 270000 --cycles 2`는 실제 두 사이클 시험의 승인 범위를 검토한다. 사용자 동의 후 동일 인자와 `--approve <해시>`를 사용한다. 최대 Codex 호출은 8회다. Manager 계획·Reviewer·Manager 판정은 각 30,000토큰, Developer는 45,000토큰을 입장 전에 남은 예산과 비교한다. Verifier는 모델을 호출하지 않는다. 각 호출의 실제 입력+출력은 사후 판정한다. Developer는 MXC 복제본 내 셸과 쓰기 권한을 사용하며 파일별 변경은 Controller가 사후 대조한다. Reviewer와 두 Manager 단계는 MXC 읽기 전용이다. 미확정 요청은 자동 재송신하지 않고 증거를 보존한다. 프로세스 회수가 미확정이면 원장 의도를 열린 채 두어 신규 입장을 막는다.
+`native-cycle --archive <공식 ZIP> --request-id <32자리 hex> --expires <UTC epoch> --seconds 960 --tokens 270000 --cycles 2`는 실제 두 사이클 시험의 승인 범위를 검토한다. 사용자 동의 후 동일 인자와 `--approve <해시>`를 사용한다. 최대 Codex 호출은 8회다. Manager는 각 30,000토큰, Reviewer는 55,000토큰, Developer는 60,000토큰을 입장 전에 남은 예산과 비교한다. Verifier는 모델을 호출하지 않는다. 각 호출의 실제 입력+출력은 사후 판정한다. Developer는 MXC 복제본 내 셸과 쓰기 권한을 사용하며 파일별 변경은 Controller가 사후 대조한다. Reviewer와 두 Manager 단계는 MXC 읽기 전용이다. 미확정 요청은 자동 재송신하지 않고 증거를 보존한다. 프로세스 회수가 미확정이면 원장 의도를 열린 채 두어 신규 입장을 막는다.
 
 공식 Codex 0.167.1 로컬 Code Mode로 첫 온라인 Developer 시험이 `REAL_PASS`였다. `gpt-6.1-sol`이 합성 Git 복제본의 두 파일을 직접 수정했고 모델 명령과 Controller 독립 시험에서 모두 `11`을 확인했다. 사용량 32,588토큰, diff와 소유 Job 회수 결과를 로컬 원장에 기록했다. 이전 `CODE_MODE_HOST_DISABLED` 결과와 로컬 합성 시험은 상태 문서에서 별도로 추적한다.
 

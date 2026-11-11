@@ -26,7 +26,8 @@ from .shutdown import HELD, shutdown_state
 
 
 ROLES = ("manager-planning", "developer", "reviewer", "verifier", "manager-final")
-ROLE_TOKENS = {role: 45000 if role == "developer" else 30000 for role in ROLES if role != "verifier"}
+ROLE_TOKENS = {"manager-planning": 30000, "developer": 60000, "reviewer": 55000,
+               "manager-final": 30000}
 GOAL = "Set the subtotal multiplier to 3 and the independent fixed fee to 2."
 TASKS = {
     "A": {"file": SOURCE_NAMES[0], "text": "Subtotal multiplies by 3",
@@ -129,6 +130,7 @@ def _execute_cycles(scope, role, verify, source, evidence):
                         f"Independently review {task['text']} using the diff from this cycle's starting revision. "
                         f"Criteria at cycle entry: {previous}. Earlier verified changes are part of that baseline.\n"
                         f"{developed['diff']}\n"
+                        "Use the supplied diff directly when it contains enough evidence. "
                         "Reply exactly ACCEPT, or REWORK followed by a concrete finding on one line.")
         decision = reviewed["message"]
         if decision != "ACCEPT" and not re.fullmatch(r"REWORK [^\r\n]{1,220}", decision):
@@ -384,6 +386,9 @@ class _FixtureSession:
                    "process_result": process_result,
                    "provider_usage": usage, "message_sha256": digest(message),
                    "test_commands": response.get("successful_fixture_command_sha256", []), **details}
+        if outcome == "TOKEN_LIMIT":
+            receipt["role_token_limit"] = limit
+            receipt["role_reported_tokens"] = tokens
         if phase == "manager-final" and isinstance(message, str):
             decision = message.strip()
             receipt["manager_decision"] = decision if decision in {"CONTINUE", "REWORK", "COMPLETED"} else "INVALID"
