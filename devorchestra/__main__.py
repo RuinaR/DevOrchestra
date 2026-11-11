@@ -94,6 +94,7 @@ def main():
     native_command = commands.add_parser("native-command-diagnostic", help="Test native Codex command confinement without a model")
     native_command.add_argument("--archive", required=True)
     native_command.add_argument("--powershell-sha256", required=True)
+    commands.add_parser("native-egress-preflight", help="Read Windows token facts without modifying network policy")
     gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
     gui_verify.add_argument("--registered", action="store_true")
@@ -183,6 +184,11 @@ def main():
         print(canonical(live_preflight(args.requires, backend=args.backend, mode=args.mode)))
         return 2
     try:
+        if args.action == "native-egress-preflight":
+            from .native_egress import preflight
+
+            print(canonical(preflight()))
+            return 2
         ledger = Ledger.for_project()
         if args.action == "original-apply":
             from . import original_apply

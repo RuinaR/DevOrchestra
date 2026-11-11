@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.116에서 `native-egress-preflight`로 UAC 토큰을 조회했다. 기존 P2.115의 파일·루프백 진단을 재실행할 필요는 없다. [네이티브 시험 변경 범위와 복구 계획](ARCHITECTURE-ROADMAP.md#p2116-네이티브-시험-정책과-복구-범위)에 대해 별도 승인을 받은 뒤 정책 설치기와 독립 검증을 진행한다. 외부 제공자 연결과 모델 요청은 그 시험에 포함되지 않는다.
+
 `native-command-diagnostic --archive <공식 0.167.1 Windows x64 CLI ZIP의 절대 경로> --powershell-sha256 <SHA256>`은 새 합성 홈과 Controller 소유 Job에서 고정 명령의 파일·루프백 경계를 검증한다. 배포 ZIP과 CLI를 각각 확인하며 모델·계정·스레드 RPC는 허용하지 않는다. 다음 네이티브 입장 검증은 호스트의 제공자 전용 송신을 독립적으로 집행한 후, 별도 승인으로 모델의 쓰기·빌드와 Verifier 영수증을 연결하는 것이다. 이 진단으로 온라인 입장 권한을 부여할 수 없다.
 
 P2.115부터 같은 진단에서 `direct_host_controls`는 소유 PowerShell의 IPv4·IPv6 양성 대조이며 `loopback`과 `loopback_ipv6`는 MXC 명령의 거부 결과다. `proxy_contacted=false`는 고정 TCP 대조가 프록시를 경유하지 않았다는 뜻이다. 실제 Codex 호스트의 HTTP 경로와 외부 DNS는 미검증이다. 다음 시험은 전용 송신 정책을 갖춘 실행 환경에서만 준비하고, 허용된 연결과 거부된 연결을 같은 실행 신원으로 비교한다.
