@@ -71,8 +71,8 @@ class RegisteredCycleTests(unittest.TestCase):
                         'GREETING = "hello"\nSIGNOFF = "goodbye"\n')
                     (work / "formatting.py").write_text(code, encoding="utf-8")
                 message = {"manager-planning": json.dumps({"criterion": keys[cycle - 1], "plan": "Update the text"}),
-                           "developer": "Edited", "reviewer": "ACCEPT",
-                           "manager-final": "CONTINUE" if cycle == 1 else "COMPLETED"}[phase]
+                           "developer": "Edited", "reviewer": "ACCEPT — the diff meets the criterion.",
+                           "manager-final": "CONTINUE — one check remains." if cycle == 1 else "COMPLETED"}[phase]
                 events = [{"type": "thread.started", "thread_id": "offline"}, {"type": "turn.started"},
                           {"type": "item.completed", "item": {"type": "agent_message", "text": message}},
                           {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5}}]

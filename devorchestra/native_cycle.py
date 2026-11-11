@@ -339,6 +339,7 @@ class _FixtureSession:
         return response
 
     def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None, shell_tools=True,
+                 decision_parser=None,
                  context="This is an isolated arithmetic fixture."):
         self.check()
         self.check_image()
@@ -411,6 +412,11 @@ class _FixtureSession:
             receipt["role_reported_tokens"] = tokens
         if phase == "manager-final" and isinstance(message, str):
             decision = message.strip()
+            if decision_parser:
+                try:
+                    decision = decision_parser(decision)
+                except Blocked:
+                    decision = "INVALID"
             receipt["manager_decision"] = decision if decision in {"CONTINUE", "REWORK", "COMPLETED"} else "INVALID"
         self.phases.append({"cycle": cycle, "phase": phase, **receipt})
         self.record("native_inspection_role_result", cycle=cycle, phase=phase, target=target, **receipt)
@@ -421,7 +427,7 @@ class _FixtureSession:
         self.check()
         if not writable:
             self.check_image()
-        response["message"] = message.strip()
+        response["message"] = receipt["manager_decision"] if decision_parser else message.strip()
         return response, recovered_developer
 
     def fixture_lines(self, filename):
