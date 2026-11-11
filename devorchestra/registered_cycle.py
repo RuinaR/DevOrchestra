@@ -79,6 +79,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     if source == replica or source.is_relative_to(replica) or replica.is_relative_to(source):
         raise Blocked("The onboarded replica and original must be separate")
     image = snapshot(replica)
+    if any(name.casefold() == "project.godot" for name in image["files"]):
+        raise Blocked("Godot projects require the game verifier for Windows export and owned-window evidence")
     if digest(image) != onboarding["replica_sha256"] or not original_matches(source, frozen):
         raise Blocked("Original or replica no longer matches onboarding")
     with _git(ledger, source) as (git, _):

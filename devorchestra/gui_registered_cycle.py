@@ -7,7 +7,7 @@ from time import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from . import cycle_progress, registered_cycle, replica_readiness
+from . import cycle_progress, game_pilot, registered_cycle, replica_readiness
 from .catalog import Catalog
 from .ledger import digest
 
@@ -39,6 +39,11 @@ def show(center, project):
     criteria = cycle_progress.freeze(data["acceptance"], None)
     for key, item in criteria.items():
         ttk.Label(panel, text=f"{key} · {item['text']}", wraplength=580).pack(anchor="w")
+    if any(name.casefold() == "project.godot" for name in baseline["files"]):
+        state.set("게임 온라인 개발 대기 · Windows 내보내기와 소유 창 검증 계약 필요")
+        if project == game_pilot.PROJECT:
+            _game_preflight(panel, runner, state)
+        return
     ttk.Button(panel, text="등록 목표·기준 편집",
                command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
     inputs = ttk.Frame(panel)
@@ -218,3 +223,56 @@ def show(center, project):
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: (close(), "break")[1])
     render()
+
+
+def _game_preflight(panel, runner, state):
+    cancelled = Event()
+    future = None
+
+    def close():
+        if future is not None and not future.done():
+            cancelled.set()
+            state.set("중단 요청됨 · 소유 Job 회수 대기")
+        else:
+            panel.destroy()
+
+    def start():
+        nonlocal future
+        archive = filedialog.askopenfilename(parent=panel, filetypes=[("Codex ZIP", "*.zip")])
+        if not archive:
+            return
+        future = Future()
+        cancelled.clear()
+        button.configure(state="disabled")
+        state.set("오프라인 MXC 검사 실행 중")
+
+        def worker():
+            try:
+                future.set_result(game_pilot.run(runner, archive, cancelled=cancelled.is_set, capture=True))
+            except Exception as error:
+                future.set_exception(error)
+
+        def poll():
+            if not future.done():
+                panel.after(150, poll)
+                return
+            button.configure(state="normal")
+            try:
+                result = future.result()
+                detail = result.get("reason") or (f"PNG {result.get('imported_textures', 0)}개 · "
+                                                  f"PCK {'PASS' if result.get('resource_pack') else '미검증'} · "
+                                                  f"{result['gui']}")
+                state.set(f"오프라인 사전 검증 {result['outcome']} · {detail}")
+            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                state.set(str(error))
+
+        Thread(target=worker, daemon=False).start()
+        panel.after(150, poll)
+
+    ttk.Label(panel, text="등록 기준의 PNG 가져오기, 리소스 팩 실행, 소유 테스트 창 캡처를 검사합니다.",
+              wraplength=580).pack(anchor="w")
+    button = ttk.Button(panel, text="게임 오프라인 사전 검증", command=start)
+    button.pack(anchor="w")
+    ttk.Button(panel, text="닫기 / 중단", command=close).pack(anchor="w")
+    panel.protocol("WM_DELETE_WINDOW", close)
+    panel.bind("<Escape>", lambda _event: (close(), "break")[1])
