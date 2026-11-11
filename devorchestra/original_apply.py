@@ -45,12 +45,21 @@ def _prepare(runner, project, expires):
     if len(end["roles"]) < len(expected):
         raise Blocked("Subscription receipt chain is incomplete")
     receipts = []
+    supplemental = session["scope"].get("reverification")
+    parent = None
+    if supplemental:
+        parent = _find(events, "subscription_session_started", project_id=project, run_id=supplemental["parent_run_id"])
+        if not parent or digest(parent["scope"]) != parent["session_approval_sha256"]:
+            raise Blocked("The original Developer approval is missing")
     for ref, (phase, kind) in zip(end["roles"][-4:], expected, strict=True):
+        owner = parent if parent and phase in {"developer", "reviewer"} else session
         event = _find(events, kind, project_id=project, run_id=ref["run_id"],
-                      development_session_id=session["run_id"],
-                      session_approval_sha256=session["session_approval_sha256"], outcome="COMPLETED")
+                      development_session_id=owner["run_id"],
+                      session_approval_sha256=owner["session_approval_sha256"], outcome="COMPLETED")
         if not event or ref["phase"] != phase or digest(event) != ref["sha256"] or event.get("owned_tree") != "DRAINED":
             raise Blocked("Subscription receipt chain is incomplete")
+        if owner is parent and ref["sha256"] != supplemental[phase + "_sha256"]:
+            raise Blocked("The inherited Developer or Reviewer receipt changed")
         receipts.append(event)
     developer, reviewer, verifier, final = receipts
     runtime = session["scope"].get("runtime")

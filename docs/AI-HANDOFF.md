@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+WinForms 최종 판정이 증거 부족으로 `REWORK_REQUIRED`인 경우 `subscription-reverify-winforms`로 같은 변경을 추가 검증할 수 있다. 새 시나리오와 승인 해시를 사용하며 이전 Developer·Reviewer 영수증, 원본 기준, 프로젝트 구성과 도구 신원을 고정한다. 새 Verifier와 최종 Manager가 완료되면 기존 `original-apply` 별도 승인으로 시험 원본에 반영할 수 있다.
+
 P2.109의 `mxc-dotnet-winforms-project-v1`은 패키지 없는 WinForms SDK 프로젝트를 MXC 안에서 빌드·실행한다. 기존 SDK 경로의 `runtime.tests` 대신 `runtime.scenario`에 소유 컨트롤 매핑과 2~3개의 기대 장면을 지정한다. 앱의 동결된 시작 코드에서 `DEVORCHESTRA_GUI_MANIFEST`에 현재 PID와 `root` 및 컨트롤 HWND를 JSON으로 게시해야 한다. Controller는 현재 Job 소속, 프로세스 핸들, 창 계층을 확인한 뒤 승인된 메시지만 보낸다. 같은 복제본·시나리오·툴체인의 사전 빌드 영수증이 있으면 구독 승인에 변경 전 캡처를 연결한다. WinForms SDK 모드는 검증 센터에서 검토할 수 있으며 결과 이미지는 GUI 검증 보고서에서 확인한다.
 
 검증 범위는 클릭·입력·리스트 스크롤·선택 확인·크기 변경·상태와 창 제목 확인이다. SDK 프로젝트에는 제한된 로컬 참조와 명시적 텍스트 내장 리소스를 허용한다. WPF, 임의 창 자동 탐색, 체크박스·모달·포커스 시나리오, 외부 패키지 및 모델의 프로젝트 구성·리소스 편집은 지원 대상에 포함되지 않는다.

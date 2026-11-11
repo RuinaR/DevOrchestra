@@ -313,6 +313,110 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
         return result
 
 
+def review_winforms_reverification(runner, project, account, expires, seconds, tokens, scenario):
+    """Approve more observations for the same reviewed source after a final rework decision."""
+    from .runtime import require_admission
+
+    events, head = runner.ledger.snapshot()
+    require_admission(events)
+    ended = cycle._find(events, "subscription_session_ended", project_id=project)
+    if not ended or ended.get("outcome") != "REWORK_REQUIRED" or ended.get("owned_tree") != "DRAINED":
+        raise Blocked("Supplemental verification requires a settled final rework decision")
+    started = cycle._find(events, "subscription_session_started", project_id=project, run_id=ended["run_id"])
+    if not started or digest(started["scope"]) != started["session_approval_sha256"]:
+        raise Blocked("Previous session approval changed")
+    prior = started["scope"]
+    runtime = prior.get("runtime", {})
+    if (runtime.get("kind") != mxc_sdk_project.GUI_KIND or prior.get("reverification")
+            or ended["session_approval_sha256"] != started["session_approval_sha256"]
+            or account != prior["account"] or type(expires) is not int or not time() < expires <= time() + 300
+            or type(seconds) is not int or not 1 <= seconds <= prior["seconds"]
+            or type(tokens) is not int or not 1 <= tokens <= prior["tokens"]):
+        raise Blocked("Supplemental verification exceeds the previous session scope")
+    roles = {role["phase"]: role for role in ended["roles"]}
+    receipts = []
+    for phase, kind in (("developer", "subscription_developer_result"), ("reviewer", "subscription_cycle_result"),
+                        ("manager-final", "subscription_cycle_result")):
+        ref = roles.get(phase, {})
+        receipt = cycle._find(events, kind, project_id=project, run_id=ref.get("run_id"),
+                              development_session_id=started["run_id"],
+                              session_approval_sha256=started["session_approval_sha256"], outcome="COMPLETED")
+        if not receipt or digest(receipt) != ref["sha256"] or receipt["owned_tree"] != "DRAINED":
+            raise Blocked("Previous reviewed change has incomplete evidence")
+        receipts.append(receipt)
+    changed, reviewed, final = receipts
+    if (reviewed["decision"] != "ACCEPT_FOR_VERIFICATION" or final["decision"] != "REWORK_REQUIRED"
+            or reviewed["developer_sha256"] != digest(changed) or final["developer_sha256"] != digest(changed)
+            or final["reviewer_sha256"] != digest(reviewed)):
+        raise Blocked("Previous decisions do not refer to the same reviewed change")
+    replica = Path(prior["replica"])
+    cycle._current(replica, changed)
+    frozen = runtime["build"]
+    build = mxc_sdk_project.review(replica, frozen["launcher"], [frozen["entry"]], scenario,
+                                   frozen["limits"]["max_seconds"], Path(frozen["tool_root_read_only"]), winforms=True)
+    files = prior["writable_files"]
+    if (any(build[key] != value for key, value in frozen.items()
+            if key not in {"replica_sha256", "sources", "tests", "gui_scenario"})
+            or {name: info for name, info in build["sources"].items() if name not in files}
+            != {name: info for name, info in frozen["sources"].items() if name not in files}):
+        raise Blocked("Supplemental verification changed the build boundary")
+    spec = {"files": dict.fromkeys(files, prior["acceptance"])}
+    scope = {**prior, "expires": expires, "seconds": seconds, "tokens": tokens, "max_reworks": 0,
+             "generation": len(events) + 1, "ledger_head": head, "vectors_sha256": digest(spec),
+             "runtime": {"kind": runtime["kind"], "build": build},
+             "reverification": {"parent_run_id": started["run_id"], "developer_sha256": digest(changed),
+                                "reviewer_sha256": digest(reviewed), "prior_final_sha256": digest(final)}}
+    return scope, spec, [roles["developer"], roles["reviewer"]]
+
+
+def run_winforms_reverification(runner, project, account, expires, seconds, tokens, scenario, approved,
+                                cancelled=lambda: False):
+    from .runtime import native_unresolved, require_admission
+
+    with execution_slot() as abandoned:
+        events, head = runner._idle_diagnostic(abandoned)
+        scope, spec, roles = review_winforms_reverification(runner, project, account, expires, seconds, tokens, scenario)
+        if digest(scope) != approved or scope["ledger_head"] != head:
+            raise Blocked("Supplemental verification approval changed")
+        session_id = uuid4().hex
+        session = _Session(runner, scope, session_id, approved, cancelled)
+        session.replica_sha256 = scope["runtime"]["build"]["replica_sha256"]
+        fields = {"project_id": project, "run_id": session_id, "state": "DIAGNOSTIC", **session.binding()}
+        runner.ledger.append(len(events), head, {**fields, "kind": "subscription_session_started", "scope": scope},
+                             admission=require_admission)
+        verified, reason, outcome = None, None, "BLOCKED"
+        with development_session_scope(session_id):
+            try:
+                for phase, role_account, model, inputs in (
+                        ("verifier", None, None, spec), ("manager-final", account, scope["models"]["Manager"], None)):
+                    session.phase = phase
+                    session.check_scope()
+                    args = (runner, project, roles[0]["run_id"], phase, role_account, model, expires, inputs)
+                    result = cycle.run(*args, digest(cycle.review(*args, session=session)), session.stopped,
+                                       session=session)
+                    roles.append({"phase": phase, "run_id": result["run_id"], "sha256": digest(result),
+                                  "usage": result["usage"], "outcome": result["outcome"]})
+                    session.accept_receipt(result)
+                    if phase == "verifier":
+                        verified = result
+                        if verified["verdict"] != "PASS":
+                            raise Blocked("Supplemental GUI verification did not pass")
+                    else:
+                        outcome = result["decision"]
+            except (Blocked, KeyboardInterrupt) as error:
+                reason = str(error) if isinstance(error, Blocked) else "CANCELLED"
+        current, tail = runner.ledger.snapshot()
+        result = {**fields, "kind": "subscription_session_ended", "outcome": outcome, "reason": reason,
+                  "roles": roles, "reworks": 0, "remaining_reported_tokens": session.remaining,
+                  "used_reported_tokens": session.reported, "usage_complete": session.usage_complete,
+                  "owned_tree": "UNRESOLVED" if native_unresolved(current) else "DRAINED",
+                  "gui": "GUI_PASS" if verified and verified["verdict"] == "PASS" else "NOT_VERIFIED",
+                  "gui_receipt_sha256": digest(verified) if verified else None,
+                  "provider_token_limit": "UNAVAILABLE_PREVIEW"}
+        runner.ledger.append(len(current), tail, result, allow_shutdown=True)
+        return result
+
+
 def recover(runner, project, session_id):
     """Settle an interrupted session between roles without replaying any request."""
     from .runtime import native_unresolved

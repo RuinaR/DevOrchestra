@@ -92,10 +92,15 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
             or not developer.get("after_replica_sha256")):
         raise Blocked("Cycle requires a Developer receipt with a verified change manifest")
     binding = {"project_id": project, "developer_run_id": developer_run}
-    if _find(events, "subscription_cycle_result", **binding, phase=phase):
+    supplemental = session.scope.get("reverification") if session else None
+    attempt_binding = {**binding, **session.binding()} if supplemental else binding
+    if _find(events, "subscription_cycle_result", **attempt_binding, phase=phase):
         raise Blocked("This cycle role already has a recorded attempt")
     reviewer = _find(events, "subscription_cycle_result", **binding, phase="reviewer", outcome="COMPLETED")
-    verifier = _find(events, "subscription_cycle_result", **binding, phase="verifier", outcome="COMPLETED")
+    verifier = _find(events, "subscription_cycle_result", **attempt_binding, phase="verifier", outcome="COMPLETED")
+    if supplemental and (phase == "reviewer" or digest(developer) != supplemental["developer_sha256"]
+                         or digest(reviewer) != supplemental["reviewer_sha256"]):
+        raise Blocked("Supplemental verification is limited to the approved reviewed change")
     if phase != "reviewer" and (not reviewer or reviewer["decision"] != "ACCEPT_FOR_VERIFICATION"):
         raise Blocked("An accepting Reviewer receipt is required")
     if phase == "manager-final" and not verifier:
@@ -346,6 +351,8 @@ def run(runner, project, developer_run, phase, account, model, expires, spec, ap
                 else:
                     verified = _find(events, "subscription_cycle_result", project_id=project,
                                      developer_run_id=developer_run, phase="verifier", outcome="COMPLETED")
+                    if digest(verified) != scope["verifier_sha256"]:
+                        raise Blocked("Final verdict evidence changed")
                     decision = _final_decision(output, scope, verified)
                 check()
                 ref = f"cycle-{run_id}.dpapi"

@@ -66,6 +66,15 @@ def main():
     unified.add_argument("--reworks", type=int, default=2)
     unified.add_argument("--expires", type=int, required=True)
     unified.add_argument("--approve", metavar="REVIEW_SHA256")
+    reverify = commands.add_parser("subscription-reverify-winforms",
+                                   help="Approve supplemental GUI verification for a reviewed change")
+    reverify.add_argument("--project", required=True)
+    reverify.add_argument("--account", required=True)
+    reverify.add_argument("--scenario", type=json.loads, required=True)
+    reverify.add_argument("--seconds", type=int, required=True)
+    reverify.add_argument("--tokens", type=int, required=True)
+    reverify.add_argument("--expires", type=int, required=True)
+    reverify.add_argument("--approve", metavar="REVIEW_SHA256")
     unified_recover = commands.add_parser("subscription-session-recover", help="Close an interrupted session without replay")
     unified_recover.add_argument("--project", required=True)
     unified_recover.add_argument("--run", required=True)
@@ -226,6 +235,17 @@ def main():
 
             print(canonical(recover(Runner(ledger), args.project, args.run)))
             return
+        if args.action == "subscription-reverify-winforms":
+            from . import subscription_session
+
+            fields = (Runner(ledger), args.project, args.account, args.expires, args.seconds, args.tokens, args.scenario)
+            if args.approve is None:
+                scope, _, _ = subscription_session.review_winforms_reverification(*fields)
+                print(canonical({"review": scope, "review_sha256": digest(scope)}))
+                return
+            receipt = subscription_session.run_winforms_reverification(*fields, args.approve)
+            print(canonical(receipt))
+            return 0 if receipt["outcome"] == "COMPLETED" else 2
         if args.action == "subscription-session":
             from . import subscription_session
 
