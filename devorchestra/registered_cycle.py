@@ -193,6 +193,25 @@ def review_game(runner, archive, expires, limits=None):
 
 def _verified_game_base(ledger, events, replica, image, frozen, onboarding, files):
     rows = history(ledger, game_pilot.PROJECT)
+    if rows and rows[-1].get("outcome") == "REWORK":
+        candidate = settled_game_rework(ledger, replica, image, frozen, onboarding, files)
+        for row in reversed(events):
+            if (row.get("project_id") != game_pilot.PROJECT or row.get("probe_kind") != game_pilot.EXPORT_KIND
+                    or row.get("kind") != "native_inspection_result" or row.get("outcome") != "PASS"
+                    or row.get("model_calls") != 0 or row.get("export") != "WINDOWS_X64_EXPORTED"
+                    or row.get("parent_run_id") != candidate["parent_run_id"]
+                    or row.get("source_sha256") != candidate["source_sha256"]
+                    or row.get("owned_tree") != "DRAINED" or row.get("staging_cleanup", {}).get("status") != "REMOVED"):
+                continue
+            name = row["artifact_directory"]
+            if not re.fullmatch(r"godot-windows-export-[a-f0-9]{32}", name):
+                raise Blocked("Invalid rework export artifact reference")
+            folder = ledger.local_directory("recovery") / name
+            if (fingerprint(folder / "GamePilot.exe", 256 * 1024**2) != row["executable"]
+                    or fingerprint(folder / "exported-window.png")["sha256"] != row["window_image"]["sha256"]):
+                raise Blocked("Rework export evidence has changed")
+            return {**candidate, "verification_run_id": row["run_id"], "executable": row["executable"]}
+        raise Blocked("Export and verify the current REWORK candidate offline before starting a new session")
     if len(rows) < 4 or rows[-1].get("outcome") != "REQUEST_UNKNOWN":
         raise Blocked("Changed game replica requires independently verified candidate evidence")
     start, end = rows[0], rows[-1]
@@ -269,6 +288,32 @@ def _verified_game_base(ledger, events, replica, image, frozen, onboarding, file
             "verification_run_id": build["run_id"], "input_run_id": inputs["run_id"],
             "changed": changed, "source_sha256": candidate, "executable": artifact["executable"],
             "design_present": "docs/GAME-DESIGN.md" in image["files"], "existing_plan": plan["plan"]}
+
+
+def settled_game_rework(ledger, replica, image, frozen, onboarding, files):
+    rows = history(ledger, game_pilot.PROJECT)
+    if len(rows) < 2 or rows[-1]["kind"] != "native_inspection_result":
+        raise Blocked("No settled game review exists")
+    start, end = rows[0], rows[-1]
+    prior = start["scope"]
+    if (end.get("outcome") != "REWORK" or end.get("owned_tree") != "DRAINED"
+            or not end.get("usage_complete") or end.get("staging_cleanup", {}).get("status") != "REMOVED"
+            or end.get("criteria_status", {}).get(game_pilot.CRITERIA[0]) != "VERIFIED"
+            or digest(prior) != start["approval_sha256"] or prior["replica"] != str(replica)
+            or prior["onboarding_sha256"] != digest(onboarding)
+            or digest({**image, "files": frozen["files"]}) != onboarding["replica_sha256"]):
+        raise Blocked("The settled REWORK review or its registered Git baseline cannot be verified")
+    changed = sorted(name for name in image["files"].keys() | frozen["files"].keys()
+                     if image["files"].get(name) != frozen["files"].get(name))
+    if (not changed or not set(changed) <= set(files)
+            or "docs/GAME-DESIGN.md" not in image["files"] or any(name not in image["files"] for name in changed)):
+        raise Blocked("The rework candidate changes paths outside the approved game scope")
+    for name in changed:
+        _read_source(replica, name, image)
+    return {"parent_run_id": start["run_id"], "parent_outcome": "REWORK", "changed": changed,
+            "source_sha256": digest(image), "design_present": True,
+            "existing_plan": "Read docs/GAME-DESIGN.md and preserve the frozen criteria. "
+                             "The previous Reviewer rejected the candidate; the original finding text is unavailable."}
 
 
 def _read_source(root, name, image):
@@ -524,6 +569,9 @@ def _cycles(session, initial_plan=None):
                  "design_present": base["design_present"],
                  "unverified": "Wall collision, item collection, win/loss, result screen, full play and visual quality."
                  } if base else None)
+    if base and base["parent_outcome"] == "REWORK":
+        feedback.update(observed="Offline export launched and closed the current revised candidate.",
+                        unverified="Read the latest independent play evidence. Do not assume unobserved criteria passed.")
     while scope["cycles"] is None or count < scope["cycles"]:
         count += 1
         session.check()

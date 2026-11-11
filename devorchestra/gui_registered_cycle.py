@@ -350,7 +350,7 @@ def _game_preflight(center, panel, runner, state):
                             title = "검증된 게임 후보에서 새 작업 승인"
                             base = result["candidate_base"]
                             summary += (f"\n후보 {base['source_sha256'][:12]} · 기존 변경 {len(base['changed'])}개. "
-                                        "기존 요청은 REQUEST_UNKNOWN으로 보존합니다. "
+                                        f"이전 세션 결과 {base['parent_outcome']}를 보존합니다. "
                                         "검증된 파일을 기준으로 새 Manager 계획부터 시작합니다.")
                         if resume:
                             title = "게임 후보 검토 재개 승인"

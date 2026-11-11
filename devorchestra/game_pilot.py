@@ -287,8 +287,15 @@ def run(runner, archive, *, cancelled=lambda: False, capture=False, export_windo
         events, head = runner._idle_diagnostic(abandoned)
         original, replica, frozen, onboarding = baseline(ledger, PROJECT)
         image = snapshot(replica)
-        if digest(image) != onboarding["replica_sha256"] or not original_matches(original, frozen):
-            raise Blocked("Game pilot no longer matches its onboarding snapshot")
+        if not original_matches(original, frozen):
+            raise Blocked("Game original no longer matches its onboarding snapshot")
+        candidate = None
+        if digest(image) != onboarding["replica_sha256"]:
+            if not export_windows:
+                raise Blocked("Game pilot no longer matches its onboarding snapshot")
+            from .registered_cycle import settled_game_rework
+
+            candidate = settled_game_rework(ledger, replica, image, frozen, onboarding, DEVELOPMENT_FILES)
         engine = _engine(replica)
         template, template_identity = _template(replica) if export_windows else (None, None)
         assets = sorted(name for name in image["files"] if name.startswith("assets/") and name.endswith(".png"))
@@ -297,6 +304,8 @@ def run(runner, archive, *, cancelled=lambda: False, capture=False, export_windo
         run_id = uuid4().hex
         common = {"project_id": PROJECT, "probe_kind": EXPORT_KIND if export_windows else KIND, "run_id": run_id,
                   "request_id": run_id, "state": "DIAGNOSTIC"}
+        if candidate:
+            common.update(parent_run_id=candidate["parent_run_id"], model_calls=0)
         evidence = None
         workers = []
         with _staging(ledger) as (lab, cleanup):
