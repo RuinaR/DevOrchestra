@@ -266,22 +266,140 @@ static void remove_filters(HANDLE engine, const std::wstring& tag) {
     absent(engine);
 }
 
+static std::wstring token_sid(HANDLE token) {
+    alignas(TOKEN_USER) BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]{};
+    DWORD returned = 0;
+    require(GetTokenInformation(token, TokenUser, buffer, sizeof(buffer), &returned), "TOKEN_USER");
+    wchar_t* sid = nullptr;
+    require(ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer)->User.Sid, &sid), "TOKEN_USER_SID");
+    const std::wstring result(sid);
+    LocalFree(sid);
+    return result;
+}
+
 static DWORD token_elevation(HANDLE process, const std::wstring* expected_sid = nullptr) {
     Handle token;
     require(OpenProcessToken(process, TOKEN_QUERY, &token.value), "TOKEN_OPEN");
     TOKEN_ELEVATION state{};
     DWORD returned = 0;
     require(GetTokenInformation(token.value, TokenElevation, &state, sizeof(state), &returned), "TOKEN_ELEVATION");
-    if (expected_sid) {
-        alignas(TOKEN_USER) BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE]{};
-        require(GetTokenInformation(token.value, TokenUser, buffer, sizeof(buffer), &returned), "TOKEN_USER");
-        wchar_t* sid = nullptr;
-        require(ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer)->User.Sid, &sid), "TOKEN_USER_SID");
-        const bool same = *expected_sid == sid;
-        LocalFree(sid);
-        if (!same) throw Failure{"WRONG_PROBE_IDENTITY", ERROR_ACCESS_DENIED};
-    }
+    if (expected_sid && token_sid(token.value) != *expected_sid)
+        throw Failure{"WRONG_PROBE_IDENTITY", ERROR_ACCESS_DENIED};
     return state.TokenIsElevated;
+}
+
+static JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job_counts(HANDLE job) {
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION counts{};
+    if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &counts, sizeof(counts), nullptr))
+        throw Failure{"PROCESS_DRAIN_UNCONFIRMED", GetLastError()};
+    return counts;
+}
+
+static bool wait_for_empty_job(HANDLE job) {
+    const auto deadline = GetTickCount64() + 3000;
+    while (job_counts(job).ActiveProcesses) {
+        if (GetTickCount64() >= deadline) return false;
+        Sleep(10);
+    }
+    return true;
+}
+
+struct JobAttributes {
+    std::vector<BYTE> storage;
+    LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
+    HANDLE job;
+    explicit JobAttributes(HANDLE owned_job) : job(owned_job) {
+        SIZE_T size = 0;
+        if (InitializeProcThreadAttributeList(nullptr, 1, 0, &size) ||
+            GetLastError() != ERROR_INSUFFICIENT_BUFFER || !size)
+            throw Failure{"JOB_ATTRIBUTE_SIZE", ERROR_INVALID_DATA};
+        storage.resize(size);
+        auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+        require(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "JOB_ATTRIBUTE_INIT");
+        if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job),
+                                       nullptr, nullptr)) {
+            const DWORD error = GetLastError();
+            DeleteProcThreadAttributeList(attributes);
+            throw Failure{"JOB_ATTRIBUTE_UPDATE", error};
+        }
+        list = attributes;
+    }
+    JobAttributes(const JobAttributes&) = delete;
+    JobAttributes& operator=(const JobAttributes&) = delete;
+    ~JobAttributes() { DeleteProcThreadAttributeList(list); }
+};
+
+static DWORD run_in_new_job(const std::wstring& executable, std::wstring& command, const wchar_t* cwd,
+                            wchar_t* environment, const wchar_t* desktop, HANDLE token,
+                            const std::wstring* expected_sid, bool preflight = false) {
+    if (!token && !preflight) throw Failure{"PRIMARY_TOKEN_REQUIRED", ERROR_INVALID_HANDLE};
+    Handle job, process, thread;
+    job.value = CreateJobObjectW(nullptr, nullptr);
+    require(job.value != nullptr, "JOB_CREATE");
+    DWORD handle_flags = 0;
+    require(GetHandleInformation(job.value, &handle_flags), "JOB_HANDLE_FLAGS");
+    if (handle_flags & HANDLE_FLAG_INHERIT) throw Failure{"JOB_HANDLE_INHERITABLE", ERROR_INVALID_DATA};
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    require(SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits)), "JOB_LIMIT");
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION applied{};
+    require(QueryInformationJobObject(job.value, JobObjectExtendedLimitInformation, &applied, sizeof(applied),
+                                      nullptr), "JOB_LIMIT_READBACK");
+    if (applied.BasicLimitInformation.LimitFlags != limits.BasicLimitInformation.LimitFlags ||
+        applied.BasicLimitInformation.ActiveProcessLimit != limits.BasicLimitInformation.ActiveProcessLimit)
+        throw Failure{"JOB_LIMIT_UNVERIFIED", ERROR_INVALID_DATA};
+    JobAttributes attributes(job.value);
+    STARTUPINFOEXW start{};
+    start.StartupInfo.cb = sizeof(start);
+    start.StartupInfo.lpDesktop = const_cast<wchar_t*>(desktop);
+    start.lpAttributeList = attributes.list;
+    PROCESS_INFORMATION pi{};
+    constexpr DWORD flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT |
+                            EXTENDED_STARTUPINFO_PRESENT;
+    const BOOL created = token
+        ? CreateProcessAsUserW(token, executable.c_str(), command.data(), nullptr, nullptr, FALSE,
+                               flags, environment, cwd, &start.StartupInfo, &pi)
+        : CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
+                         flags, environment, cwd, &start.StartupInfo, &pi);
+    const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+    process.value = pi.hProcess;
+    thread.value = pi.hThread;
+    if (!created) {
+        if (process.value || thread.value || job_counts(job.value).TotalProcesses)
+            throw Failure{"PROCESS_DRAIN_UNCONFIRMED", create_error};
+        throw Failure{token ? "ATOMIC_TOKEN_CREATE" : "ATOMIC_CONTROL_CREATE", create_error};
+    }
+    BOOL assigned = FALSE;
+    const bool membership = IsProcessInJob(process.value, job.value, &assigned) && assigned;
+    if (!membership) {
+        // Never resume an unverified process, even when the creation API reports success.
+        if ((!TerminateProcess(process.value, 5) && WaitForSingleObject(process.value, 0) != WAIT_OBJECT_0) ||
+            WaitForSingleObject(process.value, 3000) != WAIT_OBJECT_0 || !wait_for_empty_job(job.value))
+            throw Failure{"PROCESS_DRAIN_UNCONFIRMED", ERROR_BUSY};
+        throw Failure{"ATOMIC_MEMBERSHIP_UNVERIFIED", ERROR_INVALID_DATA};
+    }
+    try {
+        if (job_counts(job.value).ActiveProcesses != 1)
+            throw Failure{"PROCESS_DRAIN_UNCONFIRMED", ERROR_INVALID_DATA};
+        if (token_elevation(process.value, expected_sid))
+            throw Failure{"PROBE_MUST_BE_STANDARD_USER", ERROR_ACCESS_DENIED};
+        if (preflight) report("JOB_MEMBERSHIP_BEFORE_RESUME", 1);
+        if (ResumeThread(thread.value) != 1 || WaitForSingleObject(process.value, 8000) != WAIT_OBJECT_0)
+            throw Failure{"PROBE_TIMEOUT_OR_RESUME", WAIT_TIMEOUT};
+        if (!wait_for_empty_job(job.value))
+            throw Failure{"PROCESS_DRAIN_UNCONFIRMED", ERROR_BUSY};
+    } catch (...) {
+        if (WaitForSingleObject(process.value, 0) != WAIT_OBJECT_0 || job_counts(job.value).ActiveProcesses) {
+            if (!TerminateJobObject(job.value, 5) || WaitForSingleObject(process.value, 3000) != WAIT_OBJECT_0 ||
+                !wait_for_empty_job(job.value))
+                throw Failure{"PROCESS_DRAIN_UNCONFIRMED", ERROR_BUSY};
+        }
+        throw;
+    }
+    DWORD exit_code = 0;
+    require(GetExitCodeProcess(process.value, &exit_code), "CLIENT_EXIT_CODE");
+    return exit_code;
 }
 
 static void open_receipt(const wchar_t* name = L"pilot-result.txt") {
@@ -344,6 +462,47 @@ struct PrivateDesktop {
     }
 };
 
+static int job_preflight() {
+    try {
+        if (token_elevation(GetCurrentProcess())) throw Failure{"PREFLIGHT_REQUIRES_STANDARD_TOKEN", ERROR_ACCESS_DENIED};
+        wchar_t system[MAX_PATH]{}, windows[MAX_PATH]{};
+        if (!GetSystemDirectoryW(system, ARRAYSIZE(system)) || !GetWindowsDirectoryW(windows, ARRAYSIZE(windows)))
+            throw Failure{"DIRECTORY_DISCOVERY", ERROR_PATH_NOT_FOUND};
+        Handle current, restricted;
+        require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+                                 &current.value), "TOKEN_OPEN");
+        const auto sid = token_sid(current.value);
+        const std::wstring executable = std::wstring(system) + L"\\cmd.exe";
+        const auto base_command = L"\"" + executable + L"\" /d /q /c exit 0";
+        std::wstring environment = L"SystemRoot=" + std::wstring(windows);
+        environment.push_back(0);
+        auto command = base_command;
+        const auto run = [&](HANDLE token) {
+            return run_in_new_job(executable, command, system, environment.data(), nullptr, token, &sid, true);
+        };
+        const DWORD control = run(nullptr);
+        report("ATOMIC_CONTROL_EXIT", control);
+        if (control) return 2;
+        command = base_command;
+        try {
+            run(INVALID_HANDLE_VALUE);
+            throw Failure{"INVALID_TOKEN_WAS_ACCEPTED", ERROR_INVALID_DATA};
+        } catch (Failure error) {
+            if (strcmp(error.operation, "ATOMIC_TOKEN_CREATE") || error.error != ERROR_INVALID_HANDLE) throw;
+            report("INVALID_TOKEN_CREATE_BLOCKED", error.error);
+        }
+        require(CreateRestrictedToken(current.value, DISABLE_MAX_PRIVILEGE, 0, nullptr, 0, nullptr, 0, nullptr,
+                                      &restricted.value), "RESTRICTED_TOKEN_CREATE");
+        command = base_command;
+        const DWORD result = run(restricted.value);
+        report("ATOMIC_RESTRICTED_EXIT", result);
+        return result ? 2 : 0;
+    } catch (Failure error) {
+        report(error.operation, error.error);
+        return 2;
+    }
+}
+
 static DWORD run_client(const std::wstring& ps, wchar_t* password, const std::wstring& cwd,
                         const std::wstring& home, const std::wstring& sid, const std::wstring& desktop,
                         const Listener& listener) {
@@ -367,46 +526,10 @@ static DWORD run_client(const std::wstring& ps, wchar_t* password, const std::ws
         environment += item;
         environment.push_back(0);
     }
-    Handle job;
-    job.value = CreateJobObjectW(nullptr, nullptr);
-    require(job.value != nullptr, "JOB_CREATE");
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-    limits.BasicLimitInformation.ActiveProcessLimit = 1;
-    require(SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits)), "JOB_LIMIT");
-    STARTUPINFOW start{};
-    start.cb = sizeof(start);
-    start.lpDesktop = const_cast<wchar_t*>(desktop.c_str());
-    PROCESS_INFORMATION pi{};
-    require(CreateProcessWithLogonW(Account, L".", password, 0, ps.c_str(), command.data(),
-                                  CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                                  environment.data(), cwd.c_str(), &start, &pi), "STANDARD_USER_START");
-    Handle process, thread;
-    process.value = pi.hProcess; thread.value = pi.hThread;
-    if (!AssignProcessToJobObject(job.value, process.value)) {
-        const auto error = GetLastError();
-        if (!TerminateProcess(process.value, 4)) throw Failure{"PROCESS_DRAIN_UNCONFIRMED", GetLastError()};
-        if (WaitForSingleObject(process.value, 3000) != WAIT_OBJECT_0) throw Failure{"PROCESS_DRAIN_UNCONFIRMED", WAIT_TIMEOUT};
-        throw Failure{"JOB_ASSIGN", error};
-    }
-    try {
-        if (token_elevation(process.value, &sid)) throw Failure{"PROBE_MUST_BE_STANDARD_USER", ERROR_ACCESS_DENIED};
-    } catch (...) {
-        if (!TerminateJobObject(job.value, 5) || WaitForSingleObject(process.value, 3000) != WAIT_OBJECT_0)
-            throw Failure{"PROCESS_DRAIN_UNCONFIRMED", WAIT_TIMEOUT};
-        throw;
-    }
-    if (ResumeThread(thread.value) != 1 || WaitForSingleObject(process.value, 8000) != WAIT_OBJECT_0) {
-        if (!TerminateJobObject(job.value, 5)) throw Failure{"PROCESS_DRAIN_UNCONFIRMED", GetLastError()};
-        if (WaitForSingleObject(process.value, 3000) != WAIT_OBJECT_0) throw Failure{"PROCESS_DRAIN_UNCONFIRMED", WAIT_TIMEOUT};
-        throw Failure{"PROBE_TIMEOUT_OR_RESUME", WAIT_TIMEOUT};
-    }
-    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION counts{};
-    require(QueryInformationJobObject(job.value, JobObjectBasicAccountingInformation, &counts, sizeof(counts), nullptr), "JOB_ACCOUNTING");
-    if (counts.ActiveProcesses) throw Failure{"PROCESS_DRAIN_UNCONFIRMED", ERROR_BUSY};
-    DWORD exit_code = 0;
-    require(GetExitCodeProcess(process.value, &exit_code), "CLIENT_EXIT_CODE");
-    return exit_code;
+    Handle token;
+    require(LogonUserW(Account, L".", password, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
+                       &token.value), "STANDARD_USER_TOKEN");
+    return run_in_new_job(ps, command, cwd.c_str(), environment.data(), desktop.c_str(), token.value, &sid);
 }
 
 static bool own_account(const std::wstring& tag, bool must_be_disabled = false) {
@@ -495,6 +618,7 @@ static bool valid_id(const std::wstring& id) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && wcscmp(argv[1], L"--job-preflight") == 0) return job_preflight();
     const bool fault = argc == 3 && wcscmp(argv[1], L"--crash-before-enable") == 0;
     const bool recover = argc == 4 && wcscmp(argv[1], L"--recover-disabled") == 0;
     const std::wstring id = (fault || recover) ? argv[2] : L"";

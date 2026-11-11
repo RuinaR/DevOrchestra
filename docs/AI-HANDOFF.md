@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+P2.119의 새 MSVC x64 빌드는 비승격 `pilot.exe --job-preflight`로 생성 시 Job 편입과 실패 경로를 확인할 수 있다. 기존 `native-egress-trial`의 고정 해시와 복구 계약은 비활성 P2.117 빌드에만 적용된다. 다음 통합은 원장 의도를 먼저 기록하고, Job 핸들을 보유하지 않는 독립 관찰자가 실행 중인 고정 작업자·자식의 대기 핸들, 생성 시각, SID 및 Job 소속을 결속해야 한다. 소유 Controller 종료 후 관찰자가 두 종료를 증명하고 시험 계정의 신규 실행을 막은 상태에서만 별도 UAC 복구로 넘어간다. 관찰 증거가 없으면 `CLEANUP_BLOCKED`를 유지한다. 실제 교차 계정 생성에는 선택된 실행 토큰에 따라 Windows 호출 권한이 추가로 필요할 수 있다. [CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw)
+
 P2.118에서 일반 사용자 권한의 Windows 시험으로 Job 이탈 요청 거부, 시험 Controller 강제 종료 후 작업자·자식 핸들의 종료, 미확정 원장의 재입장 차단을 확인했다. 전용 계정에서 실행할 다음 시험과 복구의 승인 범위는 [P2.118 시험 계획](ARCHITECTURE-ROADMAP.md#p2118-활성-작업자와-로컬-프록시-시험-계획)에 있다.
 
 P2.117 관리자 시험에서 비활성 계정의 설치기 강제 종료 후 필터 16개의 영속성을 관측했고, 별도 복구 후 Controller가 시험 개체의 부재를 확인했다. 원장 상태는 `CLEANUP_VERIFIED`다. 다음에는 기존 네이티브 실행기·Job·원장을 재사용해 활성 작업자 종료 후 회수와 지정 프록시 주소·포트의 송신 경계를 검증한다. 같은 실행 신원에서 허용 연결과 직접 IPv4·IPv6, DNS 및 자식 송신 거부를 비교하고, 작업자가 남아 있거나 회수가 미확정이면 정책 제거와 새 실행을 차단한다. 해당 경계를 확인하고 별도 승인을 받은 뒤 독립 Git 복제본에서 공식 Codex Developer의 직접 수정·테스트를 검증한다.

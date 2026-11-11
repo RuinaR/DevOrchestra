@@ -130,6 +130,8 @@ def _review(ledger, events, head, binary, expires, recovery):
         old = pending.get(recovery)
         if not old or old["scope"]["binary"] != str(binary) or old["scope"]["binary_sha256"] != binary_sha256:
             raise Blocked("Recovery must use the same reviewed pilot for the pending trial")
+        if old["scope"].get("mode") != "FAULT_BEFORE_ENABLE" or old["scope"].get("starts_worker") is not False:
+            raise Blocked("CLEANUP_BLOCKED: disabled recovery cannot establish active-worker exit")
     else:
         if pending or not _clear(readback()):
             raise Blocked("CLEANUP_BLOCKED: pilot resources are present or unverified")
