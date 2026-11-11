@@ -338,7 +338,7 @@ class _FixtureSession:
             response["diff"] = self.developer_diff(cycle, task, before, require_change=recovered)
         return response
 
-    def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None,
+    def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None, shell_tools=True,
                  context="This is an isolated arithmetic fixture."):
         self.check()
         self.check_image()
@@ -361,7 +361,7 @@ class _FixtureSession:
         process_result = "EXITED"
         try:
             result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
-                                                      tool_root=tool_root),
+                                                      tool_root=tool_root, shell_tools=shell_tools),
                               self.work, role_log, self.env, seconds=self.seconds(), check=self.check,
                               output_limit=262144, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
         except OwnedMxcStopped as stopped:
@@ -414,6 +414,8 @@ class _FixtureSession:
             receipt["manager_decision"] = decision if decision in {"CONTINUE", "REWORK", "COMPLETED"} else "INVALID"
         self.phases.append({"cycle": cycle, "phase": phase, **receipt})
         self.record("native_inspection_role_result", cycle=cycle, phase=phase, target=target, **receipt)
+        if not shell_tools and receipt["command_events"]:
+            raise Blocked("A role with shell disabled returned command execution events")
         if outcome != "COMPLETED":
             raise Blocked(outcome)
         self.check()

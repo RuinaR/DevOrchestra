@@ -4,7 +4,7 @@ from .runtime import PHASES, State, last_run
 
 def project_view(events, project=None):
     if project is not None:
-        events = [event for event in events if event["project_id"] == project]
+        events = [event for event in events if event.get("project_id") == project]
     run = last_run(events)
     if not run:
         return {"state": State.IDLE.value, "run": None, "roles": {}, "events": []}

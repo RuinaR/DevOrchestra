@@ -32,14 +32,16 @@ PROFILE = "developer-trial"
 DEFAULT_MODEL = "gpt-6.1-sol"
 
 
-def trial_flags(work, *, writable=True, code_mode=False, tool_root=None):
+def trial_flags(work, *, writable=True, code_mode=False, tool_root=None, shell_tools=True):
     """Keep every temporary override on the owned process command line."""
     rules = ((":root", "deny"), (":minimal", "read"), (str(work), "write" if writable else "read"),
              (str(work / ".git"), "read"))
     if tool_root is not None:
         rules += ((str(tool_root), "read"),)
     filesystem = "{ " + ", ".join(f"{json.dumps(path)} = {json.dumps(access)}" for path, access in rules) + " }"
-    enabled = {"shell_tool"} | ({"code_mode", "code_mode_host"} if code_mode else set())
+    enabled = {"code_mode", "code_mode_host"} if code_mode else set()
+    if shell_tools:
+        enabled.add("shell_tool")
     values = [
         'windows.sandbox="mxc"', 'approval_policy="never"', f'default_permissions="{PROFILE}"',
         f"permissions.{PROFILE}.filesystem={filesystem}", f"permissions.{PROFILE}.network.enabled=false",
@@ -193,8 +195,9 @@ def _verify_output(binary, work, output, environment, check, *, test_command="ca
                     encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
 
 
-def _exec_argv(work, model, prompt, *, writable=True, tool_root=None):
-    return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root), "exec", "--ignore-user-config", "--json",
+def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tools=True):
+    return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root, shell_tools=shell_tools),
+            "exec", "--ignore-user-config", "--json",
             "--ephemeral", "--model", model, "--cd", str(work), prompt]
 
 

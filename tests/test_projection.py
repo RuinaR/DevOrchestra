@@ -71,6 +71,11 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(view["snapshot_version"], self.view()["snapshot_version"])
         self.assertEqual(view["snapshot_version"][0], len(self.ledger.read()))
 
+    def test_global_events_without_project_id_do_not_hide_project_list(self):
+        count, head = self.ledger.snapshot()
+        self.ledger.append(len(count), head, {"kind": "legacy_global_event"})
+        self.assertIn("fixture-a", self.view()["project_names"])
+
     def test_filters_preserve_project_run_and_role_boundaries(self):
         self.start()
         self.approve()

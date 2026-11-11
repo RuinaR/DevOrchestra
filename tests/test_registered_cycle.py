@@ -64,6 +64,8 @@ class RegisteredCycleTests(unittest.TestCase):
                 cycle, phase = logs.name.split("-", 1)
                 cycle = int(cycle)
                 calls.append((cycle, phase))
+                shell = "true" if phase in {"developer", "reviewer"} else "false"
+                self.assertIn(f"features.shell_tool={shell}", argv)
                 if phase == "developer":
                     code = 'GREETING = "hello"\nSIGNOFF = "old"\n' if cycle == 1 else (
                         'GREETING = "hello"\nSIGNOFF = "goodbye"\n')

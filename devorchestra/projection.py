@@ -25,7 +25,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     view = project_view(events, project_id)
     global_view = project_view(events)
     project_events = [dict(event, sequence=seq) for seq, event in enumerate(events, 1)
-                      if event["project_id"] == project_id]
+                      if event.get("project_id") == project_id]
     start = view["run"]
     requirements = latest_requirements(catalog, project_id)
     current = [e for e in project_events if start and e["run_id"] == start["run_id"]]

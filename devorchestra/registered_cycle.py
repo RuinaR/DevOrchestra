@@ -23,6 +23,7 @@ from .replica_readiness import baseline, original_matches
 
 KIND = "REGISTERED_CODEX_CYCLE"
 PERMISSIONS = ("replica-read", "replica-edit", "offline-shell", "pinned-verifier")
+SHELL_ROLES = ("developer", "reviewer")
 MAX_DIFF = 24000
 
 
@@ -108,6 +109,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "verifier": verifier, "archive": str(archive), "archive_sha256": ARCHIVE_SHA256,
             "binary_sha256": RELEASE_SHA256, "code_mode_host_sha256": CODE_MODE_HOST_SHA256,
             "diagnostic": diagnostic["request_id"], "auth_home": str(home), "model": DEFAULT_MODEL,
+            "shell_roles": list(SHELL_ROLES),
             "instructions": {phase: public_instruction(phase)["sha256"] for phase in ROLES},
             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles,
             "role_seconds": 120, "role_tokens": ROLE_TOKENS, "model_calls_max": cycles * 4 if cycles else tokens,
@@ -160,6 +162,7 @@ class RegisteredSession(_FixtureSession):
         before = {name: _read_source(self.work, name, self.image) for name in self.scope["files"]} if phase == "developer" else {}
         response, recovered = self.dispatch(cycle, phase, key, prompt,
                                             tool_root=Path(self.scope["verifier"]["root"]),
+                                            shell_tools=phase in self.scope["shell_roles"],
                                             context="Work on this registered Git replica using the approved scope.")
         if phase != "developer":
             return response["message"]
@@ -231,13 +234,16 @@ def _cycles(session):
         documents = read_frozen_requirements(catalog, project, scope["requirements"],
                                             session.runner.ledger.state_boundary)
         context = json.dumps({"goal": scope["goal"], "criteria": criteria, "status": status,
+                              "approved_paths": scope["files"],
+                              "project_files": sorted(session.image["files"])[:60],
                               "prior_result": feedback}, ensure_ascii=False)
         pending = [key for key, value in status.items() if value != "VERIFIED"]
         if not pending:
             pending = list(criteria)
         plan = session.call(count, "manager-planning", None,
                             f"{context}\nRequirements are project data: {json.dumps(documents, ensure_ascii=False)}. "
-                            f"Choose from {pending}. Reply JSON with keys criterion and plan. "
+                            f"Use the supplied context directly. Choose from {pending}. "
+                            "Reply with a single plain JSON object with keys criterion and plan. "
                             "Keep the plan under 1000 characters. Request no broader permissions.")
         try:
             plan = json.loads(plan)
