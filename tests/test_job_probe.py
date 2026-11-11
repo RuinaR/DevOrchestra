@@ -1,15 +1,94 @@
 """Windows tests use only bundled fixed children and a disposable ledger."""
+from contextlib import ExitStack
+import ctypes as c
+from ctypes import wintypes as w
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
+from time import monotonic, sleep
 import unittest
 from unittest.mock import Mock, call, patch
 
 from devorchestra.job_probe import KILL_EXIT, Probe, ProcessInfo, _cleanup
-from devorchestra.lease import Blocked
+from devorchestra.lease import Blocked, execution_slot
 from devorchestra.ledger import Ledger
 from devorchestra.projection import ProjectionReader
-from devorchestra.runtime import Runner
+from devorchestra.runtime import Runner, require_admission
+
+
+def _crash_fixture(root):
+    """Create two live Job members and publish only their verified process handles."""
+    from devorchestra.job_probe import (
+        ExtendedLimits, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        _api, _cleanup, _create_owned, _require,
+    )
+    from devorchestra.mxc_owned_gui import _job_pids
+
+    api = _api()
+    api.OpenProcess.argtypes = (w.DWORD, w.BOOL, w.DWORD)
+    api.OpenProcess.restype = w.HANDLE
+    api.IsProcessInJob.argtypes = (w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
+    api.IsProcessInJob.restype = w.BOOL
+    with execution_slot():
+        ledger = Ledger(root / "trial.sqlite3")
+        ledger.initialize()
+        events, tail = ledger.snapshot()
+        ledger.append(len(events), tail, {
+            "kind": "native_egress_trial_intent", "request_id": "0" * 32, "state": "DIAGNOSTIC",
+        }, admission=require_admission)
+        job = _require(api.CreateJobObjectW(None, None))
+        info = ProcessInfo()
+        try:
+            limits = ExtendedLimits()
+            limits.basic.flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+            limits.basic.active_limit = 2
+            _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
+            script = """\
+import subprocess, sys, time
+command = [sys.executable, '-I', '-S', '-B', '-c', 'import time; time.sleep(20)']
+try:
+    detached = subprocess.Popen(command, close_fds=True, creationflags=(
+        subprocess.CREATE_NO_WINDOW | subprocess.CREATE_BREAKAWAY_FROM_JOB))
+except OSError as error:
+    if error.winerror != 5:
+        raise
+else:
+    detached.terminate()
+    detached.wait(timeout=3)
+    raise RuntimeError('Job unexpectedly allowed CREATE_BREAKAWAY_FROM_JOB')
+child = subprocess.Popen(command, close_fds=True, creationflags=subprocess.CREATE_NO_WINDOW)
+time.sleep(20)
+"""
+            _create_owned(api, job, sys.executable, ["-I", "-S", "-B", "-c", script],
+                          root, {"SystemRoot": os.environ["SystemRoot"]}, info)
+            if api.ResumeThread(info.thread) != 1:
+                raise Blocked("Crash fixture did not resume")
+            deadline = monotonic() + 8
+            members = _job_pids(api, job)
+            while len(members) < 2 and monotonic() < deadline:
+                sleep(0.02)
+                members = _job_pids(api, job)
+            if len(members) != 2 or info.pid not in members:
+                raise Blocked("Crash fixture did not observe both Job members")
+            child_pid = (members - {info.pid}).pop()
+            child = _require(api.OpenProcess(0x100000 | 0x1000, False, child_pid))
+            try:
+                for handle in (info.process, child):
+                    in_job = w.BOOL()
+                    _require(api.IsProcessInJob(handle, job, c.byref(in_job)))
+                    if not in_job.value or api.WaitForSingleObject(handle, 0) != 258:
+                        raise Blocked("Crash fixture member identity or liveness unverified")
+                pending = root / "handles.tmp"
+                pending.write_text(json.dumps([info.process, child]), encoding="ascii")
+                pending.rename(root / "handles.json")
+                sleep(12)  # Bounded fallback if the observer never terminates this owner.
+            finally:
+                _require(api.CloseHandle(child))
+        finally:
+            _cleanup(api, job, info, False)
 
 
 class JobCleanupFaultTests(unittest.TestCase):
@@ -41,6 +120,49 @@ class JobCleanupFaultTests(unittest.TestCase):
             _cleanup(api, 13, info, True)
         self.assertEqual([call(12), call(11), call(13)], api.CloseHandle.call_args_list)
         api.TerminateJobObject.assert_not_called()
+
+
+@unittest.skipUnless(os.name == "nt", "Windows Job contract")
+class JobOwnerCrashTest(unittest.TestCase):
+    def test_terminating_owner_signals_both_handles_and_keeps_recovery_gate(self):
+        import _winapi
+
+        with TemporaryDirectory(dir=Path.cwd()) as workspace, ExitStack() as handles:
+            root = Path(workspace)
+            entry = (
+                "from pathlib import Path; import runpy, sys; "
+                "runpy.run_path(sys.argv[1])['_crash_fixture'](Path(sys.argv[2]))"
+            )
+            with subprocess.Popen(
+                [sys.executable, "-B", "-c", entry, str(Path(__file__).resolve()), str(root)],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            ) as owner:
+                try:
+                    receipt = root / "handles.json"
+                    deadline = monotonic() + 10
+                    while not receipt.exists() and owner.poll() is None and monotonic() < deadline:
+                        sleep(0.02)
+                    self.assertTrue(receipt.is_file(), "Job owner did not attest two live members")
+                    # Borrow the original CreateProcess handle from Windows CPython Popen.
+                    source = owner._handle
+                    current = _winapi.GetCurrentProcess()
+                    observed = []
+                    for remote in json.loads(receipt.read_text(encoding="ascii")):
+                        handle = _winapi.DuplicateHandle(source, remote, current, 0x100000, False, 0)
+                        handles.callback(_winapi.CloseHandle, handle)
+                        observed.append(handle)
+                    self.assertEqual(len(observed), 2)
+                    self.assertEqual([258, 258], [_winapi.WaitForSingleObject(h, 0) for h in observed])
+                    owner.kill()
+                    self.assertEqual(owner.wait(timeout=3), 1)
+                    self.assertEqual([0, 0], [_winapi.WaitForSingleObject(h, 3000) for h in observed])
+                    with execution_slot():
+                        with self.assertRaisesRegex(Blocked, "Native process ownership requires recovery"):
+                            require_admission(Ledger(root / "trial.sqlite3").read())
+                finally:
+                    if owner.poll() is None:
+                        owner.kill()
+                        owner.wait(timeout=3)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows Job contract")
