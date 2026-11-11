@@ -88,15 +88,20 @@ def _general_thread(server, work):
             "reported_command_network": "OFF", "thread_sha256": digest(thread["id"])}
 
 
-def _prepare_git_fixture(work, original, scratch, environment, check):
+def _fixture_git_binary():
     from .mxc_launcher import _signed_offline
 
-    # This fixed Git sequence touches only the two disposable fixture roots.
     entry = Path(which("git.exe") or "")
     tool = entry.parent.parent / "ucrt64" / "bin" / "git.exe"
     if (not entry.is_relative_to(_known_folder(0x26) / "WindowsApps")
             or entry.parent.name.casefold() != "cmd" or not _signed_offline(tool)):
         raise Blocked("Signed packaged Git fixture tool unavailable")
+    return tool
+
+
+def _prepare_git_fixture(work, original, scratch, environment, check):
+    # This fixed Git sequence touches only the two disposable fixture roots.
+    tool = _fixture_git_binary()
     env = {**environment, "HOME": environment["USERPROFILE"], "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_CONFIG_GLOBAL": "NUL", "GIT_TERMINAL_PROMPT": "0"}
     commands = (

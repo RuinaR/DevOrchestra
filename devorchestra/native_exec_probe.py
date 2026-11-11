@@ -9,20 +9,21 @@ from .job_probe import CODEX_DEVELOPER_PROCESS_LIMIT
 
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
-from .mxc_host_probe import _command_profiles, _observe
+from .mxc_host_probe import _observe
 from .mxc_launcher import _known_folder
 from .native_command_probe import (
     GENERAL_MODEL, RELEASE_SHA256, SOURCE_NAMES, SUBTOTAL, TOTAL, _prepare_git_fixture,
     _release_fixture_git_objects, _stage_release, _staging,
 )
-from .native_manager import MANAGER_CONFIG
 from .replica_evidence import snapshot
 
 
 PROMPT = "Synthetic DevOrchestra CLI startup check. Do not make any edits or run commands."
 
 
-def _observe_exec(binary, work, scratch, environment, check, home):
+def _observe_exec(binary, work, scratch, environment, check):
+    from .native_developer_trial import trial_flags
+
     observed = []
 
     class Sink(BaseHTTPRequestHandler):
@@ -39,23 +40,18 @@ def _observe_exec(binary, work, scratch, environment, check, home):
 
     with HTTPServer(("127.0.0.1", 0), Sink) as sink:
         url = f"http://127.0.0.1:{sink.server_port}/v1"
-        config = (MANAGER_CONFIG.replace('sandbox_mode = "read-only"', 'default_permissions = "probe-write"')
-                  .replace('forced_login_method = "chatgpt"\n', "")
-                  .replace("shell_tool = false", "shell_tool = true"))
-        profiles = _command_profiles(work).replace("[permissions.probe-write.network]",
-                                                    f'{json.dumps(str(work / ".git"))} = "read"\n'
-                                                    "[permissions.probe-write.network]")
-        (home / "config.toml").write_text(
-            'model_provider = "fixture"\n' + config + profiles +
-            '\n[model_providers.fixture]\nname = "Local fixture only"\n'
-            f'base_url = "{url}"\nwire_api = "responses"\nrequest_max_retries = 0\nstream_max_retries = 0\n',
-            encoding="ascii",
-        )
         thread = Thread(target=sink.serve_forever, kwargs={"poll_interval": 0.05})
         thread.start()
         try:
-            argv = ["-c", "windows.sandbox=mxc", "-c", 'model_provider="fixture"', "-a", "never",
-                    "exec", "--json", "--ephemeral", "--model", GENERAL_MODEL, "--cd", str(work), PROMPT]
+            flags = trial_flags(work)
+            for override in ('forced_login_method="chatgpt"', 'model_provider="openai"'):
+                index = flags.index(override)
+                del flags[index - 1:index + 1]
+            provider = ('model_providers.fixture={ name="Local fixture only", '
+                        f'base_url="{url}", wire_api="responses", request_max_retries=0, stream_max_retries=0 }}')
+            argv = [*flags, "-c", 'model_provider="fixture"', "-c", provider, "exec",
+                    "--ignore-user-config", "--json", "--ephemeral",
+                    "--model", GENERAL_MODEL, "--cd", str(work), PROMPT]
             result = _observe(binary, argv, work, scratch, {**environment, "OPENAI_BASE_URL": url},
                               seconds=20, check=check, output_limit=65536, encoding="utf-8",
                               process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
@@ -81,6 +77,7 @@ def _observe_exec(binary, work, scratch, environment, check, home):
 
 
 def run_native_exec_probe(ledger, archive):
+    from .native_developer_trial import _verify_output
     from .runtime import Runner, require_admission
 
     with execution_slot() as abandoned:
@@ -115,11 +112,17 @@ def run_native_exec_probe(ledger, archive):
 
             baseline = _prepare_git_fixture(work, original, scratch, environment, check)
             before = snapshot(work)
-            result = _observe_exec(binary, work, scratch, environment, check, home)
+            test_logs = scratch / "baseline"
+            test_logs.mkdir()
+            verified = _verify_output(binary, work, test_logs, environment, check)
+            result = _observe_exec(binary, work, scratch, environment, check)
+            result["independent_baseline_observed"] = (
+                verified["exitCode"] == 0 and verified["stdout"].strip() == "9" and not verified["stderr"])
             unchanged = snapshot(work) == before and snapshot(original) == baseline
             _release_fixture_git_objects(work, original)
             cleanup["preserve"] = False
-        passed = (unchanged and result["responses_path"] and result["exit_code"] != 0
+        passed = (unchanged and result["independent_baseline_observed"]
+                  and result["responses_path"] and result["exit_code"] != 0
                   and "thread.started" in result["events"] and "turn.completed" not in result["events"]
                   and result["job_active"] == 0 and cleanup.get("status") == "REMOVED")
         receipt = {**fields, **result, "kind": "native_inspection_result", "owned_tree": "DRAINED",

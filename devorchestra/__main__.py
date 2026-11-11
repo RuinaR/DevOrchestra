@@ -98,6 +98,11 @@ def main():
                                 help="Also inspect an offline General Developer thread")
     native_exec = commands.add_parser("native-exec-diagnostic", help="Test Codex CLI startup against a local sink")
     native_exec.add_argument("--archive", required=True)
+    developer_trial = commands.add_parser("native-developer-trial", help="Review or run one approved synthetic Codex Developer turn")
+    developer_trial.add_argument("--archive", required=True)
+    developer_trial.add_argument("--request-id", required=True)
+    developer_trial.add_argument("--expires", type=int, required=True)
+    developer_trial.add_argument("--approve")
     commands.add_parser("native-egress-preflight", help="Read Windows token facts without modifying network policy")
     egress_trial = commands.add_parser("native-egress-trial", help="Recover an existing historical WFP trial")
     egress_trial.add_argument("--binary", required=True)
@@ -368,6 +373,12 @@ def main():
                     for group in ("direct_controls", "server_commands") for mode in ("read", "write")
                 )) else 2
             return 0 if receipt["file_probe"]["status"] == "PASS" else 2
+        if args.action == "native-developer-trial":
+            from .native_developer_trial import run_trial
+
+            receipt = run_trial(ledger, args.archive, args.request_id, args.expires, args.approve)
+            print(canonical(receipt))
+            return 0 if receipt["status"] in ("REAL_PASS", "NEEDS_OWNER_APPROVAL") else 2
         if args.action == "native-exec-diagnostic":
             from .native_exec_probe import run_native_exec_probe
 
