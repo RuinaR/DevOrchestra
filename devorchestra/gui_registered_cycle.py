@@ -236,7 +236,7 @@ def _game_preflight(panel, runner, state):
         else:
             panel.destroy()
 
-    def start():
+    def start(export_windows=False):
         nonlocal future
         archive = filedialog.askopenfilename(parent=panel, filetypes=[("Codex ZIP", "*.zip")])
         if not archive:
@@ -244,11 +244,13 @@ def _game_preflight(panel, runner, state):
         future = Future()
         cancelled.clear()
         button.configure(state="disabled")
+        export_button.configure(state="disabled")
         state.set("오프라인 MXC 검사 실행 중")
 
         def worker():
             try:
-                future.set_result(game_pilot.run(runner, archive, cancelled=cancelled.is_set, capture=True))
+                future.set_result(game_pilot.run(runner, archive, cancelled=cancelled.is_set, capture=True,
+                                                 export_windows=export_windows))
             except Exception as error:
                 future.set_exception(error)
 
@@ -257,12 +259,17 @@ def _game_preflight(panel, runner, state):
                 panel.after(150, poll)
                 return
             button.configure(state="normal")
+            export_button.configure(state="normal")
             try:
                 result = future.result()
                 detail = result.get("reason") or (f"PNG {result.get('imported_textures', 0)}개 · "
                                                   f"PCK {'PASS' if result.get('resource_pack') else '미검증'} · "
                                                   f"{result['gui']}")
-                state.set(f"오프라인 사전 검증 {result['outcome']} · {detail}")
+                if export_windows:
+                    detail = result.get("reason") or result.get("artifact_directory", result["export"])
+                    state.set(f"Windows EXE 오프라인 검증 {result['outcome']} · {detail}")
+                else:
+                    state.set(f"오프라인 사전 검증 {result['outcome']} · {detail}")
             except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
                 state.set(str(error))
 
@@ -273,6 +280,8 @@ def _game_preflight(panel, runner, state):
               wraplength=580).pack(anchor="w")
     button = ttk.Button(panel, text="게임 오프라인 사전 검증", command=start)
     button.pack(anchor="w")
+    export_button = ttk.Button(panel, text="Windows EXE 내보내기 및 오프라인 검증", command=lambda: start(True))
+    export_button.pack(anchor="w")
     ttk.Button(panel, text="닫기 / 중단", command=close).pack(anchor="w")
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: (close(), "break")[1])
