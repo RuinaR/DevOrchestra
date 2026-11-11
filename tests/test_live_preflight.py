@@ -28,6 +28,11 @@ class LivePreflightTests(unittest.TestCase):
         result = live_preflight(mode="enhanced")
         self.assertEqual("enhanced", result["development_mode"])
         self.assertEqual("ISOLATION_UNVERIFIED", result["reason"])
+        self.assertEqual("INDEPENDENT_EGRESS_ENFORCEMENT_REQUIRED", result["admission_contract"]["host_egress"])
+        general = live_preflight(mode="general")
+        self.assertEqual("SEPARATE_OWNER_RISK_DECISION_REQUIRED", general["admission_contract"]["host_egress"])
+        self.assertEqual("general", general["admission_contract"]["owner_approval_scope"])
+        self.assertEqual("BLOCKED", general["status"])
 
     def test_native_role_adapter_denies_before_using_request(self):
         request = Mock(spec=RoleRequest)

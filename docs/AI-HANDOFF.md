@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+일반 모드의 다음 작업은 공식 App Server의 `thread/start` MXC 오류 1816을 해결하거나 같은 권한으로 공식 CLI 경로를 검증하는 것이다. 명령 MXC와 App Server 호스트의 인증·모델 송신은 별개다. 일반 모드에서 독립 호스트 송신 제한 없이 합성 프로젝트를 전송하려면 잔여 위험에 대한 명시 승인과 모델 턴 승인이 필요하다. 강화 격리의 전용 계정·WFP·프록시 승인과 혼용하거나 자동 폴백하지 않는다. 첫 실제 턴에서는 도구 이벤트, 제공자 토큰, 복제본 diff, 독립 테스트와 Job 종료를 동일 원장에 연결한 뒤 다섯 역할 순차 인계와 2사이클 이상 반복을 검증한다. [Codex 권한 범위](https://learn.chatgpt.com/docs/permissions#what-the-network-proxy-does-not-control)
+
 P2.119의 새 MSVC x64 빌드는 비승격 `pilot.exe --job-preflight`로 생성 시 Job 편입과 실패 경로를 확인할 수 있다. 기존 `native-egress-trial`의 고정 해시와 복구 계약은 비활성 P2.117 빌드에만 적용된다. 다음 통합은 원장 의도를 먼저 기록하고, Job 핸들을 보유하지 않는 독립 관찰자가 실행 중인 고정 작업자·자식의 대기 핸들, 생성 시각, SID 및 Job 소속을 결속해야 한다. 소유 Controller 종료 후 관찰자가 두 종료를 증명하고 시험 계정의 신규 실행을 막은 상태에서만 별도 UAC 복구로 넘어간다. 관찰 증거가 없으면 `CLEANUP_BLOCKED`를 유지한다. 실제 교차 계정 생성에는 선택된 실행 토큰에 따라 Windows 호출 권한이 추가로 필요할 수 있다. [CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw)
 
 P2.118에서 일반 사용자 권한의 Windows 시험으로 Job 이탈 요청 거부, 시험 Controller 강제 종료 후 작업자·자식 핸들의 종료, 미확정 원장의 재입장 차단을 확인했다. 전용 계정에서 실행할 다음 시험과 복구의 승인 범위는 [P2.118 시험 계획](ARCHITECTURE-ROADMAP.md#p2118-활성-작업자와-로컬-프록시-시험-계획)에 있다.

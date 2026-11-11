@@ -2,8 +2,12 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from hashlib import file_digest
+import json
 from pathlib import Path
+import re
+from shutil import which
 import socket
+import stat
 from tempfile import mkdtemp
 from time import monotonic
 from uuid import uuid4
@@ -19,7 +23,7 @@ from .mxc_host_probe import (
 from .mxc_launcher import _known_folder
 from .native_manager import MANAGER_CONFIG, MANAGER_POLICY_METHODS, _verify_manager_config, _verify_manager_requirements
 from .owned_artifacts import _remove_owned_tree
-from .replica_evidence import snapshot
+from .replica_evidence import fingerprint, snapshot
 from .system_powershell import _open_locked, hold_system_powershell
 
 
@@ -27,6 +31,8 @@ RELEASE_SHA256 = "c12aca02de615a9fcb76f955bf005a33f4b10b577f8a1730161953f57a1155
 ARCHIVE_SHA256 = "191bd0dcd77a6aa17d4f8a4ab166fc9d05d24ca4b7015789e2aa9a53dcafb658"
 ENTRYPOINT = "codex-x86_64-pc-windows-msvc.exe"
 METHODS = MANAGER_POLICY_METHODS | {"command/exec"}
+GENERAL_METHODS = METHODS | {"thread/start"}
+GENERAL_MODEL = "gpt-5.4"
 SOURCE_NAMES = ("subtotal.cmd", "total.cmd")
 SUBTOTAL = '@echo off\nset /a subtotal=%1*{factor} >nul\n'
 TOTAL = '@echo off\ncall subtotal.cmd %1\nset /a total=subtotal+{fee} >nul\necho %total%\n'
@@ -37,6 +43,114 @@ if ($LASTEXITCODE -ne 0) { exit 2 }
 [Console]::WriteLine($result)
 if ($result -cne '11') { exit 1 }
 """
+
+
+def _general_thread(server, work):
+    """Inspect a Developer thread without allowing account or model RPCs."""
+    notices = []
+
+    def record(event):
+        params = event.get("params")
+        thread = params.get("thread") if isinstance(params, dict) else None
+        if (not isinstance(thread, dict) or not isinstance(thread.get("id"), str)
+                or event.get("method") != "thread/started" or notices):
+            raise Blocked("Unexpected Developer thread notification")
+        notices.append(thread["id"])
+
+    result = server.request(10, "thread/start", {
+        "cwd": str(work), "model": GENERAL_MODEL, "modelProvider": "openai",
+        "permissions": "probe-write", "approvalPolicy": "never", "ephemeral": True,
+    }, record, allowed_notifications=("thread/started",))
+    thread = result.get("thread")
+    if (type(thread) is not dict or type(thread.get("id")) is not str
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread["id"])
+            or thread.get("ephemeral") is not True
+            or result.get("cwd") != str(work) or result.get("model") != GENERAL_MODEL
+            or result.get("modelProvider") != "openai" or result.get("approvalPolicy") != "never"
+            or result.get("approvalsReviewer") != "user" or result.get("instructionSources") != []):
+        raise Blocked("Developer thread identity, instructions or approval policy is unverified")
+    if not notices:
+        record(server.receive())
+    if notices != [thread["id"]]:
+        raise Blocked("Developer thread notification identity mismatch")
+    policy = result.get("sandbox")
+    profile = result.get("activePermissionProfile")
+    if (type(profile) is not dict or profile.get("id") != "probe-write"
+            or profile.get("extends") is not None or type(policy) is not dict
+            or policy.get("type") != "workspaceWrite" or policy.get("networkAccess") is not False
+            or policy.get("writableRoots") not in ([], [str(work)])):
+        # A named profile being accepted is not sufficient if the effective readback is ambiguous.
+        return {"status": "NOT_VERIFIED", "reason": "EFFECTIVE_THREAD_SANDBOX_UNVERIFIED",
+                "reported_policy_kind": policy.get("type") if type(policy) is dict
+                and policy.get("type") in ("workspaceWrite", "readOnly", "externalSandbox", "dangerFullAccess") else None,
+                "profile_matched": type(profile) is dict and profile.get("id") == "probe-write"}
+    return {"status": "CONFIRMED", "approval": "never", "profile": "probe-write",
+            "reported_command_network": "OFF", "thread_sha256": digest(thread["id"])}
+
+
+def _prepare_git_fixture(work, original, scratch, environment, check):
+    from .mxc_launcher import _signed_offline
+
+    # This fixed Git sequence touches only the two disposable fixture roots.
+    entry = Path(which("git.exe") or "")
+    tool = entry.parent.parent / "ucrt64" / "bin" / "git.exe"
+    if (not entry.is_relative_to(_known_folder(0x26) / "WindowsApps")
+            or entry.parent.name.casefold() != "cmd" or not _signed_offline(tool)):
+        raise Blocked("Signed packaged Git fixture tool unavailable")
+    env = {**environment, "HOME": environment["USERPROFILE"], "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": "NUL", "GIT_TERMINAL_PROMPT": "0"}
+    commands = (
+        (original, ("init", "--template=", "--initial-branch=main")),
+        (original, ("add", "--", *SOURCE_NAMES)),
+        (original, ("-c", "user.name=DevOrchestra Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "--no-gpg-sign", "-m", "Freeze diagnostic baseline")),
+        (work.parent, ("clone", "--local", "--no-hardlinks", "--", str(original), str(work))),
+        (work, ("remote", "remove", "origin")),
+    )
+    for number, (cwd, args) in enumerate(commands):
+        check()
+        output = scratch / f"git-{number}"
+        output.mkdir()
+        result = _observe(tool, ["-c", "core.hooksPath=NUL", "-c", "core.autocrlf=false", *args],
+                          cwd, output, env, seconds=5, check=check, output_limit=4096, encoding="utf-8")
+        if result["exitCode"] != 0 or result["job_active"]:
+            raise Blocked("Local Git fixture command failed")
+    return snapshot(original)
+
+
+def _general_protected_writes(server, powershell, work, original):
+    command = _powershell_command(powershell, r"""
+$ErrorActionPreference = 'Stop'
+$work = [Environment]::CurrentDirectory
+$original = [IO.Path]::Combine([IO.Directory]::GetParent($work).FullName, 'synthetic-original', 'total.cmd')
+foreach ($path in @([IO.Path]::Combine($work, '.git', 'HEAD'), $original)) {
+    try {
+        $handle = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $handle.Dispose()
+        [Console]::WriteLine('WRITABLE')
+    } catch {
+        $failure = $_.Exception.GetBaseException()
+        [Console]::WriteLine("ERROR_$($failure.HResult -band 65535)")
+    }
+}
+""")
+    before = (fingerprint(work / ".git" / "HEAD"), fingerprint(original / "total.cmd"))
+    result = _server_command(server, 12, work, command, "write")
+    unchanged = before == (fingerprint(work / ".git" / "HEAD"), fingerprint(original / "total.cmd"))
+    outcomes = result.get("stdout", "").splitlines()
+    return {"both_denied": (result.get("exitCode") == 0 and result.get("stderr") == ""
+                            and outcomes == ["ERROR_5"] * 2 and unchanged),
+            "observations": outcomes if len(outcomes) == 2
+            and all(re.fullmatch(r"WRITABLE|ERROR_[0-9]{1,5}", item) for item in outcomes) else None}
+
+
+def _release_fixture_git_objects(*roots):
+    for root in roots:
+        objects = root / ".git" / "objects"
+        for path in objects.rglob("*"):
+            check_path(path)
+            if path.is_file() and not path.stat().st_mode & stat.S_IWRITE:
+                path.chmod(stat.S_IREAD | stat.S_IWRITE)
 
 
 def _stage_release(archive, package):
@@ -122,7 +236,7 @@ def _host_controls(powershell, work, scratch, environment, check):
     return {"literal_ip": controls, "proxy_contacted": proxy_contacted}
 
 
-def run_native_command_probe(ledger, archive, powershell_sha256):
+def run_native_command_probe(ledger, archive, powershell_sha256, *, general_developer=False):
     """Use the signed release's local command sandbox without starting an agent thread."""
     from .runtime import Runner, require_admission
 
@@ -136,16 +250,29 @@ def run_native_command_probe(ledger, archive, powershell_sha256):
                   "powershell_sha256": powershell_sha256, "file_probe_ref": digest(FILE_PROBE),
                   "timestamp": datetime.now(timezone.utc).isoformat(),
                   "host_egress": "NOT_VERIFIED", "model_turn": "NOT_STARTED", "usage": "UNKNOWN"}
+        if general_developer:
+            fields.update(probe_kind="GENERAL_DEVELOPER_OFFLINE", development_mode="general",
+                          account_rpc_sent=False, turn_rpc_sent=False, automatic_fallback=False)
         with _staging(ledger) as (lab, staging_cleanup):
             binary = _stage_release(Path(archive), lab / "package")
             work, home, scratch, protected = (lab / name for name in ("work", "home", "tmp", "protected"))
             for path in (work, home, scratch, protected):
                 path.mkdir()
-            (work / "allowed.txt").write_bytes(ALLOWED)
+            if not general_developer:
+                (work / "allowed.txt").write_bytes(ALLOWED)
             (protected / "protected.txt").write_bytes(PROTECTED)
             for name, source in zip(SOURCE_NAMES, (SUBTOTAL.format(factor=2), TOTAL.format(fee=3))):
                 (work / name).write_text(source, encoding="ascii")
-            config = MANAGER_CONFIG + _command_profiles(work)
+            # Keep all non-command tool surfaces disabled for the Developer trial.
+            profiles = _command_profiles(work)
+            config = MANAGER_CONFIG + profiles
+            if general_developer:
+                # The pinned release exposes named thread permissions in its experimental schema.
+                profiles = profiles.replace("[permissions.probe-write.network]",
+                                            f"{json.dumps(str(work / '.git'))} = \"read\"\n"
+                                            "[permissions.probe-write.network]")
+                config = (MANAGER_CONFIG.replace('sandbox_mode = "read-only"', 'default_permissions = "probe-write"')
+                          .replace("shell_tool = false", "shell_tool = true") + profiles)
             (home / "config.toml").write_text(config, encoding="ascii")
             windows, appdata, program_data = (_known_folder(number) for number in (0x24, 0x1C, 0x23))
             environment = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,
@@ -163,16 +290,33 @@ def run_native_command_probe(ledger, archive, powershell_sha256):
                     return False
 
                 recheck()
+                if general_developer:
+                    original = lab / "synthetic-original"
+                    original.mkdir()
+                    # Clone into an empty destination. The fixed baseline has no user inputs or remotes.
+                    for name in SOURCE_NAMES:
+                        (work / name).rename(original / name)
+                    original_before = _prepare_git_fixture(work, original, scratch, environment, cancelled)
+                    (work / "allowed.txt").write_bytes(ALLOWED)
                 results = {"direct_host_controls": _host_controls(powershell, work, scratch, environment, cancelled)}
                 with open_app_server(binary, work, environment, 25, cancelled, explicit_mxc=True,
                                      approved_sha256=RELEASE_SHA256) as server:
-                    server.restrict_outbound(METHODS)
+                    server.restrict_outbound(GENERAL_METHODS if general_developer else METHODS)
                     stage = "EFFECTIVE_POLICY"
                     try:
+                        def verify_config(effective):
+                            if general_developer:
+                                features = effective.get("features")
+                                if type(features) is not dict or features.get("shell_tool") is not True:
+                                    raise Blocked("Developer shell policy unverified")
+                                effective = {**effective, "features": {**features, "shell_tool": False}}
+                            _verify_manager_config(effective)
+
                         results["policy"] = server.inspect_policy(
-                            cwd=work, verify_config=_verify_manager_config,
+                            cwd=work, verify_config=verify_config,
                             verify_requirements=_verify_manager_requirements, experimental_api=True)
-                        if results["policy"]["approval"] != "never" or results["policy"]["sandbox"] != "read-only":
+                        if (results["policy"]["approval"] != "never"
+                                or (not general_developer and results["policy"]["sandbox"] != "read-only")):
                             raise Blocked("Unexpected native probe policy")
                         stage = "FILE_COMMANDS"
                         recheck()
@@ -190,9 +334,23 @@ def run_native_command_probe(ledger, archive, powershell_sha256):
                                 stage = "FIXED_SOURCE_EDIT_AND_VERIFICATION"
                                 recheck()
                                 results["fixed_fixture"] = _observe_fixture(server, powershell, work)
+                                if general_developer and results["fixed_fixture"]["status"] == "PASS":
+                                    stage = "GIT_AND_ORIGINAL_PROTECTION"
+                                    results["git_and_original_writes"] = _general_protected_writes(
+                                        server, powershell, work, original)
+                                    results["synthetic_original_unchanged"] = snapshot(original) == original_before
+                                    stage = "DEVELOPER_THREAD"
+                                    results["developer_thread"] = _general_thread(server, work)
                     except Blocked:
                         cancelled()
                         results["failure"] = {"stage": stage, "code": server.failure_code or "POLICY_REJECTED"}
+                        if server.failure_code == "RPC_ERROR":
+                            rpc = server.diagnostics[-1]
+                            results["failure"]["rpc_error"] = rpc["error"]
+                            if rpc.get("shape"):
+                                results["failure"]["detail"] = rpc["shape"].get("detail")
+                if general_developer:
+                    _release_fixture_git_objects(work, original)
                 staging_cleanup["preserve"] = False
             results["cleanup"] = server.cleanup_receipt
             results["protected_marker_unchanged"] = (protected / "protected.txt").read_bytes() == PROTECTED
@@ -201,8 +359,16 @@ def run_native_command_probe(ledger, archive, powershell_sha256):
                           for row in results["direct_host_controls"]["literal_ip"].values())
                   and not results["direct_host_controls"]["proxy_contacted"]
                   and staging_cleanup.get("status") == "REMOVED")
+        status = "COMMAND_BOUNDARY_OBSERVED" if passed else "NOT_VERIFIED"
+        if general_developer and passed:
+            status = ("GENERAL_COMMAND_BOUNDARY_OBSERVED"
+                      if results.get("git_and_original_writes", {}).get("both_denied") is True
+                      and results.get("synthetic_original_unchanged") is True
+                      else "GENERAL_BOUNDARY_UNVERIFIED")
+            if status == "GENERAL_COMMAND_BOUNDARY_OBSERVED" and results.get("developer_thread", {}).get("status") == "CONFIRMED":
+                status = "GENERAL_OFFLINE_BOUNDARY_OBSERVED"
         receipt = {**fields, **results, "kind": "native_inspection_result", "owned_tree": "DRAINED",
-                   "status": "COMMAND_BOUNDARY_OBSERVED" if passed else "NOT_VERIFIED",
+                   "status": status,
                    "staging_cleanup": staging_cleanup,
                    "elapsed_ms": round(1000 * (monotonic() - started)),
                    "timestamp": datetime.now(timezone.utc).isoformat()}

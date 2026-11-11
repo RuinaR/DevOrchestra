@@ -67,7 +67,7 @@ def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND, mode=De
         reason = "GENERAL_ADMISSION_UNVERIFIED"
     else:
         reason = "ISOLATION_UNVERIFIED"
-    return {
+    result = {
         "status": "BLOCKED",
         "reason": reason,
         "forbidden_capabilities": forbidden,
@@ -81,6 +81,14 @@ def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND, mode=De
         "automatic_fallback": False,
         "noninterference": "NOT_VERIFIED",
     }
+    if selected is ExecutionBackend.WINDOWS_NATIVE_CODEX and selected_mode is not None:
+        result["admission_contract"] = {
+            "command_boundary": "OFFICIAL_CODEX_SANDBOX",
+            "host_egress": ("SEPARATE_OWNER_RISK_DECISION_REQUIRED" if selected_mode is DevelopmentMode.GENERAL
+                            else "INDEPENDENT_EGRESS_ENFORCEMENT_REQUIRED"),
+            "owner_approval_scope": selected_mode.value,
+        }
+    return result
 
 
 @dataclass(frozen=True)

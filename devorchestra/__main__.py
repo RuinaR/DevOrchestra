@@ -94,6 +94,8 @@ def main():
     native_command = commands.add_parser("native-command-diagnostic", help="Test native Codex command confinement without a model")
     native_command.add_argument("--archive", required=True)
     native_command.add_argument("--powershell-sha256", required=True)
+    native_command.add_argument("--general-developer", action="store_true",
+                                help="Also inspect an offline General Developer thread")
     commands.add_parser("native-egress-preflight", help="Read Windows token facts without modifying network policy")
     egress_trial = commands.add_parser("native-egress-trial", help="Review or explicitly approve a disabled-account WFP trial")
     egress_trial.add_argument("--binary", required=True)
@@ -366,9 +368,10 @@ def main():
         if args.action == "native-command-diagnostic":
             from .native_command_probe import run_native_command_probe
 
-            receipt = run_native_command_probe(ledger, args.archive, args.powershell_sha256)
+            receipt = run_native_command_probe(ledger, args.archive, args.powershell_sha256,
+                                               general_developer=args.general_developer)
             print(canonical(receipt))
-            return 0 if receipt["status"] == "COMMAND_BOUNDARY_OBSERVED" else 2
+            return 0 if receipt["status"] in ("COMMAND_BOUNDARY_OBSERVED", "GENERAL_OFFLINE_BOUNDARY_OBSERVED") else 2
         if args.action == "manager-preflight":
             decision = Runner(ledger).inspect_manager_admission(args.project, args.backend)
             print(canonical(decision))

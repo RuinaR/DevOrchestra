@@ -365,6 +365,9 @@ class AppServer:
                 detail = ("NATIVE_MXC_UNAVAILABLE_ON_EXECUTOR" if self.request_method == "command/exec"
                           and error["message"] == "exec failed: unsupported operation: native MXC is unavailable on this executor"
                           else None)
+                if (self.request_method == "thread/start" and error["message"].startswith("error creating thread:")
+                        and "MXC launcher: CreateProcessW failed with error code 1816 (0x00000718)." in error["message"]):
+                    detail = "MXC_PROCESS_QUOTA_1816"
                 self._fail("RPC_ERROR", matches=True, valid=True, size=size,
                            error=ERROR_CODES.get(error["code"], "OTHER_RPC_ERROR"),
                            shape={"detail": detail} if detail else None)
