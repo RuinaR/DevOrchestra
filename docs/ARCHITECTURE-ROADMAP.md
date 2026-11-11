@@ -15,6 +15,15 @@ Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택�
 
 P2.114의 단일 온라인 Developer 후보는 가장 얇은 `codex exec` 경로다. `--json`과 기존 CLI 로그인을 사용할 수 있지만 호스트 송신과 승인된 도구 집행이 먼저 필요하다. SDK `0.167.1`은 CLI `0.167.1`에 의존한다. App Server는 승인 요청·취소·이벤트 인계 후보로 유지하며, 동일 안정판의 비중첩 `command/exec` 진단이 통과했다. 안정판 패치는 Responses 도구 갱신 방식에 관한 것으로, 이 측정에서 호스트 송신 제한 기능을 입증하지 않았다. [릴리스 변경](https://github.com/openai/codex/compare/rust-v0.167.0...rust-v0.167.1) · [통합 방식](https://developers.openai.com/blog/codex-as-a-platform)
 
+| P2.115 호스트 경계 후보 | 적용 조건 |
+|---|---|
+| Windows 실행 신원별 차단 | 전용 실행 신원과 권한을 부여받은 정책 적용 주체가 필요하다. IPv4·IPv6 기본 거부를 해당 신원에 한정한다. Windows 방화벽에서 겹치는 명시적 차단은 허용보다 우선한다. 현재 토큰에서 WFP 트랜잭션 권한은 거부됐다. [Microsoft 방화벽 규칙](https://learn.microsoft.com/windows/security/operating-system-security/network-security/windows-firewall/rules) · [WFP 액세스 제어](https://learn.microsoft.com/windows/win32/fwp/access-control) |
+| 프록시와 직접 연결 차단 | 네이티브 우선 후보. Codex 호스트는 OS 경계상 전용 프록시만 사용하고 프록시는 정확한 제공자 목적지에 한정한다. 임의 루프백, 직접 IP, 직접 DNS와 IPv6 경로도 검증한다. MXC 명령의 네트워크는 별도로 끈다. 기존 구독과 Controller Job을 재사용할 수 있는지는 인증·통신 실측 후 확정한다. [Codex 프록시 범위](https://learn.chatgpt.com/docs/enterprise/managed-configuration#configure-network-access-requirements) |
+| 별도 게스트 | 정책 적용 권한을 확보할 수 없다면 별도 게스트의 전용 경계가 대안이다. 게스트에서 공식 구독 로그인을 사용하고 게스트 송신을 기본 거부한다. 현재 WSL 배포판은 없으며 WSL의 Hyper-V 정책 범위는 VMCreatorId이므로 공유 배포판에 미치는 영향을 먼저 확인한다. [Hyper-V 방화벽](https://learn.microsoft.com/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall) |
+| 공식 Codex 설정 | 명령·자식 프로필과 서비스 트래픽은 분리된다. 데스크톱 네트워크 제어는 네이티브 모듈·자식에 적용되지 않으며 CLI 호스트의 OS 경계에 대한 증거로 쓰지 않는다. [Codex 권한 범위](https://learn.chatgpt.com/docs/permissions) |
+
+OpenAI 지원 문서에서 Codex 스트리밍의 `chatgpt.com:443` WebSocket을 확인했다. 실제 허용 목록은 선택된 인증 방식과 CLI 버전의 로그인·갱신·모델 통신에서 필요한 정확한 목적지를 승인된 경계에서 관측한 뒤 고정한다. [OpenAI 네트워크 권장 사항](https://help.openai.com/en/articles/9247338-network-recommendations-for-chatgpt-errors-on-web-and-apps)
+
 Windows MXC 명령 프로필의 파일·네트워크 권한, App Server 호스트의 제공자 송신, 앱·MCP 및 권한 확대는 별도 집행 지점이다. P2.111의 독립 Git 시험에서 MXC 명령의 소스 쓰기, Git 메타데이터와 테스트 파일 쓰기 거부, 외부 파일과 루프백 접근 거부, 테스트 종료를 관측했다. App Server의 권한 요청 RPC는 요청된 범위 중 승인한 부분을 응답할 수 있다. 호스트와 내장 도구의 실제 집행이 확인돼야 자동 역할을 입장시킨다. [Windows MXC](https://learn.chatgpt.com/docs/windows/windows-sandbox) · [App Server](https://learn.chatgpt.com/docs/app-server)
 
 P2.113의 직접 MXC 명령과 중첩 App Server 비교에서 명령 프로필은 호스트에서 동작했지만, 오프라인 MXC 안의 App Server는 명령 실행에 필요한 MXC를 사용할 수 없다고 보고했다. 관리 명령 네트워크의 도메인 규칙과 데스크톱 앱의 HTTPS/WSS 도메인 정책은 각각 별도 범위이며, 후자는 네이티브 모듈과 자식 프로세스를 제한하지 않는다. 다음 실행 후보에는 호스트 송신을 독립적으로 제한하고 App Server의 명령 격리가 동작하는 조합이 필요하다. [관리 구성의 적용 범위](https://learn.chatgpt.com/docs/enterprise/managed-configuration#control-desktop-app-network-destinations)

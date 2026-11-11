@@ -134,23 +134,29 @@ def _observe_loopback(launcher, powershell, work, scratch, env):
     return _loopback_challenge(powershell, run)
 
 
-def _loopback_challenge(powershell, run):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+def _loopback_challenge(powershell, run, *, ipv6=False):
+    family, host = (socket.AF_INET6, "::1") if ipv6 else (socket.AF_INET, "127.0.0.1")
+    with socket.socket(family, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        listener.bind(("127.0.0.1", 0))
+        if ipv6:
+            listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        listener.bind((host, 0))
         listener.listen(1)
         listener.settimeout(0.5)
         address = listener.getsockname()
         marker_bytes = uuid4().hex.encode("ascii")
-        with socket.create_connection(address, timeout=1):
+        with socket.socket(family, socket.SOCK_STREAM) as control_client:
+            control_client.settimeout(1)
+            control_client.connect(address)
             control, _ = listener.accept()
             control.close()
         # Only this freshly bound numeric loopback endpoint can be contacted.
         script = f"""
 $ErrorActionPreference = 'Stop'
-$client = [Net.Sockets.TcpClient]::new()
+$address = [Net.IPAddress]::Parse('{host}')
+$client = [Net.Sockets.TcpClient]::new($address.AddressFamily)
 try {{
-    if ($client.ConnectAsync('127.0.0.1', {address[1]}).Wait(1500)) {{
+    if ($client.ConnectAsync($address, {address[1]}).Wait(1500)) {{
         $payload = [Text.Encoding]::ASCII.GetBytes('{marker_bytes.decode("ascii")}')
         $client.GetStream().Write($payload, 0, $payload.Length)
         [Console]::WriteLine('CONNECTED')

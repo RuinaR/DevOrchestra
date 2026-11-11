@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from hashlib import file_digest
 from pathlib import Path
+import socket
 from tempfile import mkdtemp
 from time import monotonic
 from uuid import uuid4
@@ -12,7 +13,7 @@ from .app_server import open_app_server, verify_app_server_binary
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_host_probe import (
-    ALLOWED, FILE_PROBE, PROTECTED, _command_profiles, _loopback_challenge,
+    ALLOWED, FILE_PROBE, PROTECTED, _command_profiles, _loopback_challenge, _observe,
     _observe_server_commands, _powershell_command, _server_command,
 )
 from .mxc_launcher import _known_folder
@@ -94,6 +95,33 @@ def _observe_fixture(server, powershell, work):
             "observed_expected_value": observed}
 
 
+def _host_controls(powershell, work, scratch, environment, check):
+    """Compare literal-IP TCP from a Controller-owned command with proxy variables set."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as proxy:
+        proxy.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        proxy.bind(("127.0.0.1", 0))
+        proxy.listen(1)
+        proxy.setblocking(False)
+        proxy_url = f"http://127.0.0.1:{proxy.getsockname()[1]}"
+        environment = {**environment, "HTTP_PROXY": proxy_url, "HTTPS_PROXY": proxy_url, "NO_PROXY": ""}
+        controls = {}
+        for family in ("ipv4", "ipv6"):
+            output = scratch / family
+            output.mkdir()
+            check()
+            controls[family] = _loopback_challenge(
+                powershell, lambda command: _observe(powershell, command[1:], work, output, environment,
+                                                       seconds=6, check=check), ipv6=family == "ipv6")
+        try:
+            connection, _ = proxy.accept()
+        except BlockingIOError:
+            proxy_contacted = False
+        else:
+            connection.close()
+            proxy_contacted = True
+    return {"literal_ip": controls, "proxy_contacted": proxy_contacted}
+
+
 def run_native_command_probe(ledger, archive, powershell_sha256):
     """Use the signed release's local command sandbox without starting an agent thread."""
     from .runtime import Runner, require_admission
@@ -134,7 +162,8 @@ def run_native_command_probe(ledger, archive, powershell_sha256):
                     runner._check_diagnostic_fence(count, fence)
                     return False
 
-                results = {}
+                recheck()
+                results = {"direct_host_controls": _host_controls(powershell, work, scratch, environment, cancelled)}
                 with open_app_server(binary, work, environment, 25, cancelled, explicit_mxc=True,
                                      approved_sha256=RELEASE_SHA256) as server:
                     server.restrict_outbound(METHODS)
@@ -155,7 +184,9 @@ def run_native_command_probe(ledger, archive, powershell_sha256):
                             recheck()
                             results["loopback"] = _loopback_challenge(
                                 powershell, lambda argv: _server_command(server, 5, work, argv, "write"))
-                            if results["loopback"]["status"] == "ACCESS_DENIED":
+                            results["loopback_ipv6"] = _loopback_challenge(
+                                powershell, lambda argv: _server_command(server, 9, work, argv, "write"), ipv6=True)
+                            if all(results[key]["status"] == "ACCESS_DENIED" for key in ("loopback", "loopback_ipv6")):
                                 stage = "FIXED_SOURCE_EDIT_AND_VERIFICATION"
                                 recheck()
                                 results["fixed_fixture"] = _observe_fixture(server, powershell, work)
@@ -166,6 +197,9 @@ def run_native_command_probe(ledger, archive, powershell_sha256):
             results["cleanup"] = server.cleanup_receipt
             results["protected_marker_unchanged"] = (protected / "protected.txt").read_bytes() == PROTECTED
         passed = (results.get("fixed_fixture", {}).get("status") == "PASS" and results["protected_marker_unchanged"]
+                  and all(row["status"] == "REACHABLE" and row["job_active"] == 0
+                          for row in results["direct_host_controls"]["literal_ip"].values())
+                  and not results["direct_host_controls"]["proxy_contacted"]
                   and staging_cleanup.get("status") == "REMOVED")
         receipt = {**fields, **results, "kind": "native_inspection_result", "owned_tree": "DRAINED",
                    "status": "COMMAND_BOUNDARY_OBSERVED" if passed else "NOT_VERIFIED",

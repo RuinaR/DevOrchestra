@@ -2,6 +2,8 @@
 
 `native-command-diagnostic --archive <공식 0.167.1 Windows x64 CLI ZIP의 절대 경로> --powershell-sha256 <SHA256>`은 새 합성 홈과 Controller 소유 Job에서 고정 명령의 파일·루프백 경계를 검증한다. 배포 ZIP과 CLI를 각각 확인하며 모델·계정·스레드 RPC는 허용하지 않는다. 다음 네이티브 입장 검증은 호스트의 제공자 전용 송신을 독립적으로 집행한 후, 별도 승인으로 모델의 쓰기·빌드와 Verifier 영수증을 연결하는 것이다. 이 진단으로 온라인 입장 권한을 부여할 수 없다.
 
+P2.115부터 같은 진단에서 `direct_host_controls`는 소유 PowerShell의 IPv4·IPv6 양성 대조이며 `loopback`과 `loopback_ipv6`는 MXC 명령의 거부 결과다. `proxy_contacted=false`는 고정 TCP 대조가 프록시를 경유하지 않았다는 뜻이다. 실제 Codex 호스트의 HTTP 경로와 외부 DNS는 미검증이다. 다음 시험은 전용 송신 정책을 갖춘 실행 환경에서만 준비하고, 허용된 연결과 거부된 연결을 같은 실행 신원으로 비교한다.
+
 `manager-mxc-offline`의 `--loopback-only --managed-loopback`은 합성 리스너로 관리 네트워크의 직접 루프백을 측정한다. `--command-boundary`는 같은 파일 권한 프로필을 직접 MXC와 오프라인 MXC 안의 App Server `command/exec`에서 비교한다. 시험용 저장소의 서명·해시 고정 후보를 사용한다. 결과 원장은 온라인 실행 승인의 근거로 사용하지 않는다.
 
 개발 시작의 **완료 기준** 탭에서 각 기준 ID를 확인하고 검증 명세의 관측과 연결한다. CLI는 `subscription-session --criterion-checks '{"C1-<해시>":[{"input":1}]}'`을 받는다. 배치 검증에서는 `file`과 `input`으로 모호한 관측을 구분한다. 연결하지 않았거나 유일하게 식별할 수 없는 기준은 미검증이다. SDK 콘솔 실행의 이름별 `PASS` 출력은 실행 코드와 채널을 공유하므로 독립 완료 증거로 사용하지 않는다. `--max-stagnant`의 기본값은 2이며 새 기준 충족과 기존 기준 퇴행은 별도로 표시한다. 재계획도 승인된 재작업 한도를 사용한다.
