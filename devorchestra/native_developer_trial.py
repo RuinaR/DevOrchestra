@@ -13,6 +13,7 @@ from .mxc_launcher import _known_folder
 from .native_command_probe import (
     ARCHIVE_SHA256, RELEASE_SHA256, SOURCE_NAMES, SUBTOTAL, TOTAL,
     _fixture_git_binary, _prepare_git_fixture, _release_fixture_git_objects, _stage_release, _staging,
+    _verify_code_mode_host, CODE_MODE_HOST_SHA256,
 )
 from .native_manager import DISABLED_FEATURES
 from .policy import live_preflight
@@ -31,36 +32,45 @@ PROFILE = "developer-trial"
 DEFAULT_MODEL = "gpt-6.1-sol"
 
 
-def trial_flags(work, *, writable=True):
+def trial_flags(work, *, writable=True, code_mode=False):
     """Keep every temporary override on the owned process command line."""
     rules = ((":root", "deny"), (":minimal", "read"), (str(work), "write" if writable else "read"),
              (str(work / ".git"), "read"))
     filesystem = "{ " + ", ".join(f"{json.dumps(path)} = {json.dumps(access)}" for path, access in rules) + " }"
+    enabled = {"shell_tool"} | ({"code_mode", "code_mode_host"} if code_mode else set())
     values = [
         'windows.sandbox="mxc"', 'approval_policy="never"', f'default_permissions="{PROFILE}"',
         f"permissions.{PROFILE}.filesystem={filesystem}", f"permissions.{PROFILE}.network.enabled=false",
         'model_provider="openai"', 'forced_login_method="chatgpt"', 'cli_auth_credentials_store="file"',
         'web_search="disabled"', "analytics.enabled=false", "mcp_servers={}",
         "tools.update_plan.enabled=false", "tools.experimental_request_user_input.enabled=false",
-        *(f"features.{feature}={'true' if feature == 'shell_tool' else 'false'}" for feature in DISABLED_FEATURES),
+        *(f"features.{feature}={'true' if feature in enabled else 'false'}" for feature in DISABLED_FEATURES),
     ]
     return [arg for value in values for arg in ("-c", value)]
 
 
-def _scope(archive, home, request, expires, ledger_head, model):
+def code_mode_flags_sha256():
+    return digest(trial_flags(Path("APPROVED_REPLICA_ROOT"), code_mode=True))
+
+
+def _scope(archive, home, request, expires, ledger_head, model, role_tokens, session_tokens, diagnostic):
     if not re.fullmatch(r"[a-f0-9]{32}", request) or not time() < expires <= time() + 900:
         raise Blocked("Use a new 32-hex request ID and an expiry within 15 minutes")
+    if not all(type(value) is int and 1 <= value <= 100000 for value in (role_tokens, session_tokens)):
+        raise Blocked("Role and session token allowances must be between 1 and 100000")
     return {
         "request_id": request, "expires": expires, "archive": str(archive), "archive_sha256": ARCHIVE_SHA256,
         "binary_sha256": RELEASE_SHA256, "auth_home": str(home), "auth": "CHATGPT_ONLY",
+        "code_mode_host_sha256": CODE_MODE_HOST_SHA256, "code_mode_transport": "LOCAL_COMPANION",
         "backend": "CODEX_EXEC", "model": model, "mode": "general",
         "temporary_exception": "GENERAL_ADMISSION_UNVERIFIED_FOR_THIS_SYNTHETIC_TURN_ONLY",
         "sandbox": "MXC_REPLICA_WRITE_GIT_READ_COMMAND_NETWORK_OFF", "approval_policy": "never",
         "files": list(SOURCE_NAMES), "prompt_sha256": digest(PROMPT),
         "file_scope_verification": "REJECT_RESULT_IF_ANY_OTHER_REPLICA_PATH_CHANGED",
         "fixture_sha256": digest([SUBTOTAL, TOTAL, 2, 3]),
-        "flags_sha256": digest(trial_flags(Path("APPROVED_REPLICA_ROOT"))), "ledger_head": ledger_head,
-        "timeout_seconds": SECONDS, "usage_allowance": TOKEN_ALLOWANCE,
+        "flags_sha256": code_mode_flags_sha256(), "ledger_head": ledger_head,
+        "local_command_diagnostic_request_id": diagnostic["request_id"],
+        "timeout_seconds": SECONDS, "role_token_allowance": role_tokens, "session_token_allowance": session_tokens,
         "usage_limit": "CHECK_PROVIDER_REPORTED_USAGE_AFTER_TURN", "job_process_limit": CODEX_DEVELOPER_PROCESS_LIMIT,
     }
 
@@ -173,7 +183,8 @@ def _verify_output(binary, work, output, environment, check):
                     encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
 
 
-def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT_MODEL):
+def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT_MODEL,
+              role_tokens=TOKEN_ALLOWANCE, session_tokens=TOKEN_ALLOWANCE):
     from .runtime import Runner, require_admission
 
     with execution_slot() as abandoned:
@@ -184,7 +195,16 @@ def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT
         home = ledger.local_directory("state") / "codex-developer-home"
         check_path(home)
         _check_cached_model(home, model)
-        scope = _scope(archive, home, request, expires, head, model)
+        diagnostic = next((event for event in reversed(events)
+                           if event.get("kind") == "native_inspection_result"
+                           and event.get("probe_kind") == "GENERAL_CODEX_CODE_MODE"
+                           and event.get("candidate_sha256") == RELEASE_SHA256
+                           and event.get("code_mode_host_sha256") == CODE_MODE_HOST_SHA256
+                           and event.get("flags_sha256") == code_mode_flags_sha256()), None)
+        if (diagnostic is None or diagnostic.get("status") != "SYNTHETIC_PASS"
+                or diagnostic.get("fixture_command_observed") is not True):
+            raise Blocked("Run the local Code Mode command diagnostic successfully before reviewing an online trial")
+        scope = _scope(archive, home, request, expires, head, model, role_tokens, session_tokens, diagnostic)
         pin = digest(scope)
         standard = live_preflight()
         if approval is None:
@@ -207,6 +227,7 @@ def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT
                   "probe_kind": "GENERAL_CODEX_DEVELOPER_TRIAL", "approval_sha256": pin, "scope": scope}
         with _staging(ledger) as (lab, cleanup):
             binary = _stage_release(archive, lab / "package")
+            _verify_code_mode_host(binary)
             work, original, scratch = (lab / name for name in ("work", "original", "tmp"))
             for folder in (work, original, scratch):
                 folder.mkdir()
@@ -255,7 +276,7 @@ def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT
                     raise Blocked("Trial approval expired before dispatch")
                 count, fence = ledger.append(count, fence, {**fields, "kind": "native_inspection_dispatch_intent",
                                                              "baseline_sha256": digest(before)})
-                argv = [*trial_flags(work), "exec", "--ignore-user-config", "--json", "--ephemeral",
+                argv = [*trial_flags(work, code_mode=True), "exec", "--ignore-user-config", "--json", "--ephemeral",
                         "--model", model, "--cd", str(work), PROMPT]
                 exec_logs = logs("exec")
                 process_result = "EXITED"
@@ -302,7 +323,8 @@ def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT
                     result["status"] = "MODEL_RESPONSE_ONLY"
                 if type(usage) is dict:
                     tokens = usage["input_tokens"] + usage["output_tokens"]
-                    result.update(provider_total_tokens=tokens, token_allowance_exceeded=tokens > TOKEN_ALLOWANCE)
+                    result.update(provider_total_tokens=tokens,
+                                  token_allowance_exceeded=tokens > min(role_tokens, session_tokens))
                 if (result.get("independent_test_pass") and result.get("successful_fixture_command_sha256")
                         and result.get("git_diff_sha256")
                         and observed["exitCode"] == 0 and observed["job_active"] == 0 and type(usage) is dict

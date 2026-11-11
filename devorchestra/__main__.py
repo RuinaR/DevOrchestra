@@ -98,11 +98,14 @@ def main():
                                 help="Also inspect an offline General Developer thread")
     native_exec = commands.add_parser("native-exec-diagnostic", help="Test Codex CLI startup against a local sink")
     native_exec.add_argument("--archive", required=True)
+    native_exec.add_argument("--code-mode", action="store_true")
     developer_trial = commands.add_parser("native-developer-trial", help="Review or run one approved synthetic Codex Developer turn")
     developer_trial.add_argument("--archive", required=True)
     developer_trial.add_argument("--request-id", required=True)
     developer_trial.add_argument("--expires", type=int, required=True)
     developer_trial.add_argument("--model")
+    developer_trial.add_argument("--role-tokens", type=int)
+    developer_trial.add_argument("--session-tokens", type=int)
     developer_trial.add_argument("--approve")
     commands.add_parser("native-egress-preflight", help="Read Windows token facts without modifying network policy")
     egress_trial = commands.add_parser("native-egress-trial", help="Recover an existing historical WFP trial")
@@ -377,16 +380,17 @@ def main():
         if args.action == "native-developer-trial":
             from .native_developer_trial import run_trial
 
-            options = {"model": args.model} if args.model is not None else {}
+            options = {key: getattr(args, key) for key in ("model", "role_tokens", "session_tokens")
+                       if getattr(args, key) is not None}
             receipt = run_trial(ledger, args.archive, args.request_id, args.expires, args.approve, **options)
             print(canonical(receipt))
             return 0 if receipt["status"] in ("REAL_PASS", "NEEDS_OWNER_APPROVAL") else 2
         if args.action == "native-exec-diagnostic":
             from .native_exec_probe import run_native_exec_probe
 
-            receipt = run_native_exec_probe(ledger, args.archive)
+            receipt = run_native_exec_probe(ledger, args.archive, code_mode=args.code_mode)
             print(canonical(receipt))
-            return 0 if receipt["status"] == "CLI_STARTUP_OBSERVED" else 2
+            return 0 if receipt["status"] in ("CLI_STARTUP_OBSERVED", "SYNTHETIC_PASS") else 2
         if args.action == "native-command-diagnostic":
             from .native_command_probe import run_native_command_probe
 

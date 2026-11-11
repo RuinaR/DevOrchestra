@@ -29,6 +29,7 @@ from .system_powershell import _open_locked, hold_system_powershell
 
 RELEASE_SHA256 = "c12aca02de615a9fcb76f955bf005a33f4b10b577f8a1730161953f57a1155b3"
 ARCHIVE_SHA256 = "191bd0dcd77a6aa17d4f8a4ab166fc9d05d24ca4b7015789e2aa9a53dcafb658"
+CODE_MODE_HOST_SHA256 = "04d0d08f2001b8a2cb6f08a3872fc51d15373303817972f35e21177dbed44d08"
 ENTRYPOINT = "codex-x86_64-pc-windows-msvc.exe"
 METHODS = MANAGER_POLICY_METHODS | {"command/exec"}
 GENERAL_METHODS = METHODS | {"thread/start"}
@@ -171,6 +172,16 @@ def _stage_release(archive, package):
     (package / ENTRYPOINT).rename(binary)
     verify_app_server_binary(binary, approved_sha256=RELEASE_SHA256)
     return binary
+
+
+def _verify_code_mode_host(binary):
+    from .mxc_launcher import _signed_offline
+
+    companion = binary.with_name("codex-code-mode-host.exe")
+    check_path(companion)
+    with _open_locked(companion, source="Codex Code Mode host") as (stream, _):
+        if file_digest(stream, "sha256").hexdigest() != CODE_MODE_HOST_SHA256 or not _signed_offline(companion):
+            raise Blocked("Pinned local Code Mode host identity could not be verified")
 
 
 @contextmanager
