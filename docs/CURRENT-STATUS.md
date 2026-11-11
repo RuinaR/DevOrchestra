@@ -1,6 +1,8 @@
 # 현재 상태
 
-**공식 CLI 순차 역할 통합 · 오프라인 검증 완료.** `native-cycle`은 한 번 승인한 합성 Git 복제본에서 Manager 계획 → Developer → Reviewer → MXC Verifier → Manager 판정을 실행한다. 첫 사이클의 기능 A와 두 번째 사이클의 기능 B는 별도 변경으로 검증한다. Windows Git·MXC Verifier 실측과 대체 모델 응답을 사용해 두 사이클 자동 전환, 조기 완료 거부, 미확정 요청의 후속 입장 및 동일 승인 재실행 차단을 확인했다. 읽기 전용 MXC 시험에서 복제본 쓰기 시도를 거부했다. 실제 구독으로 연결한 두 사이클은 별도 승인 대기다. 등록 프로젝트와 Command Center에 연결하는 경로는 아직 없다.
+**공식 CLI 순차 역할 통합 · 온라인 첫 사이클 실측, 자동 반복 BLOCKED.** 승인 한 번으로 실제 Manager 계획, Codex Developer 수정·명령, 독립 Reviewer 승인, MXC Verifier, 최종 Manager까지 실행했다. A의 배율 검사는 기대값과 관측값이 모두 9였고, 다음 사이클 대상 B의 수수료는 3으로 남았다(기대값 2). 최종 Manager의 `REWORK`와 Controller의 `CONTINUE` 판정이 달라 두 번째 사이클에 입장하지 않았다. 네 번의 모델 호출에서 64,983토큰을 보고했고, 모든 소유 Job을 회수하고 시험 폴더를 제거했다. 다음 판정에는 현재 기능의 합격과 미착수 기준을 분리해 전달하도록 수정했다. 수정 결과는 오프라인에서 검증했고 온라인 재시험은 별도 승인 대기다.
+
+**공식 CLI 순차 역할 통합 · 오프라인 검증 완료.** `native-cycle`은 한 번 승인한 합성 Git 복제본에서 Manager 계획 → Developer → Reviewer → MXC Verifier → Manager 판정을 실행한다. 첫 사이클의 기능 A와 두 번째 사이클의 기능 B는 별도 변경으로 검증한다. Windows Git·MXC Verifier 실측과 대체 모델 응답을 사용해 두 사이클 자동 전환, 조기 완료 거부, 미확정 요청의 후속 입장 및 동일 승인 재실행 차단을 확인했다. 읽기 전용 MXC 시험에서 복제본 쓰기 시도를 거부했다. 등록 프로젝트와 Command Center에 연결하는 경로는 아직 없다.
 
 **공식 CLI Developer 일회 시험 · REAL_PASS.** 별도 승인한 `gpt-6.1-sol` 구독 턴에서 Codex 0.167.1의 로컬 Code Mode를 사용했다. 모델이 합성 Git 복제본의 `subtotal.cmd`와 `total.cmd`를 수정하고 `call total.cmd 3`을 실행했다. 모델 명령과 Controller 독립 시험은 모두 `11`을 확인했다. Git diff 해시와 사용량은 로컬 원장에 기록했다. 제공자 보고는 입력 32,280토큰(캐시 21,248 포함), 출력 308토큰으로 합계 32,588이었다. 합성 원본과 복제본 Git 기준은 그대로였고, CLI 종료 코드 0, Job 활성 0, 시험 폴더 제거를 확인했다. 이 결과의 범위는 승인한 Developer 1턴이다. 다섯 역할 자동 반복은 미검증이다.
 

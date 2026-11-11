@@ -66,6 +66,9 @@ class NativeCycleTests(unittest.TestCase):
                              "command": task["command"], "aggregated_output": task["expected"], "exit_code": 0}})
             message = {"manager-planning": f"PLAN {target}", "developer": "DONE", "reviewer": "ACCEPT",
                        "manager-final": "CONTINUE" if target == "A" else "COMPLETED"}[phase]
+            if phase == "manager-final" and target == "A":
+                self.assertIn("Independent check passed for this feature: True", argv[-1])
+                self.assertIn("Other features pending a later cycle: ['B']", argv[-1])
             rows.append({"type": "item.completed", "item": {"type": "agent_message", "text": message}})
             rows.append({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5,
                                                                "cached_input_tokens": 20}})
@@ -96,6 +99,8 @@ class NativeCycleTests(unittest.TestCase):
                 self.assertEqual(result["staging_cleanup"]["status"], "REMOVED")
                 rows = [event for event in ledger.read() if event["kind"] == "native_inspection_cycle_progress"]
                 self.assertEqual([list(row["criteria"].values()).count("VERIFIED") for row in rows], [1, 2])
+                self.assertEqual(list(rows[0]["criteria"].values()), ["VERIFIED", "NOT_STARTED"])
+                self.assertEqual([row["controller_decision"] for row in rows], ["CONTINUE", "COMPLETED"])
             else:
                 self.assertFalse(result["usage_complete"])
                 self.assertEqual(result["staging_cleanup"]["status"], "RETAINED_FOR_RECOVERY")

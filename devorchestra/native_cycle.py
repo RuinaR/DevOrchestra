@@ -132,23 +132,34 @@ def _execute_cycles(scope, role, verify, source, evidence):
             raise Blocked("Invalid independent Reviewer decision")
         checked = verify(number, next_task)
         comparison = cycle_progress.compare(CRITERIA, previous, checked)
+        for key, state in comparison["criteria"].items():
+            if key != KEYS[next_task] and previous[key] == "NOT_STARTED" and state == "BLOCKED":
+                # A known baseline miss on future work is not a defect in this cycle.
+                comparison["criteria"][key] = "NOT_STARTED"
         previous = comparison["criteria"]
         complete = all(state == "VERIFIED" for state in previous.values())
-        failed = decision != "ACCEPT" or not developed["successful_fixture_command_sha256"] or previous[KEYS[next_task]] != "VERIFIED"
+        target_passed = previous[KEYS[next_task]] == "VERIFIED"
+        failed = decision != "ACCEPT" or not developed["successful_fixture_command_sha256"] or not target_passed
         repeated = current in seen
         seen.add(current)
         expected = ("REWORK" if failed or comparison["regressed"] or repeated else
                     "COMPLETED" if complete else "CONTINUE")
         evidence(number, {**comparison, "source_sha256": current, "target": next_task,
-                          "review": decision.split()[0], "repeated_source": repeated})
+                          "review": decision.split()[0], "repeated_source": repeated,
+                          "controller_decision": expected})
+        outstanding = [name for name, key in KEYS.items() if name != next_task and previous[key] != "VERIFIED"]
         final = role(number, "manager-final", next_task,
-                     f"Overall goal: {GOAL} Frozen criteria: {previous}. "
+                     f"Overall goal: {GOAL}\n"
+                     f"Current approved feature: {next_task}. Independent check passed for this feature: {target_passed}. "
+                     f"Other features pending a later cycle: {outstanding}. Frozen criteria: {previous}. "
                      f"Independent review: {decision.split()[0]}. Changed-source repetition: {repeated}. "
                      f"Developer test observed: {bool(developed['successful_fixture_command_sha256'])}. "
-                     f"Independent observations: {checked['observations']}. "
-                     "Reply exactly COMPLETED only if every criterion is verified, the review accepts, "
-                     "the developer test was observed and the source is new. Reply CONTINUE if the same gates "
-                     "hold and the current feature passed but another is outstanding. Otherwise reply REWORK.")
+                     f"Regressed criteria: {comparison['regressed']}.\n"
+                     "Reply with exactly one decision. Use REWORK if the current feature failed its check, "
+                     "the review rejected it, the developer test was missing, the source repeated, "
+                     "or a previously verified criterion regressed. Otherwise use CONTINUE if another feature "
+                     "is pending, or COMPLETED if every criterion is verified. "
+                     "For example, a verified A and a B that has not started means CONTINUE.")
         if final["message"] != expected:
             raise Blocked("Manager decision disagrees with Controller evidence")
         cycles = number
@@ -292,8 +303,10 @@ class _FixtureSession:
         self.record("native_inspection_role_intent", cycle=cycle, phase="verifier", target=target,
                     source_sha256=self.source())
         observations = self.observe(f"{cycle}-verifier")
+        current = next(row for row in observations if row["title"] == target)
         receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
                    "verdict": "PASS" if all(row["actual"] == row["expected"] for row in observations) else "FAIL",
+                   "target_verdict": "PASS" if current["actual"] == current["expected"] else "FAIL",
                    "observations": observations, "source_sha256": self.source()}
         self.record("native_inspection_role_result", cycle=cycle, target=target, **receipt)
         self.phases.append({"cycle": cycle, "phase": "verifier", "outcome": receipt["verdict"]})
@@ -354,6 +367,9 @@ class _FixtureSession:
         receipt = {"outcome": outcome, "exit_code": result["exitCode"], "owned_tree": "DRAINED",
                    "provider_usage": usage, "message_sha256": digest(message),
                    "test_commands": response.get("successful_fixture_command_sha256", []), **details}
+        if phase == "manager-final" and isinstance(message, str):
+            decision = message.strip()
+            receipt["manager_decision"] = decision if decision in {"CONTINUE", "REWORK", "COMPLETED"} else "INVALID"
         self.phases.append({"cycle": cycle, "phase": phase, **receipt})
         self.record("native_inspection_role_result", cycle=cycle, phase=phase, target=target, **receipt)
         if outcome != "COMPLETED":

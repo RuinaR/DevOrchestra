@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+첫 온라인 통합 시험에서는 다섯 역할이 한 사이클을 수행했고 A가 검증됐다. 최종 Manager가 아직 착수하지 않은 B를 보고 `REWORK`를 반환해 Controller가 자동 전환을 중단했다. 현재 기능의 독립 검사 결과, 다음 사이클의 미착수 기준, 회귀 여부를 최종 Manager에게 명시적으로 전달한다. 결과의 불일치 차단은 유지한다. 기존 시험 승인과 복제본은 종료됐으며 온라인 재시험에는 새 승인이 필요하다.
+
 `native-cycle --archive <공식 ZIP> --request-id <32자리 hex> --expires <UTC epoch> --seconds 960 --tokens 270000 --cycles 2`는 실제 두 사이클 시험의 승인 범위를 검토한다. 사용자 동의 후 동일 인자와 `--approve <해시>`를 사용한다. 최대 Codex 호출은 8회다. Manager 계획·Reviewer·Manager 판정은 각 30,000토큰, Developer는 45,000토큰을 입장 전에 남은 예산과 비교한다. Verifier는 모델을 호출하지 않는다. 각 호출의 실제 입력+출력은 사후 판정한다. Developer는 MXC 복제본 내 셸과 쓰기 권한을 사용하며 파일별 변경은 Controller가 사후 대조한다. Reviewer와 두 Manager 단계는 MXC 읽기 전용이다. 미확정 요청은 자동 재송신하지 않고 증거를 보존한다. 프로세스 회수가 미확정이면 원장 의도를 열린 채 두어 신규 입장을 막는다.
 
 공식 Codex 0.167.1 로컬 Code Mode로 첫 온라인 Developer 시험이 `REAL_PASS`였다. `gpt-6.1-sol`이 합성 Git 복제본의 두 파일을 직접 수정했고 모델 명령과 Controller 독립 시험에서 모두 `11`을 확인했다. 사용량 32,588토큰, diff와 소유 Job 회수 결과를 로컬 원장에 기록했다. 이전 `CODE_MODE_HOST_DISABLED` 결과와 로컬 합성 시험은 상태 문서에서 별도로 추적한다.
