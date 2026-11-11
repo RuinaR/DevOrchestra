@@ -56,17 +56,20 @@ Observe PROTECTED_READ { [void][IO.File]::ReadAllBytes($protected) }
 """
 
 
-def _profile(work, home, scratch):
+def _profile(work, home, scratch, *, managed_loopback=False):
     paths = "\n".join(f'{json.dumps(str(path))} = "{access}"'
                       for path, access in ((work, "read"), (home, "write"), (scratch, "write")))
+    network = ('enabled = true\nallow_local_binding = true\n'
+               f'[permissions.{PROFILE}.network.domains]\n"boundary-probe.invalid" = "allow"\n'
+               if managed_loopback else 'enabled = false\n')
     return (f'default_permissions = "{PROFILE}"\napproval_policy = "never"\n'
             f'[permissions.{PROFILE}.filesystem]\n":root" = "deny"\n":minimal" = "read"\n{paths}\n'
-            f'[permissions.{PROFILE}.network]\nenabled = false\n')
+            f'[permissions.{PROFILE}.network]\n{network}')
 
 
-def _args(child, *arguments):
+def _args(child, *arguments, profile=PROFILE):
     return ["-c", "windows.sandbox=mxc", "sandbox", "--include-managed-config",
-            "--permission-profile", PROFILE, "--", str(child), *arguments]
+            "--permission-profile", profile, "--", str(child), *arguments]
 
 
 def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=512 * 1024 * 1024,
@@ -178,13 +181,52 @@ try {{
             status = "ACCESS_DENIED"
     return {"status": status, "host_control": "CONNECTED", "listener_accepted": accepted,
             "challenge_matched": matched,
-            "exit_code": observation["exitCode"],
+            "exit_code": observation["exitCode"], "job_active": observation["job_active"],
             "child_observation": marker if marker in {"CONNECTED", "TIMEOUT", "SOCKET_10013"} else "OTHER"}
 
 
+def _command_profiles(work):
+    path = json.dumps(str(work))
+    return '\n[windows]\nsandbox = "mxc"\n' + ''.join(
+        f'\n[permissions.probe-{access}.filesystem]\n":root" = "deny"\n'
+        f'":minimal" = "read"\n{path} = "{access}"\n'
+        f'[permissions.probe-{access}.network]\nenabled = false\n' for access in ("read", "write"))
+
+
+def _observe_server_commands(server, work, command):
+    observations = {}
+    for request_id, access in enumerate(("read", "write"), 1):
+        try:
+            response = server.request(request_id, "command/exec", {
+                "command": command, "cwd": str(work), "timeoutMs": 5000,
+                "permissionProfile": "probe-" + access,
+            })
+        except Blocked:
+            if server.failure_code != "RPC_ERROR":
+                raise
+            diagnostic = server.diagnostics[-1]
+            observations[access] = {"status": "RPC_REJECTED", "error": diagnostic["error"],
+                                    **diagnostic.get("shape", {})}
+            break
+        observations[access] = _command_observation(response, work, command, access)
+    return observations
+
+
+def _command_observation(response, work, command, access):
+    receipt = probe_receipt(response, work, command)
+    expected = {"ALLOWED_READ": "OK", "ALLOWED_WRITE": "OK" if access == "write" else "DENIED_5",
+                "PROTECTED_READ": "DENIED_5"}
+    return {**receipt, "status": "PASS" if receipt["markers_unchanged"] is True
+            and receipt["outcomes"] == expected else "NOT_VERIFIED"}
+
+
 def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha256, powershell_sha256,
-                   *, loopback_only=False):
+                   *, loopback_only=False, managed_loopback=False, command_boundary=False):
     """Test only pinned binaries and synthetic files; this cannot admit a model turn."""
+    if managed_loopback and not loopback_only:
+        raise Blocked("Managed network diagnostic is restricted to the owned loopback listener")
+    if command_boundary and loopback_only:
+        raise Blocked("Choose one MXC diagnostic")
     launcher, candidate = map(Path, (launcher, candidate))
     if (launcher.name.casefold() != "codex.exe" or launcher_sha256 != LAUNCHER_PIN
             or candidate.name.casefold() != "codex-app-server-x86_64-pc-windows-msvc.exe"
@@ -201,7 +243,9 @@ def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha25
         request_id = uuid4().hex
         fields = {"project_id": None, "run_id": None, "state": "DIAGNOSTIC",
                   "source": "WINDOWS_NATIVE_CODEX", "request_id": request_id,
-                  "probe_kind": "MXC_OFFLINE_LOOPBACK" if loopback_only else "MXC_OFFLINE_MANAGER_HOST",
+                  "probe_kind": ("MXC_MANAGED_LOOPBACK" if managed_loopback else
+                                 "MXC_OFFLINE_LOOPBACK" if loopback_only else
+                                 "MXC_APP_SERVER_COMMAND" if command_boundary else "MXC_OFFLINE_MANAGER_HOST"),
                   "launcher_sha256": launcher_sha256, "candidate_sha256": candidate_sha256,
                   "powershell_sha256": powershell_sha256}
         if not loopback_only:
@@ -217,7 +261,15 @@ def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha25
                 verify_app_server_binary(server_path, approved_sha256=candidate_sha256)
                 (work / "allowed.txt").write_bytes(ALLOWED)
                 (protected / "protected.txt").write_bytes(PROTECTED)
-            profile = _profile(work, home, scratch)
+            profile = _profile(work, home, scratch, managed_loopback=managed_loopback)
+            if command_boundary:
+                inner_work = scratch / "command-work"
+                inner_work.mkdir()
+                inner_protected = scratch / "protected"
+                inner_protected.mkdir()
+                (inner_work / "allowed.txt").write_bytes(ALLOWED)
+                (inner_protected / "protected.txt").write_bytes(PROTECTED)
+                profile += _command_profiles(inner_work)
             (home / "config.toml").write_text(profile, encoding="ascii")
             windows, appdata = (_known_folder(number) for number in (0x24, 0x1C))
             env = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,
@@ -234,19 +286,36 @@ def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha25
                 if loopback_only:
                     loopback = _observe_loopback(launcher, powershell, work, scratch, env)
                 else:
-                    command = _args(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                                    b64encode(FILE_PROBE.encode("utf-16-le")).decode("ascii"))
-                    files = probe_receipt(_observe(launcher, command, work, scratch, env), work, command)
-            def cancelled():
-                runner._check_diagnostic_fence(count, fence)
-                return False
+                    command = [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                               b64encode(FILE_PROBE.encode("utf-16-le")).decode("ascii")]
+                    outer_command = _args(*command)
+                    files = probe_receipt(_observe(launcher, outer_command, work, scratch, env), work, outer_command)
+                    if command_boundary:
+                        controls = {}
+                        for access in ("read", "write"):
+                            runner._check_diagnostic_fence(count, fence)
+                            recheck()
+                            output = scratch / access
+                            output.mkdir()
+                            argv = _args(*command, profile="probe-" + access)
+                            controls[access] = _command_observation(
+                                _observe(launcher, argv, inner_work, output, env), inner_work, argv, access)
 
-            if not loopback_only:
-                cancelled()
-                with _owned_stdio(launcher, _args(server_path, "--listen", "stdio://"),
-                                  work, env, 15, cancelled) as server:
-                    server.restrict_outbound(MANAGER_POLICY_METHODS)
-                    server.initialize()
+                def cancelled():
+                    runner._check_diagnostic_fence(count, fence)
+                    return False
+
+                if not loopback_only:
+                    cancelled()
+                    with _owned_stdio(launcher, _args(server_path, "--listen", "stdio://"),
+                                      work, env, 20, cancelled) as server:
+                        methods = (frozenset(("initialize", "initialized", "command/exec"))
+                                   if command_boundary else MANAGER_POLICY_METHODS)
+                        server.restrict_outbound(methods)
+                        server.initialize(experimental_api=command_boundary)
+                        if command_boundary:
+                            recheck()
+                            server_commands = _observe_server_commands(server, inner_work, command)
         result = {**fields, "kind": "native_inspection_result", "timestamp": datetime.now(timezone.utc).isoformat(),
                   "profile_ref": digest(profile), "owned_tree": "DRAINED", "model_turn": "NOT_STARTED",
                   "provider_egress": "NOT_VERIFIED", "server_internal_tools": "NOT_VERIFIED"}
@@ -254,5 +323,8 @@ def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha25
             result["loopback"] = loopback
         else:
             result.update(sandboxed_app_server_stdio="INITIALIZED", file_probe=files, cleanup=server.cleanup_receipt)
+            if command_boundary:
+                result["server_commands"] = server_commands
+                result["direct_controls"] = controls
         ledger.append(count, fence, result, allow_shutdown=True)
         return result

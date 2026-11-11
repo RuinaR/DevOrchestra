@@ -19,8 +19,8 @@ MANAGER_POLICY_METHODS = frozenset(("initialize", "initialized", "config/read", 
 MANAGER_THREAD_METHODS = MANAGER_POLICY_METHODS | {"thread/start"}
 MANAGER_TURN_METHODS = MANAGER_THREAD_METHODS | {"account/read", "turn/start"}
 REQUIRED_BOUNDARIES = (
-    ("SIDE_EFFECTING_TOOLS_UNVERIFIED", "파일 수정·명령 실행·다른 앱 접근을 호출 전에 막는 경계가 확인되지 않았습니다."),
-    ("PROVIDER_EGRESS_UNVERIFIED", "App Server가 승인된 공식 제공자에만 연결되는지 확인되지 않았습니다."),
+    ("SIDE_EFFECTING_TOOLS_UNVERIFIED", "모델의 파일·명령·앱 도구를 승인 범위에서 집행하는 경계가 확인되지 않았습니다."),
+    ("PROVIDER_EGRESS_UNVERIFIED", "App Server 호스트의 송신이 승인된 공식 제공자에 한정되는지 확인되지 않았습니다."),
 )
 # These are online Manager boundaries. Complete offline isolation and VM
 # acceptance belong to enhanced/diagnostic modes, not this admission path.

@@ -15,6 +15,8 @@ Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택�
 
 Windows MXC 명령 프로필의 파일·네트워크 권한, App Server 호스트의 제공자 송신, 앱·MCP 및 권한 확대는 별도 집행 지점이다. P2.111의 독립 Git 시험에서 MXC 명령의 소스 쓰기, Git 메타데이터와 테스트 파일 쓰기 거부, 외부 파일과 루프백 접근 거부, 테스트 종료를 관측했다. App Server의 권한 요청 RPC는 요청된 범위 중 승인한 부분을 응답할 수 있다. 호스트와 내장 도구의 실제 집행이 확인돼야 자동 역할을 입장시킨다. [Windows MXC](https://learn.chatgpt.com/docs/windows/windows-sandbox) · [App Server](https://learn.chatgpt.com/docs/app-server)
 
+P2.113의 직접 MXC 명령과 중첩 App Server 비교에서 명령 프로필은 호스트에서 동작했지만, 오프라인 MXC 안의 App Server는 명령 실행에 필요한 MXC를 사용할 수 없다고 보고했다. 관리 명령 네트워크의 도메인 규칙과 데스크톱 앱의 HTTPS/WSS 도메인 정책은 각각 별도 범위이며, 후자는 네이티브 모듈과 자식 프로세스를 제한하지 않는다. 다음 실행 후보에는 호스트 송신을 독립적으로 제한하고 App Server의 명령 격리가 동작하는 조합이 필요하다. [관리 구성의 적용 범위](https://learn.chatgpt.com/docs/enterprise/managed-configuration#control-desktop-app-network-destinations)
+
 ### 구독 Manager 실행
 
 P2.98은 다중 파일 검증 명세에 선택적으로 `"runtime":{"kind":"mxc-python-runtime-v1","launcher":"<absolute codex.exe>","python":"<absolute packaged python.exe>","python_sha256":"<sha256>"}`를 추가한다. Controller는 고정 하네스·도구 해시와 서명, Python 버전, 읽기 전용 입력, 비공개 바이트코드 출력, 환경 허용 목록, 네트워크 OFF, 512 MiB Job과 최대 20초를 승인에 묶는다. 소스 구문 허용 목록은 사전 입장 제어다. PASS는 실제 CPython 출력·종료 코드·산출물 해시·파일/루프백 경계와 자원 회수를 확인한 후 기록한다.

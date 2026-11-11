@@ -1763,9 +1763,12 @@ class CommandCenter:
         state = {"BLOCKED": "자동 Manager 준비 차단", "NEEDS_OWNER_APPROVAL": "사용자 승인 필요",
                  "READY": "실행 전 검사 준비"}[decision["state"]]
         label(panel, f"{state} · App Server", size=13, bold=True, bg=BG).pack(fill="x")
-        label(panel, decision["message"], bg=BG, wraplength=520).pack(fill="x", pady=8)
-        for boundary in decision.get("missing_boundaries", ())[1:]:
-            label(panel, boundary["message"], bg=BG, wraplength=520).pack(fill="x", pady=(0, 8))
+        boundaries = decision.get("missing_boundaries", ())
+        if not any(boundary["code"] == decision.get("reason") for boundary in boundaries):
+            label(panel, decision["message"], bg=BG, wraplength=520).pack(fill="x", pady=8)
+        for boundary in boundaries:
+            label(panel, boundary["code"] + "\n" + boundary["message"], bg=BG,
+                  wraplength=520).pack(fill="x", pady=(0, 8))
         label(panel, "지금 사용 가능 · 기존 Codex에 지시를 직접 전달하는 감독형 개발\n"
               "등록 프로젝트 QA · 역할별 소유 창 검증 범위를 한 번 승인해 반복 실행",
               bg=BG, fg=MUTED, wraplength=520).pack(fill="x", pady=(0, 8))

@@ -210,6 +210,18 @@ class AppServerTests(unittest.TestCase):
                 if expected == "RPC_ERROR":
                     self.assertEqual("METHOD_NOT_FOUND", record["error"])
 
+    def test_nested_mxc_error_keeps_only_the_known_diagnostic(self):
+        frame = (b'{"id":1,"error":{"code":-32603,"message":"exec failed: unsupported operation: '
+                 b'native MXC is unavailable on this executor","data":"private fixture"}}\n')
+        connection = AppServer(BytesIO(frame), BytesIO(), 1, lambda: False)
+        connection.request_id, connection.request_method = 1, "command/exec"
+        with self.assertRaisesRegex(Blocked, "RPC_ERROR"):
+            connection.receive()
+        receipt = connection.diagnostic_receipt()["protocol"][-1]
+        self.assertEqual("INTERNAL_ERROR", receipt["error"])
+        self.assertEqual({"detail": "NATIVE_MXC_UNAVAILABLE_ON_EXECUTOR"}, receipt["shape"])
+        self.assertNotIn("private fixture", str(receipt))
+
     def test_envelope_receipt_records_types_and_counts_without_raw_fields(self):
         frame = b'{"id":1,"result":{},"private-key":"private-value"}\n'
         connection = AppServer(BytesIO(frame), BytesIO(), 1, lambda: False)

@@ -87,6 +87,10 @@ def main():
         mxc_host.add_argument("--" + option, required=True)
     mxc_host.add_argument("--loopback-only", action="store_true",
                           help="Measure direct TCP to an owned loopback listener without starting App Server")
+    mxc_host.add_argument("--managed-loopback", action="store_true",
+                          help="With --loopback-only, test the managed network profile against that listener")
+    mxc_host.add_argument("--command-boundary", action="store_true",
+                          help="Exercise fixed read/write commands via offline App Server profiles")
     gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
     gui_verify.add_argument("--registered", action="store_true")
@@ -328,10 +332,16 @@ def main():
             from .mxc_host_probe import run_host_probe
 
             receipt = run_host_probe(ledger, args.launcher, args.launcher_sha256, args.candidate,
-                                     args.candidate_sha256, args.powershell_sha256, loopback_only=args.loopback_only)
+                                     args.candidate_sha256, args.powershell_sha256, loopback_only=args.loopback_only,
+                                     managed_loopback=args.managed_loopback, command_boundary=args.command_boundary)
             print(canonical(receipt))
             if args.loopback_only:
                 return 2 if receipt["loopback"]["status"] == "INCONCLUSIVE" else 0
+            if args.command_boundary:
+                return 0 if (receipt["file_probe"]["status"] == "PASS" and all(
+                    receipt[group].get(mode, {}).get("status") == "PASS"
+                    for group in ("direct_controls", "server_commands") for mode in ("read", "write")
+                )) else 2
             return 0 if receipt["file_probe"]["status"] == "PASS" else 2
         if args.action == "manager-preflight":
             decision = Runner(ledger).inspect_manager_admission(args.project, args.backend)

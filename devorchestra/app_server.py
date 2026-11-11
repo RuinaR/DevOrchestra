@@ -362,8 +362,12 @@ class AppServer:
                         or type(error.get("code")) is not int or not -(2**63) <= error["code"] < 2**63
                         or not isinstance(error.get("message"), str)):
                     self._fail("INVALID_ERROR_RESPONSE", matches=True, valid=True, size=size)
+                detail = ("NATIVE_MXC_UNAVAILABLE_ON_EXECUTOR" if self.request_method == "command/exec"
+                          and error["message"] == "exec failed: unsupported operation: native MXC is unavailable on this executor"
+                          else None)
                 self._fail("RPC_ERROR", matches=True, valid=True, size=size,
-                           error=ERROR_CODES.get(error["code"], "OTHER_RPC_ERROR"))
+                           error=ERROR_CODES.get(error["code"], "OTHER_RPC_ERROR"),
+                           shape={"detail": detail} if detail else None)
             if not isinstance(message["result"], dict):
                 self._fail("INVALID_RESULT", matches=True, valid=True, size=size)
             self._note("MATCHED_RESPONSE", matches=True, valid=True, size=size)

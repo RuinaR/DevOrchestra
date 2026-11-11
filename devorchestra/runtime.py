@@ -845,7 +845,7 @@ class Runner:
         try:
             context = self.native_manager_context(project_id)
         except (Blocked, OSError, ValueError):
-            return {"backend": decision["backend"], "state": "BLOCKED", "reason": "REQUIREMENTS_UNAVAILABLE",
+            return {**decision, "state": "BLOCKED", "reason": "REQUIREMENTS_UNAVAILABLE",
                     "message": "프로젝트에 현재 내용과 일치하는 요구사항을 등록하세요.", "summary": None}
         return {**decision, "summary": {
             "model": context["model"], "reasoning": context["reasoning"],
