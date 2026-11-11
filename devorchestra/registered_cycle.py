@@ -45,11 +45,22 @@ def _tools(spec, criteria, image, writable):
         raise Blocked("Specify an executable and one independent check per criterion")
     binary = Path(spec["executable"])
     trusted = _known_folder(0x26)
-    if binary.suffix.lower() != ".exe" or not binary.is_relative_to(trusted) or binary.parent == trusted:
-        raise Blocked("Choose an installed Program Files executable")
+    windows_text_check = binary == _known_folder(0x24) / "System32" / "cmd.exe"
+    if binary.suffix.lower() != ".exe" or (not windows_text_check
+            and (not binary.is_relative_to(trusted) or binary.parent == trusted)):
+        raise Blocked("서명된 Program Files 검증 도구 또는 Windows 기본 텍스트 검사를 선택하세요.")
     check_path(binary, installed_executable=True)
-    if not _signed_offline(binary):
+    if windows_text_check:
+        from .system_powershell import _catalog_publisher, _open_locked
+
+        with _open_locked(binary, source="System32 verifier") as (_, handle):
+            if _catalog_publisher(binary, handle) != ("Microsoft Windows", "Microsoft Corporation"):
+                raise Blocked("Windows 기본 검사 도구의 Microsoft 카탈로그 서명을 확인할 수 없습니다.")
+            identity = fingerprint(binary, installed_executable=True)
+    elif not _signed_offline(binary):
         raise Blocked("Verifier executable signature could not be verified")
+    else:
+        identity = fingerprint(binary, installed_executable=True)
     checks = spec["checks"]
     if type(checks) is not dict or checks.keys() != criteria.keys():
         raise Blocked("Verification checks must match the frozen criterion IDs")
@@ -62,8 +73,14 @@ def _tools(spec, criteria, image, writable):
                 or len(row["stdout"]) > 1000 or any(type(arg) is not str or len(arg) > 300
                    or any(ord(char) < 32 for char in arg) for arg in row["args"])):
             raise Blocked("A check requires bounded literal arguments and exact stdout")
+        if windows_text_check:
+            prefix, path = row["args"][:-1], row["args"][-1:]
+            if (prefix != ["/d", "/q", "/c", "type"] or len(path) != 1
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", path[0])
+                    or path[0] not in image["files"] or _protected(path[0]) or row["inputs"]):
+                raise Blocked("Windows 기본 검사는 복제본의 일반 파일 하나를 읽는 type 명령만 지원합니다.")
     return {"executable": str(binary), "root": str(binary.parent),
-            "identity": fingerprint(binary, installed_executable=True),
+            "identity": identity,
             "checks": checks}
 
 

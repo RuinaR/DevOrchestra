@@ -1,6 +1,7 @@
 """Command Center entry point for an owner-approved registered Codex session."""
 from concurrent.futures import Future
 import json
+from pathlib import Path
 import sqlite3
 from threading import Event, Thread
 from time import time
@@ -78,10 +79,22 @@ def show(center, project):
             entries["archive"].insert(0, path)
 
     ttk.Button(inputs, text="찾기", command=archive).grid(row=0, column=2)
-    ttk.Label(panel, text="독립 검사 · 설치된 EXE와 기준별 인자 및 기대 출력").pack(anchor="w")
+    ttk.Label(panel, text="독립 검사 · 검증 도구, 기준별 인자 및 기대 출력").pack(anchor="w")
     spec = center.editor_box(panel, height=6)
     spec.insert("1.0", json.dumps({"executable": "", "checks": {key: {"args": [], "stdout": "", "inputs": []}
                                                              for key in criteria}}, indent=2))
+
+    def windows_text_check():
+        from .mxc_launcher import _known_folder
+
+        spec.delete("1.0", "end")
+        spec.insert("1.0", json.dumps({"executable": str(_known_folder(0x24) / "System32" / "cmd.exe"),
+                                     "checks": {key: {"args": ["/d", "/q", "/c", "type", "message.txt"],
+                                                      "stdout": "Hello", "inputs": []}
+                                                for key in criteria}}, indent=2))
+        state.set("예제의 message.txt와 Hello를 각 기준의 검사 파일과 기대 내용으로 바꾸세요.")
+
+    ttk.Button(panel, text="Windows 텍스트 검사 예제", command=windows_text_check).pack(anchor="w")
     options = ttk.Frame(panel)
     options.pack(fill="x")
     grants = {}
@@ -138,6 +151,12 @@ def show(center, project):
 
         def work():
             try:
+                if approval is None and not resume:
+                    archive = codex_setup.archive_path(runner.ledger)
+                    if archive.is_file() and Path(args[1]).absolute() == archive:
+                        account = codex_setup.run(runner, "status", cancelled=cancelled.is_set)
+                        if account["status"] != "CONNECTED":
+                            raise RuntimeError("설정의 Codex 환경 및 로그인에서 ChatGPT 연결을 완료하세요.")
                 if resume and approval is None and not graceful:
                     registered_cycle.verify_resume_candidate(runner, project, cancelled=cancelled.is_set)
                 review_fn = registered_cycle.review_resume if resume else registered_cycle.review
@@ -235,14 +254,45 @@ def show(center, project):
     def resume():
         try:
             rows = registered_cycle.history(runner.ledger, project)
-            graceful = bool(rows and rows[-1].get("outcome") == "SIGNOFF_PENDING")
-            args = (project, int(time()) + (4740 if graceful else 1700),
-                    int(entries["seconds"].get()), int(entries["tokens"].get()))
-        except ValueError:
-            state.set("추가 시간과 토큰 한도를 숫자로 입력하세요.")
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            state.set("저장된 개발 기록을 읽지 못했습니다. 기록·복구 화면에서 상태를 확인하세요.")
             return
-        cancelled.clear()
-        submit(args, resume=True, graceful=graceful)
+        if not rows or rows[-1].get("outcome") not in {"SIGNOFF_PENDING", "TOKEN_LIMIT"}:
+            state.set("재개할 검토 단계가 없습니다. 중단 원인은 기록·복구 화면에서 확인하세요.")
+            return
+        graceful = rows[-1]["outcome"] == "SIGNOFF_PENDING"
+        prior_limits = rows[0]["scope"]["role_tokens"]
+        reserve = prior_limits["reviewer"] + prior_limits["manager-final"]
+        dialog = tk.Toplevel(panel, padx=12, pady=12)
+        dialog.title("재개 예산")
+        dialog.transient(panel)
+        values = {}
+        for key, title, default in (("seconds", "추가 시간(초)", 300), ("tokens", "추가 토큰", reserve)):
+            ttk.Label(dialog, text=title).pack(anchor="w")
+            entry = values[key] = ttk.Entry(dialog)
+            entry.insert(0, str(default))
+            entry.pack(fill="x", pady=(0, 5))
+        hint = ttk.Label(dialog, wraplength=350)
+        hint.pack(anchor="w")
+
+        def review():
+            try:
+                seconds, tokens = (int(values[key].get()) for key in ("seconds", "tokens"))
+                if not 120 <= seconds <= (1800 if graceful else 1500) or not 1 <= tokens <= 400000:
+                    raise ValueError
+            except ValueError:
+                hint.configure(text="추가 시간은 120초부터, 토큰은 1~400,000 사이로 입력하세요.")
+                return
+            args = (project, int(time()) + (4740 if graceful else 1700), seconds, tokens)
+            dialog.destroy()
+            cancelled.clear()
+            submit(args, resume=True, graceful=graceful)
+
+        ttk.Button(dialog, text="재개 범위 검토", command=review).pack(anchor="e")
+        dialog.bind("<Return>", lambda _event: review())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.grab_set()
+        values["seconds"].focus_set()
 
     buttons = ttk.Frame(panel)
     buttons.pack(fill="x")

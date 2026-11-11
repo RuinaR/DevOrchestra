@@ -109,6 +109,9 @@ class RegisteredCycleTests(unittest.TestCase):
                 encoding="utf-8")
             if resume:
                 (original / "closing.py").write_text('SIGNOFF = "old"\n', encoding="utf-8")
+            else:
+                (original / "greeting.txt").write_text("old\n", encoding="ascii")
+                (original / "closing.txt").write_text("old\n", encoding="ascii")
             (original / "README.md").write_text("Text formatting utility\n", encoding="utf-8")
             def git(*args):
                 subprocess.run(["git", *args], cwd=original, check=True, timeout=15, capture_output=True)
@@ -130,8 +133,14 @@ class RegisteredCycleTests(unittest.TestCase):
             tests = {"executable": sys.executable, "checks": {
                 keys[0]: {"args": ["-B", "check.py", "GREETING"], "stdout": "hello", "inputs": ["check.py"]},
                 keys[1]: {"args": ["-B", "check.py", "SIGNOFF"], "stdout": "goodbye", "inputs": ["check.py"]}}}
+            if not resume:
+                from devorchestra.mxc_launcher import _known_folder
+
+                tests = {"executable": str(_known_folder(0x24) / "System32" / "cmd.exe"), "checks": {
+                    keys[0]: {"args": ["/d", "/q", "/c", "type", "greeting.txt"], "stdout": "hello", "inputs": []},
+                    keys[1]: {"args": ["/d", "/q", "/c", "type", "closing.txt"], "stdout": "goodbye", "inputs": []}}}
             params = ("registered-test", os.environ["DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"], int(time()) + 600,
-                      300, 270000, 2, ["formatting.py", "closing.py"] if resume else ["formatting.py"],
+                      300, 270000, 2, ["formatting.py", "closing.py"] if resume else ["greeting.txt", "closing.txt"],
                       list(registered_cycle.PERMISSIONS), tests)
             calls = []
 
@@ -145,7 +154,10 @@ class RegisteredCycleTests(unittest.TestCase):
                 shell = "true" if phase in {"developer", "reviewer"} else "false"
                 self.assertIn(f"features.shell_tool={shell}", argv)
                 if phase == "developer":
-                    if resume and cycle == 2:
+                    if not resume:
+                        filename, value = ("greeting.txt", "hello") if cycle == 1 else ("closing.txt", "goodbye")
+                        (work / filename).write_text(value + "\n", encoding="ascii")
+                    elif cycle == 2:
                         (work / "closing.py").write_text('SIGNOFF = "goodbye"\n', encoding="utf-8")
                     else:
                         code = 'GREETING = "hello"\nSIGNOFF = "old"\n' if cycle == 1 else (
@@ -197,10 +209,13 @@ class RegisteredCycleTests(unittest.TestCase):
             self.assertEqual(result["criteria_status"], dict.fromkeys(keys, "VERIFIED"))
             self.assertEqual(result["staging_cleanup"]["status"], "REMOVED")
             self.assertIn('"old"', (original / "formatting.py").read_text())
+            if not resume:
+                self.assertEqual((original / "greeting.txt").read_text(), "old\n")
+                self.assertEqual((original / "closing.txt").read_text(), "old\n")
             self.assertEqual((original / "README.md").read_text(), "User working change\n")
             apply, patch_text = original_apply.review(runner, "registered-test", int(time()) + 120)
             self.assertEqual(set(apply["paths"]), set(params[6]))
-            self.assertIn('SIGNOFF = "goodbye"', patch_text)
+            self.assertIn('SIGNOFF = "goodbye"' if resume else "+goodbye", patch_text)
 
     def _drive_gui(self, ledger, params):
         import tkinter as tk
@@ -230,7 +245,7 @@ class RegisteredCycleTests(unittest.TestCase):
                          if isinstance(widget, tk.Toplevel) and "Codex 개발 세션" in widget.title())
             children = list(descendants(panel))
             entries = [widget for widget in children if isinstance(widget, ttk.Entry)]
-            for entry, value in zip(entries, (params[1], "formatting.py", "300", "270000", "2", "45000"),
+            for entry, value in zip(entries, (params[1], ",".join(params[6]), "300", "270000", "2", "45000"),
                                     strict=True):
                 entry.delete(0, "end")
                 entry.insert(0, value)
@@ -271,12 +286,12 @@ class RegisteredCycleTests(unittest.TestCase):
             root.mainloop()
             if settled:
                 self.assertEqual(confirmations, ["등록 프로젝트 Codex 세션 승인"])
-                self.assertIn("formatting.py", settled[0][1])
+                self.assertIn("greeting.txt", settled[0][1])
                 button(panel, "원본 반영 검토").invoke()
                 apply_window = next(widget for widget in root.winfo_children()
                                     if isinstance(widget, tk.Toplevel) and "검증된 변경 원본 반영" in widget.title())
                 patch_view = next(widget for widget in descendants(apply_window) if isinstance(widget, tk.Text))
-                self.assertIn('SIGNOFF = "goodbye"', patch_view.get("1.0", "end"))
+                self.assertIn("+goodbye", patch_view.get("1.0", "end"))
                 return settled[0][0]
             status = next(widget for widget in children if isinstance(widget, ttk.Label) and widget["textvariable"])
             self.fail(f"Command Center did not render a terminal registered result: "

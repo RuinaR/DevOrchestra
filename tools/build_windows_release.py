@@ -159,6 +159,9 @@ def main():
             archive.write(executable.with_suffix(".json"), "DevOrchestra.json")
             archive.write(root / "README.md", "README.md")
             archive.write(root / "docs" / "windows-codex-setup.png", "docs/windows-codex-setup.png")
+            notes = root / "docs" / f"RELEASE-NOTES-{release}.md"
+            if notes.is_file():
+                archive.write(notes, "RELEASE-NOTES.md")
         with ZipFile(bundle) as archive:
             if archive.testzip() is not None:
                 raise SystemExit("PORTABLE_ZIP_INVALID")
