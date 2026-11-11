@@ -161,3 +161,4 @@ training_data/
 
 # Keep tracked examples, design assets and tests small and safe.
 # Add only explicit narrow ! exceptions after review; never globally unignore private directories.
+!/docs/windows-codex-setup.png

@@ -15,12 +15,14 @@ DevOrchestra는 Windows에서 Codex 개발을 관리하는 Command Center입니�
 
 시간과 토큰은 다음 역할 또는 사이클의 시작을 제어하는 소프트 기준입니다. 기준에 도달하면 진행 중인 작업은 허용된 마무리 범위 안에서 정리합니다. 사용자 취소, 무응답, 권한 위반 및 소유권 불명확 상태에는 별도 중단 조건이 적용됩니다. 세션 토큰 예산과 ChatGPT 계정의 제공자 한도는 별개입니다. 모델과 한도는 계정 및 제공자 응답에 따라 달라집니다. 이 앱의 등록 개발 세션은 공식 CLI의 ChatGPT 구독 로그인을 사용합니다.
 
+![예제 사용자로 표시한 Codex 환경 및 로그인 화면](docs/windows-codex-setup.png)
+
 ## 확인된 범위와 제한
 
 - 기존 개발 환경에서 공식 Codex CLI로 독립 Git 시험 프로젝트의 두 개발 사이클을 실제 완료했습니다.
 - 등록 프로젝트의 Tk 승인, Git 복제본, MXC 검증과 원본 반영 검토는 모델 응답을 대체한 통합 시험에서 확인했습니다. 등록 텍스트 프로젝트에서 한도 종료 후 실제 온라인 재개도 검증했습니다.
 - Godot 파일럿은 Windows 내보내기와 독립 플레이 검증 증거를 갖췄습니다. 전체 게임의 최종 완료 판정은 대기 중입니다.
-- 다른 Windows 계정의 공식 로그인부터 실제 자동 개발까지 이어지는 신규 설치 종단 간 검증은 릴리스 합격 조건입니다. 현재 증거는 [현재 상태](docs/CURRENT-STATUS.md)와 [릴리스 검증표](docs/WINDOWS-RELEASE-QA.md)에 기록합니다.
+- 다른 Windows 계정의 공식 로그인부터 실제 자동 개발까지 이어지는 신규 설치 종단 간 검증은 릴리스 합격 조건입니다. 현재 증거는 [현재 상태](https://github.com/RuinaR/DevOrchestra/blob/main/docs/CURRENT-STATUS.md)와 [릴리스 검증표](https://github.com/RuinaR/DevOrchestra/blob/main/docs/WINDOWS-RELEASE-QA.md)에 기록합니다.
 - 로컬 GUI 캡처는 릴리스 검증 자료에 포함합니다. 사용자의 원장, 인증 홈과 실제 프로젝트는 로컬 저장소에서 관리합니다.
 
 ## 개발 및 빌드
@@ -34,4 +36,4 @@ python tools/build_windows_release.py 0.3.0
 
 빌드 스크립트는 `.ai-local/release/` 아래 GUI EXE, ZIP, SHA-256과 빌드 매니페스트를 생성합니다. GitHub 저장소에는 소스·공개 역할 지침·런타임 리소스·문서와 테스트를 유지합니다. 폰트와 아이콘의 고지는 내장 UI 리소스에서 제공합니다. DevOrchestra 제품의 배포 라이선스는 소유자 결정 대기입니다.
 
-[제품 정의](docs/PROJECT-DEFINITION.md) · [아키텍처 및 개발 이력](docs/ARCHITECTURE-ROADMAP.md) · [안전 정책](docs/GLOBAL-SAFETY-POLICY.md) · [개발 인수인계](docs/AI-HANDOFF.md)
+[제품 정의](https://github.com/RuinaR/DevOrchestra/blob/main/docs/PROJECT-DEFINITION.md) · [아키텍처 및 개발 이력](https://github.com/RuinaR/DevOrchestra/blob/main/docs/ARCHITECTURE-ROADMAP.md) · [안전 정책](https://github.com/RuinaR/DevOrchestra/blob/main/docs/GLOBAL-SAFETY-POLICY.md) · [개발 인수인계](https://github.com/RuinaR/DevOrchestra/blob/main/docs/AI-HANDOFF.md)
