@@ -66,6 +66,8 @@ def main():
     unified.add_argument("--reworks", type=int, default=2)
     unified.add_argument("--expires", type=int, required=True)
     unified.add_argument("--approve", metavar="REVIEW_SHA256")
+    unified.add_argument("--permission", action="append", dest="permissions")
+    unified.add_argument("--cycles", type=int, default=1)
     reverify = commands.add_parser("subscription-reverify-winforms",
                                    help="Approve supplemental GUI verification for a reviewed change")
     reverify.add_argument("--project", required=True)
@@ -252,10 +254,10 @@ def main():
             fields = (Runner(ledger), args.project, args.account, args.expires, args.seconds, args.tokens,
                       args.reworks, args.vectors)
             if args.approve is None:
-                scope = subscription_session.review(*fields)
+                scope = subscription_session.review(*fields, permissions=args.permissions, cycles=args.cycles)
                 print(canonical({"review": scope, "review_sha256": digest(scope)}))
                 return
-            receipt = subscription_session.run(*fields, args.approve)
+            receipt = subscription_session.run(*fields, args.approve, permissions=args.permissions, cycles=args.cycles)
             print(canonical(receipt))
             return 0 if receipt["outcome"] == "COMPLETED" else 2
         if args.action == "cycle-rework":

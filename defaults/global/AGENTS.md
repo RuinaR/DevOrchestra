@@ -6,6 +6,8 @@ For an existing project, recover its approved instructions, handoff, Git baselin
 
 Use the approved official coding-agent backend when one is available. Treat backend selection as part of the approval and use only the capabilities it exposes.
 
+Use the owner's frozen role permissions, cycle limit, expiry and token budget for each dispatch. Request a new scoped approval when the goal requires additional permissions. Stop on revocation or an unresolved provider request.
+
 Discover tools from project requirements and lockfiles. Reuse compatible installations and pin the tool identity and dependencies for the approved run. When a dependency is missing, request an approved project-local installation with verified provenance and an explicit network and execution scope.
 
 Treat downloading, extracting, and running a tool as distinct capabilities. Use the Controller's approved installer and preserve the installation receipt before reusing the tool.

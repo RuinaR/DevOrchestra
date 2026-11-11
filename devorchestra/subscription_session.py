@@ -13,16 +13,17 @@ from .lease import Blocked, development_session_scope, execution_slot, held_exec
 from .ledger import digest
 from .python_vectors import validate_vectors
 from .replica_evidence import snapshot
-from . import csharp_sources, mxc_sdk_project
+from . import csharp_sources, mxc_sdk_project, session_permissions
 
 
-def review(runner, project, account, expires, seconds, tokens, reworks, vectors):
+def review(runner, project, account, expires, seconds, tokens, reworks, vectors, *, permissions=None, cycles=1):
     from .runtime import require_admission
 
     if (type(expires) is not int or not time() < expires <= time() + 300
             or type(seconds) is not int or not 1 <= seconds <= 300
             or type(tokens) is not int or not 1 <= tokens <= 100_000
-            or type(reworks) is not int or not 0 <= reworks <= 5):
+            or type(reworks) is not int or not 0 <= reworks <= 5
+            or type(cycles) is not int or not 1 <= cycles <= 5):
         raise Blocked("Invalid session expiry, time, token or rework limit")
     events, head = runner.ledger.snapshot()
     require_admission(events)
@@ -33,6 +34,8 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
     winforms = runtime_kind == mxc_sdk_project.GUI_KIND
     sdk_project = runtime_kind in {mxc_sdk_project.KIND, mxc_sdk_project.GUI_KIND}
     csharp = sdk_project or runtime_kind == csharp_sources.KIND
+    authorization = session_permissions.contract(permissions, runtime=batch and "runtime" in vectors,
+                                                 gui=gui or winforms)
     if not gui and not batch:
         validate_vectors(vectors, baseline["acceptance"])
     catalog = Catalog(runner.ledger).read()
@@ -78,12 +81,13 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors)
     sections = ("global", "project", "manager-planning", "developer", "reviewer", "verifier", "manager-final")
     scope = {"contract": "subscription-session-v1", "project_id": project, "account": account,
             "generation": len(events) + 1, "ledger_head": head, "expires": expires,
-            "seconds": seconds, "tokens": tokens, "work_limit": 1, "max_reworks": reworks,
+            "seconds": seconds, "tokens": tokens, "work_limit": cycles, "max_reworks": reworks,
             "replica": setup["replica"], "git_head": developer._head(Path(setup["replica"])),
             "replica_sha256": digest(image), "file": files[0], "readable_files": files, "writable_files": files,
             "baseline_sha256": digest(baseline), "manager_request_sha256": manager_review["request_sha256"],
             "goal": baseline["goal"], "acceptance": baseline["acceptance"],
             "vectors_sha256": digest(vectors), "models": model_by_role,
+            "permissions": authorization,
             "backend": manager.BACKEND, "tools": ["controller-replace-one-file", "fixed-python-vectors-v1"],
             "instructions": {name: public_instruction(name)["sha256"] for name in sections}}
     if gui:
@@ -164,6 +168,7 @@ class _Session:
         self.reported = 0
         self.usage_complete = True
         self.phase, self.rework = None, None
+        self.previous_cycle = None
         self.replica_sha256 = scope["replica_sha256"]
 
     def binding(self):
@@ -178,11 +183,21 @@ class _Session:
     def limit(self, budget, project, phase):
         if self.stopped() or project != self.scope["project_id"] or phase != self.phase:
             raise Blocked("Session phase, cancellation or deadline does not permit execution")
+        self.check_permissions()
         budget["tokens"] = min(budget["tokens"], self.remaining)
+
+    def check_permissions(self):
+        if (contract := self.scope.get("permissions")) is not None:
+            needed = session_permissions.phases(runtime=bool(self.scope.get("runtime")),
+                                                gui=bool(self.scope.get("gui_contract"))
+                                                or self.scope.get("runtime", {}).get("kind") == mxc_sdk_project.GUI_KIND)
+            if self.phase not in needed or not needed[self.phase] <= set(contract["granted"]):
+                raise Blocked("Role requires permissions outside the approved contract")
 
     def check_scope(self):
         if self.stopped():
             raise Blocked("Session cancelled or expired")
+        self.check_permissions()
         replica = Path(self.scope["replica"])
         if (digest(snapshot(replica)) != self.replica_sha256
                 or digest(self.runner.native_manager_context(self.scope["project_id"])) != self.scope["baseline_sha256"]
@@ -213,28 +228,34 @@ class _Session:
                 raise Blocked("Session reported usage unknown")
 
 
-def run(runner, project, account, expires, seconds, tokens, reworks, vectors, approved, cancelled=lambda: False):
+def run(runner, project, account, expires, seconds, tokens, reworks, vectors, approved, cancelled=lambda: False, *,
+        permissions=None, revoked=lambda: False, cycles=1, on_progress=lambda _progress: None):
     from .runtime import native_unresolved, require_admission
 
     with execution_slot() as abandoned, ExitStack() as resources:
         events, head = runner._idle_diagnostic(abandoned)
-        scope = review(runner, project, account, expires, seconds, tokens, reworks, vectors)
+        options = {"permissions": permissions} if permissions is not None else {}
+        if cycles != 1:
+            options["cycles"] = cycles
+        scope = review(runner, project, account, expires, seconds, tokens, reworks, vectors, **options)
         if digest(scope) != approved or scope["ledger_head"] != head:
             raise Blocked("Unified development approval changed")
         session_id = uuid4().hex
-        session = _Session(runner, scope, session_id, approved, cancelled)
+        session = _Session(runner, scope, session_id, approved, lambda: cancelled() or revoked())
         fields = {"project_id": project, "run_id": session_id, "state": "DIAGNOSTIC", **session.binding()}
         runner.ledger.append(len(events), head, {**fields, "kind": "subscription_session_started", "scope": scope},
                              admission=require_admission)
         resources.enter_context(development_session_scope(session_id))
-        roles, failures, outputs = [], set(), set()
+        roles, failures, outputs = [], set(), {scope["replica_sha256"]}
         attempts = 0
+        cycle_count = 0
         outcome, reason = "BLOCKED", None
         gui_receipt = None
 
         def execute(phase, transport, *args):
             session.phase = phase
             session.check_scope()
+            on_progress({"phase": phase, "cycle": max(1, cycle_count), "remaining_tokens": session.remaining})
             scope = transport.review(*args, session=session)
             if isinstance(scope, tuple):
                 scope = scope[0]
@@ -249,6 +270,7 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
         try:
             models = scope["models"]
             planned = execute("manager-planning", manager, runner, project, account, models["Manager"], expires)
+            cycle_count = 1
             while True:
                 changed = execute("developer", developer, runner, project, planned["run_id"],
                                   account, models["Developer"], expires)
@@ -268,18 +290,34 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                         final = execute("manager-final", cycle, *prefix, "manager-final", account,
                                         models["Manager"], expires, None)
                         outcome = final["decision"]
-                        break
-                    if verified["verdict"] != "FAIL":
+                        if outcome == "CONTINUE":
+                            if cycle_count >= scope["work_limit"]:
+                                outcome = "NEED_APPROVAL"
+                                reason = "Cycle budget exhausted"
+                                break
+                            session.previous_cycle = {"final": cycle._model_output(runner.ledger, final, "manager-final"),
+                                                      "verification_sha256": digest(verified),
+                                                      "replica_sha256": session.replica_sha256}
+                            session.rework = None
+                            cycle_count += 1
+                            planned = execute("manager-planning", manager, runner, project, account, models["Manager"], expires)
+                            continue
+                        if outcome != "REWORK_REQUIRED" or attempts >= reworks:
+                            break
+                        failure = final
+                        feedback = [cycle._model_output(runner.ledger, final, "manager-final")["next_task_or_rework"]]
+                    elif verified["verdict"] != "FAIL":
                         raise Blocked("Verifier could not verify this change")
-                    failure = verified
-                    feedback = [item for item in verified["observations"] if item["actual"] != item["expected"]]
-                    if scope.get("gui_contract"):
-                        feedback = subscription_gui.failure_feedback(runner.ledger, verified, changed, session.binding())
-                    elif scope.get("runtime"):
-                        feedback = {"observations": feedback, "exit_code": verified["exit_code"],
-                                    "source_sha256": verified["source_sha256"], "receipt_sha256": digest(verified)}
-                        if gui_failure := verified.get("sdk_gui"):
-                            feedback["screenshots"] = [scene["original"]["sha256"] for scene in gui_failure["scenes"]]
+                    else:
+                        failure = verified
+                        feedback = [item for item in verified["observations"] if item["actual"] != item["expected"]]
+                        if scope.get("gui_contract"):
+                            feedback = subscription_gui.failure_feedback(runner.ledger, verified, changed, session.binding())
+                        elif scope.get("runtime"):
+                            feedback = {"observations": feedback, "exit_code": verified["exit_code"],
+                                        "source_sha256": verified["source_sha256"], "receipt_sha256": digest(verified)}
+                            if gui_failure := verified.get("sdk_gui"):
+                                feedback["screenshots"] = [scene["original"]["sha256"] for scene in gui_failure["scenes"]]
                 else:
                     raise Blocked("Reviewer blocked the change")
                 fingerprint = digest([failure["phase"], [
@@ -297,9 +335,12 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
             reason = str(error) if isinstance(error, Blocked) else "CANCELLED"
             outcome = ("CANCELLED" if cancelled() or isinstance(error, KeyboardInterrupt) else
                        "TIME_LIMIT" if session.stopped() else "NO_PROGRESS" if reason == "NO_PROGRESS" else "BLOCKED")
+        if revoked():
+            outcome, reason = "PERMISSIONS_REVOKED", "Session permissions revoked by owner"
         current, tail = runner.ledger.snapshot()
         result = {**fields, "kind": "subscription_session_ended", "outcome": outcome, "reason": reason,
-                  "roles": roles, "reworks": attempts, "remaining_reported_tokens": session.remaining,
+                  "roles": roles, "reworks": attempts, "cycle_count": cycle_count,
+                  "remaining_reported_tokens": session.remaining,
                   "used_reported_tokens": session.reported, "usage_complete": session.usage_complete,
                   "owned_tree": "UNRESOLVED" if native_unresolved(current) else "DRAINED",
                   "gui": (("GUI_PASS" if gui_receipt["verdict"] == "PASS" else gui_receipt["verdict"])

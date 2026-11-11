@@ -1919,7 +1919,9 @@ class CommandCenter:
         panel.bind("<Escape>", lambda _event: close())
 
     def subscription_development(self, project_id, account, baseline):
-        from . import subscription_session
+        from queue import Empty, SimpleQueue
+
+        from . import session_permissions, subscription_session
 
         panel = self.panel()
         panel.title("구독 개발 세션 · 승인 한 번")
@@ -1941,13 +1943,33 @@ class CommandCenter:
         row = ttk.Frame(panel)
         row.pack(fill="x")
         values = []
-        for name, default in (("초", 120), ("토큰", 12000), ("재작업", 2)):
+        for name, default in (("초", 120), ("토큰", 12000), ("재작업", 2), ("최대 사이클", 1)):
             ttk.Label(row, text=name).pack(side="left", padx=4)
             field = ttk.Entry(row, width=8)
             field.insert(0, str(default))
             field.pack(side="left")
             values.append(field)
+        permission_tabs = ttk.Notebook(panel)
+        permission_tabs.pack(fill="x", pady=8)
+        granted_frame, other_frame = ttk.Frame(permission_tabs), ttk.Frame(permission_tabs)
+        permission_tabs.add(granted_frame, text="세션 권한")
+        permission_tabs.add(other_frame, text="별도 승인 및 제한")
+        choices = {}
+        checkboxes = []
+        for index, (key, title) in enumerate(session_permissions.AVAILABLE.items()):
+            choice = choices[key] = tk.BooleanVar(panel, value=key == "source-read")
+            checkbox = ttk.Checkbutton(granted_frame, text=title, variable=choice)
+            checkbox.grid(row=index // 2, column=index % 2, sticky="w")
+            checkboxes.append(checkbox)
+        for index, (entries, state) in enumerate(((session_permissions.SEPARATE, "별도 승인"),
+                                                   (session_permissions.UNAVAILABLE, "현재 미지원"))):
+            ttk.Label(other_frame, text=state).grid(row=0, column=index, sticky="w")
+            for row_index, title in enumerate(entries, 1):
+                ttk.Checkbutton(other_frame, text=title, state="disabled").grid(
+                    row=row_index, column=index, sticky="w")
         cancellation = Event()
+        revocation = Event()
+        updates = SimpleQueue()
         future = None
 
         def close():
@@ -1961,45 +1983,68 @@ class CommandCenter:
             nonlocal future
             try:
                 spec = json.loads(vectors.get("1.0", "end"))
-                seconds, tokens, reworks = (int(field.get()) for field in values)
+                seconds, tokens, reworks, cycles = (int(field.get()) for field in values)
                 fields = self.controller, project_id, account, int(time()) + 300, seconds, tokens, reworks, spec
-                scope = subscription_session.review(*fields)
+                permissions = [key for key, choice in choices.items() if choice.get()]
+                scope = subscription_session.review(*fields, permissions=permissions, cycles=cycles)
             except (Blocked, ValueError, OSError, sqlite3.Error) as error:
                 status.set(str(error))
                 return
-            verification = ("MXC 오프라인 CPython 빌드 및 고정 벡터 실행" if scope.get("runtime") else
+            verification = (scope["runtime"]["kind"] if scope.get("runtime") else
                             "검토된 WinForms 빌드·소유 창 조작·비공개 캡처" if scope.get("gui_contract")
                             else "파일별 고정 Python 벡터" if scope.get("batch") else "고정 Python 벡터")
             allowed = ", ".join(scope["writable_files"])
+            status.set(f"권한 검토 완료 · {len(permissions)}개 · 사이클 최대 {cycles}회")
             if not self.confirm("통합 개발 세션 승인",
                                 f"{project_id} · {allowed} · {seconds}초 · {tokens} 토큰\n"
                                 f"목표: {scope['goal']}\n"
-                                f"복제본 {scope['replica']}\n재작업 최대 {reworks}회 · {verification}\n"
+                                f"복제본 {scope['replica']}\n사이클 최대 {cycles}회 · 재작업 최대 {reworks}회 · {verification}\n"
+                                f"권한 · {', '.join(session_permissions.AVAILABLE[key] for key in permissions)}\n"
                                 "승인된 문맥과 지정한 소스를 OpenAI에 전송합니다. 모델 셸 권한은 없습니다.",
                                 parent=panel):
                 return
             future = Future()
             cancellation.clear()
+            revocation.clear()
             button.configure(state="disabled")
+            revoke_button.configure(state="normal")
+            for checkbox in checkboxes:
+                checkbox.configure(state="disabled")
             status.set("세션 실행 중 · 역할별 기록은 개발 상세 화면에서 확인")
 
             def worker():
                 try:
-                    future.set_result(subscription_session.run(*fields, digest(scope), cancellation.is_set))
+                    future.set_result(subscription_session.run(*fields, digest(scope), cancellation.is_set,
+                                                               permissions=permissions, revoked=revocation.is_set,
+                                                               cycles=cycles, on_progress=updates.put))
                 except Exception as error:
                     future.set_exception(error)
 
             def poll():
+                progress = None
+                while True:
+                    try:
+                        progress = updates.get_nowait()
+                    except Empty:
+                        break
                 if not future.done():
+                    if progress and not (revocation.is_set() or cancellation.is_set()):
+                        role = {"manager-planning": "Manager 계획", "developer": "Developer",
+                                "reviewer": "Reviewer", "verifier": "Verifier", "manager-final": "Manager 최종 판정"}
+                        status.set(f"{progress['cycle']}/{cycles} 사이클 · {role[progress['phase']]} · "
+                                   f"남은 토큰 {progress['remaining_tokens']} · 승인 {max(0, scope['expires'] - int(time()))}초")
                     panel.after(150, poll)
                     return
                 button.configure(state="normal")
+                revoke_button.configure(state="disabled")
+                for checkbox in checkboxes:
+                    checkbox.configure(state="normal")
                 if future.exception() is not None:
                     status.set(str(future.exception()) if isinstance(future.exception(), Blocked)
                                else "세션 실행을 확인할 수 없습니다.")
                     return
                 result = future.result()
-                status.set(f"{result['outcome']} · 재작업 {result['reworks']}회 · "
+                status.set(f"{result['outcome']} · 사이클 {result['cycle_count']}회 · 재작업 {result['reworks']}회 · "
                            f"{result['used_reported_tokens']} 토큰\n{result['reason'] or ''}")
 
             Thread(target=worker, daemon=False).start()
@@ -2007,6 +2052,12 @@ class CommandCenter:
 
         button = ttk.Button(panel, text="세션 검토 및 시작", command=start)
         button.pack(side="left", pady=6)
+        def revoke():
+            revocation.set()
+            status.set("권한 철회됨 · 소유 자원 회수 대기")
+
+        revoke_button = ttk.Button(panel, text="세션 권한 철회", command=revoke, state="disabled")
+        revoke_button.pack(side="left", padx=6)
         ttk.Button(panel, text="닫기 / 취소", command=close).pack(side="right", pady=6)
         panel.protocol("WM_DELETE_WINDOW", close)
 

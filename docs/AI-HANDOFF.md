@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+구독 개발 시작 화면에서 권한과 최대 사이클을 선택한다. CLI의 `subscription-session --permission ID --cycles N`은 반복 가능한 권한 선택과 사이클 한도를 받는다. 권한 옵션을 생략한 기존 CLI 호출은 승인 해시에 해당 실행에 필요한 권한을 표시한다. 실행 중 철회는 새 역할을 막고 현재 작업을 회수하며, 새 실행에는 새 검토 해시가 필요하다. 동적 권한 확대와 기존 세션 재개는 미연결이다.
+
 WinForms 최종 판정이 증거 부족으로 `REWORK_REQUIRED`인 경우 `subscription-reverify-winforms`로 같은 변경을 추가 검증할 수 있다. 새 시나리오와 승인 해시를 사용하며 이전 Developer·Reviewer 영수증, 원본 기준, 프로젝트 구성과 도구 신원을 고정한다. 새 Verifier와 최종 Manager가 완료되면 기존 `original-apply` 별도 승인으로 시험 원본에 반영할 수 있다.
 
 P2.109의 `mxc-dotnet-winforms-project-v1`은 패키지 없는 WinForms SDK 프로젝트를 MXC 안에서 빌드·실행한다. 기존 SDK 경로의 `runtime.tests` 대신 `runtime.scenario`에 소유 컨트롤 매핑과 2~3개의 기대 장면을 지정한다. 앱의 동결된 시작 코드에서 `DEVORCHESTRA_GUI_MANIFEST`에 현재 PID와 `root` 및 컨트롤 HWND를 JSON으로 게시해야 한다. Controller는 현재 Job 소속, 프로세스 핸들, 창 계층을 확인한 뒤 승인된 메시지만 보낸다. 같은 복제본·시나리오·툴체인의 사전 빌드 영수증이 있으면 구독 승인에 변경 전 캡처를 연결한다. WinForms SDK 모드는 검증 센터에서 검토할 수 있으며 결과 이미지는 GUI 검증 보고서에서 확인한다.

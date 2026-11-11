@@ -53,6 +53,8 @@ def review(runner, project, account, model, expires, *, session=None):
               for name, item in zip(("global", "project", ROLE), instructions)]
     context = {key: baseline[key] for key in ("goal", "acceptance", "requirements", "proposed_files_ceiling",
                                               "clarifications")}
+    if session and session.previous_cycle:
+        context["previous_cycle"] = session.previous_cycle
     if any(event["kind"] == "onboarding_result" and event.get("project_id") == project for event in events):
         from .replica_readiness import baseline as onboarding_baseline
 
