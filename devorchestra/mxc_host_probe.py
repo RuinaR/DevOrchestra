@@ -14,7 +14,8 @@ from uuid import uuid4
 
 from .app_server import _owned_stdio, verify_app_server_binary
 from .job_probe import (
-    ExtendedLimits, ProcessInfo, _account, _api, _cleanup, _create_owned, _require, _wait_empty,
+    CODEX_DEVELOPER_PROCESS_LIMIT, ExtendedLimits, ProcessInfo, _account, _api, _cleanup, _create_owned,
+    _require, _wait_empty,
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 )
 from .lease import Blocked, execution_slot
@@ -73,9 +74,11 @@ def _args(child, *arguments, profile=PROFILE):
 
 
 def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=512 * 1024 * 1024,
-             check=None, output_limit=256, encoding="ascii", interact=None):
+             check=None, output_limit=256, encoding="ascii", interact=None, process_limit=8):
     import msvcrt
 
+    if type(process_limit) is not int or not 1 <= process_limit <= CODEX_DEVELOPER_PROCESS_LIMIT:
+        raise Blocked("Owned command process limit is out of range")
     api = _api()
     job = _require(api.CreateJobObjectW(None, None))
     info, drained = ProcessInfo(), False
@@ -85,7 +88,7 @@ def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=5
         limits = ExtendedLimits()
         limits.basic.flags = (JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_JOB_MEMORY
                               | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
-        limits.basic.active_limit = 8
+        limits.basic.active_limit = process_limit
         limits.job_memory = memory
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
         with open(os.devnull, "rb") as stdin, stdout.open("xb") as out, stderr.open("xb") as err:

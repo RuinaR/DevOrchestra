@@ -63,10 +63,10 @@ def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND, mode=De
         reason = "UNKNOWN_BACKEND"
     elif selected_mode is None:
         reason = "UNKNOWN_DEVELOPMENT_MODE"
-    elif selected_mode is DevelopmentMode.GENERAL and selected is ExecutionBackend.WINDOWS_NATIVE_CODEX:
-        reason = "GENERAL_ADMISSION_UNVERIFIED"
+    elif selected_mode is DevelopmentMode.ENHANCED or selected is not DEFAULT_BACKEND:
+        reason = "HISTORICAL_ISOLATION_PATH"
     else:
-        reason = "ISOLATION_UNVERIFIED"
+        reason = "GENERAL_ADMISSION_UNVERIFIED"
     result = {
         "status": "BLOCKED",
         "reason": reason,
@@ -81,12 +81,11 @@ def live_preflight(required_capabilities=(), *, backend=DEFAULT_BACKEND, mode=De
         "automatic_fallback": False,
         "noninterference": "NOT_VERIFIED",
     }
-    if selected is ExecutionBackend.WINDOWS_NATIVE_CODEX and selected_mode is not None:
+    if selected is DEFAULT_BACKEND and selected_mode is DevelopmentMode.GENERAL:
         result["admission_contract"] = {
             "command_boundary": "OFFICIAL_CODEX_SANDBOX",
-            "host_egress": ("SEPARATE_OWNER_RISK_DECISION_REQUIRED" if selected_mode is DevelopmentMode.GENERAL
-                            else "INDEPENDENT_EGRESS_ENFORCEMENT_REQUIRED"),
-            "owner_approval_scope": selected_mode.value,
+            "host_egress": "OFFICIAL_CODEX_SERVICE_TRANSPORT",
+            "owner_approval_scope": "general",
         }
     return result
 

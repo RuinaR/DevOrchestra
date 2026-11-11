@@ -203,15 +203,12 @@ class NativeManagerTests(unittest.TestCase):
             self.runner.plan_native_manager(self.approval, self.request)
         self.assertEqual([], self.ledger.read())
 
-    def test_manager_admission_requires_both_trusted_boundaries_then_fresh_approval_and_cli(self):
+    def test_manager_admission_requires_tool_boundary_then_fresh_approval_and_cli(self):
         tools = "SIDE_EFFECTING_TOOLS_UNVERIFIED"
-        egress = "PROVIDER_EGRESS_UNVERIFIED"
         self.assertEqual(tools, manager_admission(self.approval)["reason"])
-        self.assertEqual([tools, egress], [item["code"] for item in
+        self.assertEqual([tools], [item["code"] for item in
                                          manager_admission(self.approval)["missing_boundaries"]])
-        with patch("devorchestra.native_manager._verified_manager_boundaries", return_value={tools}):
-            self.assertEqual(egress, manager_admission(self.approval)["reason"])
-        with patch("devorchestra.native_manager._verified_manager_boundaries", return_value={tools, egress}), \
+        with patch("devorchestra.native_manager._verified_manager_boundaries", return_value={tools}), \
                 patch("devorchestra.native_manager.verify_app_server_binary") as verify:
             self.assertEqual("NEEDS_OWNER_APPROVAL", manager_admission()["state"])
             self.assertEqual("NEEDS_OWNER_APPROVAL",

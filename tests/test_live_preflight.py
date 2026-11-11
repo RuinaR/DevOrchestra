@@ -22,15 +22,15 @@ class LivePreflightTests(unittest.TestCase):
                 self.assertEqual(None if backend == "invalid" else backend, result["backend"])
                 expected = {"invalid": "UNKNOWN_BACKEND",
                             "windows-native-codex": "GENERAL_ADMISSION_UNVERIFIED"}
-                self.assertEqual(expected.get(backend, "ISOLATION_UNVERIFIED"), result["reason"])
+                self.assertEqual(expected.get(backend, "HISTORICAL_ISOLATION_PATH"), result["reason"])
 
     def test_enhanced_gate_is_separate(self):
         result = live_preflight(mode="enhanced")
         self.assertEqual("enhanced", result["development_mode"])
-        self.assertEqual("ISOLATION_UNVERIFIED", result["reason"])
-        self.assertEqual("INDEPENDENT_EGRESS_ENFORCEMENT_REQUIRED", result["admission_contract"]["host_egress"])
+        self.assertEqual("HISTORICAL_ISOLATION_PATH", result["reason"])
+        self.assertNotIn("admission_contract", result)
         general = live_preflight(mode="general")
-        self.assertEqual("SEPARATE_OWNER_RISK_DECISION_REQUIRED", general["admission_contract"]["host_egress"])
+        self.assertEqual("OFFICIAL_CODEX_SERVICE_TRANSPORT", general["admission_contract"]["host_egress"])
         self.assertEqual("general", general["admission_contract"]["owner_approval_scope"])
         self.assertEqual("BLOCKED", general["status"])
 

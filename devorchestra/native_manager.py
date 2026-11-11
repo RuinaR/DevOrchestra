@@ -20,10 +20,8 @@ MANAGER_THREAD_METHODS = MANAGER_POLICY_METHODS | {"thread/start"}
 MANAGER_TURN_METHODS = MANAGER_THREAD_METHODS | {"account/read", "turn/start"}
 REQUIRED_BOUNDARIES = (
     ("SIDE_EFFECTING_TOOLS_UNVERIFIED", "모델의 파일·명령·앱 도구를 승인 범위에서 집행하는 경계가 확인되지 않았습니다."),
-    ("PROVIDER_EGRESS_UNVERIFIED", "App Server 호스트의 송신이 승인된 공식 제공자에 한정되는지 확인되지 않았습니다."),
 )
-# These are online Manager boundaries. Complete offline isolation and VM
-# acceptance belong to enhanced/diagnostic modes, not this admission path.
+# Official Codex handles provider transport. Role-specific tools still need evidence.
 DISABLED_FEATURES = (
     "shell_tool", "computer_use", "apps", "plugins", "hooks", "multi_agent",
     "multi_agent_v2", "code_mode", "code_mode_host", "request_permissions_tool", "memories",
@@ -175,10 +173,10 @@ def _input_receipt(approval, request, messages, discovered):
 
 
 def _verified_manager_boundaries(backend, cli_sha256):
-    # Neither backend currently has a trusted issuer for either boundary.
+    # Neither backend currently has a trusted issuer for the tool boundary.
     # Any future evidence must be specific to this backend and CLI hash.
     # Sandbox settings, synthetic peers, user approval and prior offline tests
-    # cannot attest to App Server egress or server-side tool enforcement.
+    # cannot attest to server-side tool enforcement.
     return frozenset()
 
 
@@ -381,7 +379,7 @@ def _start_read_only_thread(server, request, replica, expected_sources, before_t
 
 
 def inspect_manager_thread_only(server, request, replica, expected_sources, before_thread):
-    """Protocol stage only. Caller must independently enforce host egress and own the Job."""
+    """Protocol stage only. The caller owns the Job and admits the approved turn."""
     server.restrict_outbound(MANAGER_THREAD_METHODS)
     inspect_manager_policy(server, replica, experimental_api=True)
     _start_read_only_thread(server, request, replica, expected_sources, before_thread)

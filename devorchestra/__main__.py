@@ -12,7 +12,7 @@ from .dashboard import project_view, render
 from .development import session_view
 from .lease import Blocked
 from .ledger import Ledger, canonical, digest
-from .policy import DEFAULT_BACKEND, DevelopmentMode, ExecutionBackend, live_preflight
+from .policy import DEFAULT_BACKEND, DevelopmentMode, live_preflight
 from .runtime import Runner, Scenario
 
 
@@ -96,8 +96,10 @@ def main():
     native_command.add_argument("--powershell-sha256", required=True)
     native_command.add_argument("--general-developer", action="store_true",
                                 help="Also inspect an offline General Developer thread")
+    native_exec = commands.add_parser("native-exec-diagnostic", help="Test Codex CLI startup against a local sink")
+    native_exec.add_argument("--archive", required=True)
     commands.add_parser("native-egress-preflight", help="Read Windows token facts without modifying network policy")
-    egress_trial = commands.add_parser("native-egress-trial", help="Review or explicitly approve a disabled-account WFP trial")
+    egress_trial = commands.add_parser("native-egress-trial", help="Recover an existing historical WFP trial")
     egress_trial.add_argument("--binary", required=True)
     egress_trial.add_argument("--expires", type=int, required=True)
     egress_trial.add_argument("--approve")
@@ -151,10 +153,9 @@ def main():
     shutdown.add_argument("--generation", type=int)
     preflight = commands.add_parser("live-preflight", help="Check declared capabilities without running anything")
     preflight.add_argument("--requires", action="append", default=[], metavar="CAPABILITY")
-    preflight.add_argument("--backend", choices=[backend.value for backend in ExecutionBackend],
-                           default=DEFAULT_BACKEND.value)
-    preflight.add_argument("--mode", choices=[mode.value for mode in DevelopmentMode],
-                           default=DevelopmentMode.GENERAL.value)
+    # Continue to report a clear retirement reason to older callers.
+    preflight.add_argument("--backend", default=DEFAULT_BACKEND.value, help=argparse.SUPPRESS)
+    preflight.add_argument("--mode", default=DevelopmentMode.GENERAL.value, help=argparse.SUPPRESS)
     start = commands.add_parser("start")
     start.add_argument("--project", default="fixture-a", help="Run a synthetic workflow only")
     start.add_argument("--scenario", type=Scenario, choices=list(Scenario), default=Scenario.NORMAL)
@@ -200,6 +201,8 @@ def main():
         if args.action == "native-egress-trial":
             from .native_egress_trial import trial
 
+            if not args.recover:
+                raise Blocked("HISTORICAL_ISOLATION_PATH: only existing WFP trial recovery is available")
             result = trial(ledger, args.binary, args.expires, args.approve, args.recover)
             print(canonical(result))
             return 2 if result["status"] == "CLEANUP_BLOCKED" else 0
@@ -365,6 +368,12 @@ def main():
                     for group in ("direct_controls", "server_commands") for mode in ("read", "write")
                 )) else 2
             return 0 if receipt["file_probe"]["status"] == "PASS" else 2
+        if args.action == "native-exec-diagnostic":
+            from .native_exec_probe import run_native_exec_probe
+
+            receipt = run_native_exec_probe(ledger, args.archive)
+            print(canonical(receipt))
+            return 0 if receipt["status"] == "CLI_STARTUP_OBSERVED" else 2
         if args.action == "native-command-diagnostic":
             from .native_command_probe import run_native_command_probe
 

@@ -1,5 +1,7 @@
 # DevOrchestra — Architecture & Milestone Gates (2026-11-08)
 
+**현재 제품 결정.** 일반 개발만 제공한다. 공식 Codex 실행기와 자체 샌드박스를 사용하고, Controller는 복제본·도구 권한·예산·단일 슬롯·Job·원장·복구를 관리한다. 공식 Codex가 인증·모델 송신을 맡는다. 전용 계정·WFP·프록시·VM·WSL 관련 절차 및 합격 조건은 이전 실측을 보존하기 위한 역사 기록이다. 향후 제품 입장이나 개발 계획에 적용하지 않는다.
+
 ## 공식 Codex 백엔드
 
 Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택한 백엔드가 응답과 이벤트를 수집한다. Controller가 원장과 인계, 종료 및 복구를 집행한다. 결정적 Verifier는 기존 Windows GUI 브로커를 재사용한다. App Server 전용 기준을 다른 구현의 메커니즘과 동일시하지 않으며, 모델 입력 송신과 부작용 방지는 각 경로에서 입증한다.
@@ -7,13 +9,13 @@ Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택�
 | 후보 | 공식 기능 및 현재 한계 |
 |---|---|
 | Codex SDK | Node 기반 로컬 코딩·스트림·재개. Windows에서 0.167.0이 설치 CLI를 실행하는 것을 확인했다. 작업 폴더, 읽기/쓰기 및 승인 정책은 하위 CLI에 전달된다. 실제 구독 응답과 취소·사용량 회계는 미검증이다. |
-| App Server | 기존 Controller 소유 Job·stdio·승인·이벤트·정리 어댑터를 보존한다. 온라인 호스트 송신과 서버 내부 도구 사전 차단은 미입증이다. |
+| App Server | 기존 Controller 소유 Job·stdio·승인·이벤트·정리 어댑터를 보존한다. 자동 역할의 도구 권한과 종료 검증은 남아 있다. |
 | `codex exec` | 설치 Windows CLI의 JSONL·스키마·재개 옵션을 확인했다. 로컬 코딩은 CLI의 샌드박스·승인 정책을 사용한다. 독립 온라인 입장·회계·종료 어댑터는 준비되지 않았다. |
 | Sign in with ChatGPT 직접 호출 | 별도 앱 OAuth 동의와 공식 모델 조회를 사용하는 구독 텍스트 경로다. Controller가 승인된 파일 변경 계약과 독립 검증을 수행하며, 모델 호출 자체에는 파일·빌드·GUI 도구가 없다. |
 
-자동 기본 백엔드는 미선정이다. 기존 App Server 검토 명령은 호환성을 위해 남기며 다른 후보로 자동 폴백하지 않는다. VM은 선택적 강화 격리다.
+자동 기본 백엔드는 미선정이다. 먼저 공식 `codex exec`의 승인된 Developer 한 턴을 입증한다. App Server의 이벤트와 취소 경로는 유지하며 백엔드 변경에는 명시적 선택이 필요하다.
 
-P2.114의 단일 온라인 Developer 후보는 가장 얇은 `codex exec` 경로다. `--json`과 기존 CLI 로그인을 사용할 수 있지만 호스트 송신과 승인된 도구 집행이 먼저 필요하다. SDK `0.167.1`은 CLI `0.167.1`에 의존한다. App Server는 승인 요청·취소·이벤트 인계 후보로 유지하며, 동일 안정판의 비중첩 `command/exec` 진단이 통과했다. 안정판 패치는 Responses 도구 갱신 방식에 관한 것으로, 이 측정에서 호스트 송신 제한 기능을 입증하지 않았다. [릴리스 변경](https://github.com/openai/codex/compare/rust-v0.167.0...rust-v0.167.1) · [통합 방식](https://developers.openai.com/blog/codex-as-a-platform)
+첫 온라인 Developer 후보는 `codex exec --json`이다. 공식 CLI 로그인을 사용하고 승인된 도구 정책과 Job·예산을 연결한다. CLI `0.167.1`은 Job 프로세스 상한 16에서 로컬 합성 요청으로 시작을 확인했다. App Server의 비중첩 `command/exec` 명령 경계 결과는 보존한다. [통합 방식](https://developers.openai.com/blog/codex-as-a-platform)
 
 | P2.115 호스트 경계 후보 | 적용 조건 |
 |---|---|
@@ -26,6 +28,8 @@ OpenAI 지원 문서에서 Codex 스트리밍의 `chatgpt.com:443` WebSocket을 
 
 ### P2.116 네이티브 시험 정책과 복구 범위
 
+당시 관리자 시험의 범위와 복구 기록이다.
+
 1. 명시적 UAC 승인으로 새 표준 로컬 계정 `DevOrchP2116`과 `%ProgramData%\DevOrchestra\P2116`의 전용 실행 디렉터리만 준비한다. 같은 이름의 계정이나 디렉터리가 있으면 중단한다. 실행 파일은 관리자가 쓰고 시험 계정은 읽기·실행만 한다. 시험 계정의 쓰기 범위는 전용 홈과 합성 복제본으로 제한한다. 기존 프로젝트, 계정, 자격증명과 방화벽 기본 정책은 변경 범위에서 제외한다.
 2. 해당 계정 SID에만 적용되는 전용 WFP 공급자·하위 계층에 IPv4·IPv6 연결 제한을 트랜잭션으로 적용하는 구성을 우선 검증한다. 첫 시험에서 고정된 서명 바이너리 경로의 유일한 예외는 인증 자료를 받지 않는 작업 소유 TCP 루프백 리스너의 정확한 주소와 포트다. 나머지 경로의 차단 조건을 예외와 겹치지 않게 구성한다. 일반 Controller와 시험 계정에서 작동하는 실행기는 각각 표준 사용자 권한으로 유지한다. 시험 계정 아래에서 Job 생성·회수를 확인하기 전에는 교차 계정 실행 권한이나 상시 관리자 서비스를 추가하지 않는다. [WFP 실행 신원 범위](https://learn.microsoft.com/windows/win32/fwp/application-layer-enforcement--ale-) · [WFP 개체 수명](https://learn.microsoft.com/windows/win32/fwp/object-management)
 3. 설치 관리자가 끝난 뒤에도 보호가 유지돼야 한다. 시험 계정으로 허용 목적지의 양성 응답과 차단 목적지의 명시적 거부를 수집한다. 별도 양성 대조로 리스너 상태를 확인한다. 다른 프로그램과 자식, IPv4·IPv6, 직접 IP, Windows DNS Client를 통한 송신, 프록시 인증 및 우회를 검사한다. 관리 세션 소멸과 취소·비정상 종료 후에도 실행 중인 프로세스가 무보호 상태로 전환되지 않아야 한다. [Windows 방화벽 우선순위](https://learn.microsoft.com/windows/security/operating-system-security/network-security/windows-firewall/rules)
@@ -34,6 +38,8 @@ OpenAI 지원 문서에서 Codex 스트리밍의 `chatgpt.com:443` WebSocket을 
 이 시험에서 사용할 중계는 로컬 합성 연결로 한정한다. 이후 제공자 중계는 승인된 Codex 실행 신원의 접근과 프록시의 정확한 외부 목적지를 각각 검증한다. TLS 터널을 유지하며 인증 헤더·토큰·본문을 기록하지 않는다. 계정 분리나 DNS 경계를 입증할 수 없으면 별도 게스트로 전환한다. Windows 11 Home은 WSL2를 지원하지만 이 장치에서는 Virtual Machine Platform 활성화와 배포판 설치가 필요하다. WSL Hyper-V 방화벽은 VMCreatorId 단위이므로 다른 배포판까지 영향을 주는 설정은 적용하지 않는다. Windows Sandbox는 Home에서 지원되지 않는다. [WSL2 요구사항](https://learn.microsoft.com/windows/wsl/faq#is-wsl-2-available-on-windows-10-home-and-windows-11-home) · [Hyper-V 방화벽 범위](https://learn.microsoft.com/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall) · [Windows Sandbox 지원 에디션](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/#windows-edition-and-licensing-requirements)
 
 ### P2.118 활성 작업자와 로컬 프록시 시험 계획
+
+당시 계획을 보존한다. 제품 개발 일정에서 제외됐다.
 
 1. 별도 승인과 UAC로 기존 시험 네임스페이스의 새 표준 계정 `DevOrchP2116`과 전용 디렉터리 `%ProgramData%\DevOrchestra\P2116`만 만든다. 같은 이름이나 잔존 개체가 있으면 중단한다. 시험 ID·실행 파일 해시·정확한 예외 엔드포인트를 먼저 원장에 기록하고 계정별 영속 IPv4·IPv6 정책을 독립 조회한 뒤 계정을 활성화한다. 전역 방화벽, DNS 설정, 사용자 프로필과 기존 프로젝트는 변경 대상에서 제외한다.
 2. 제한 계정의 고정 작업자와 자식을 생성 시 Job에 넣고, Job 핸들은 소유 프로세스에만 둔다. P2.116의 중지 생성 후 별도 Job 편입 사이에 소유자가 죽는 구간이 있으므로 활성 강제 종료 경로는 생성 시 편입을 실측한 뒤 활성화한다. 독립 관찰자는 Job 핸들 없이 두 소유 프로세스의 대기 핸들을 확보하고 종료를 확인한다. 재시작 후 동일 원장으로 재입장 차단을 확인한다. 별도 복구 UAC에서는 시험 계정의 신규 실행을 막고 정확한 시험 ID, 두 프로세스 종료와 소유 개체를 확인한 뒤에만 정책을 제거한다. 종료 증거가 불충분하면 정책을 유지하고 `CLEANUP_BLOCKED`로 남긴다. [Windows Job 개체](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
@@ -136,6 +142,8 @@ Command Center의 작업 지침에서 백업·차이·전체 미리보기와 프
 새 전용 CODEX_HOME에는 승인된 전역 합성본 한 개만 배치한다. 승인 복제본 루트의 기존 프로젝트 지침은 복제하지 않는다. 두 범위에서 비어 있지 않은 AGENTS.override.md가 AGENTS.md보다 우선하며, 합계 상한으로 잘림 가능성을 줄인다. 파일 확인은 `INSTRUCTION_LOAD_UNVERIFIED` 상태를 반환한다. 실제 App Server 모델 턴 연결, 지침 로딩 관측, 에이전트의 호스트 정책 저장소 접근에 대한 OS 보호는 별도 입장 조건이다. [공식 Codex 지침 탐색](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 
 ## P2.34 일반 개발과 강화 격리
+
+이 절은 당시 모드 설계를 기록한다. 현 제품은 상단의 단일 일반 개발 계약을 따른다.
 
 일반 개발은 Windows Native Codex와 공식 샌드박스·승인 정책을 사용한다. VirtualBox와 A/B/C 실측은 강화 격리의 조건이다. 일반 개발도 정책·복제본·승인 도구·소유 자원·예산·실제 Verifier 영수증이 불명확하면 BLOCKED다. GUI와 CLI는 두 모드의 차이를 표시한다. 설정 스키마 및 합성 실행기는 유지한다.
 
