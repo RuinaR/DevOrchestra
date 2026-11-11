@@ -91,6 +91,9 @@ def main():
                           help="With --loopback-only, test the managed network profile against that listener")
     mxc_host.add_argument("--command-boundary", action="store_true",
                           help="Exercise fixed read/write commands via offline App Server profiles")
+    native_command = commands.add_parser("native-command-diagnostic", help="Test native Codex command confinement without a model")
+    native_command.add_argument("--archive", required=True)
+    native_command.add_argument("--powershell-sha256", required=True)
     gui_verify = commands.add_parser("gui-verify", help="Review or run an approved Windows GUI scenario")
     gui_verify.add_argument("--project", required=True)
     gui_verify.add_argument("--registered", action="store_true")
@@ -343,6 +346,12 @@ def main():
                     for group in ("direct_controls", "server_commands") for mode in ("read", "write")
                 )) else 2
             return 0 if receipt["file_probe"]["status"] == "PASS" else 2
+        if args.action == "native-command-diagnostic":
+            from .native_command_probe import run_native_command_probe
+
+            receipt = run_native_command_probe(ledger, args.archive, args.powershell_sha256)
+            print(canonical(receipt))
+            return 0 if receipt["status"] == "COMMAND_BOUNDARY_OBSERVED" else 2
         if args.action == "manager-preflight":
             decision = Runner(ledger).inspect_manager_admission(args.project, args.backend)
             print(canonical(decision))

@@ -38,7 +38,7 @@ def _identity(info):
 
 
 @contextmanager
-def _open_locked(path):
+def _open_locked(path, *, source="System PowerShell"):
     import msvcrt
 
     ptr = c.c_void_p
@@ -49,7 +49,7 @@ def _open_locked(path):
     # Read sharing only; OPEN_EXISTING and OPEN_REPARSE_POINT.
     handle = create(str(path), 0x80000000, 1, None, 3, 0x00200000, None)
     if handle == ptr(-1).value:
-        raise Blocked("System PowerShell read lock unavailable")
+        raise Blocked(f"{source} read lock unavailable")
     try:
         fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
     except Exception:

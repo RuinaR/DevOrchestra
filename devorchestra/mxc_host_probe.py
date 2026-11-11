@@ -128,6 +128,13 @@ def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=5
 
 
 def _observe_loopback(launcher, powershell, work, scratch, env):
+    def run(command):
+        return _observe(launcher, _args(*command), work, scratch, env)
+
+    return _loopback_challenge(powershell, run)
+
+
+def _loopback_challenge(powershell, run):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         listener.bind(("127.0.0.1", 0))
@@ -154,9 +161,8 @@ try {{
     [Console]::WriteLine('SOCKET_' + $failure.NativeErrorCode)
 }} finally {{ $client.Dispose() }}
 """
-        command = _args(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                        b64encode(script.encode("utf-16-le")).decode("ascii"))
-        observation = _observe(launcher, command, work, scratch, env)
+        command = _powershell_command(powershell, script)
+        observation = run(command)
         accepted = False
         matched = False
         try:
@@ -181,7 +187,7 @@ try {{
             status = "ACCESS_DENIED"
     return {"status": status, "host_control": "CONNECTED", "listener_accepted": accepted,
             "challenge_matched": matched,
-            "exit_code": observation["exitCode"], "job_active": observation["job_active"],
+            "exit_code": observation["exitCode"], "job_active": observation.get("job_active"),
             "child_observation": marker if marker in {"CONNECTED", "TIMEOUT", "SOCKET_10013"} else "OTHER"}
 
 
@@ -193,14 +199,23 @@ def _command_profiles(work):
         f'[permissions.probe-{access}.network]\nenabled = false\n' for access in ("read", "write"))
 
 
-def _observe_server_commands(server, work, command):
+def _powershell_command(powershell, script):
+    return [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+            b64encode(script.encode("utf-16-le")).decode("ascii")]
+
+
+def _server_command(server, request_id, work, command, access):
+    return server.request(request_id, "command/exec", {
+        "command": command, "cwd": str(work), "timeoutMs": 5000,
+        "permissionProfile": "probe-" + access,
+    })
+
+
+def _observe_server_commands(server, work, command, *, first_id=1):
     observations = {}
-    for request_id, access in enumerate(("read", "write"), 1):
+    for request_id, access in enumerate(("read", "write"), first_id):
         try:
-            response = server.request(request_id, "command/exec", {
-                "command": command, "cwd": str(work), "timeoutMs": 5000,
-                "permissionProfile": "probe-" + access,
-            })
+            response = _server_command(server, request_id, work, command, access)
         except Blocked:
             if server.failure_code != "RPC_ERROR":
                 raise
@@ -286,8 +301,7 @@ def run_host_probe(ledger, launcher, launcher_sha256, candidate, candidate_sha25
                 if loopback_only:
                     loopback = _observe_loopback(launcher, powershell, work, scratch, env)
                 else:
-                    command = [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                               b64encode(FILE_PROBE.encode("utf-16-le")).decode("ascii")]
+                    command = _powershell_command(powershell, FILE_PROBE)
                     outer_command = _args(*command)
                     files = probe_receipt(_observe(launcher, outer_command, work, scratch, env), work, outer_command)
                     if command_boundary:
