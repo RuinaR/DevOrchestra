@@ -232,7 +232,9 @@ class _FixtureSession:
         remaining = min(self.scope["seconds"] - (monotonic() - self.started), self.scope["expires"] - time())
         if remaining <= 0:
             raise Blocked("TIME_LIMIT")
-        limit = self.scope.get("developer_seconds", self.scope["role_seconds"]) if role == "developer" else self.scope["role_seconds"]
+        limit = self.scope.get("role_deadlines", {}).get(role, self.scope["role_seconds"])
+        if role == "developer" and "role_deadlines" not in self.scope:
+            limit = self.scope.get("developer_seconds", limit)
         return min(limit, remaining)
 
     def logs(self, label):
@@ -361,12 +363,13 @@ class _FixtureSession:
         self.owned_verified = False
         self.usage_complete = False
         process_result = "EXITED"
+        output_limit = self.scope.get("model_output_bytes", 262144)
         try:
             result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
                                                       tool_root=tool_root, shell_tools=shell_tools,
                                                       extra_read_roots=extra_read_roots, scratch_root=scratch_root),
                               self.work, role_log, self.env, seconds=self.seconds(phase), check=self.check,
-                              output_limit=262144, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
+                              output_limit=output_limit, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
                               memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2)
         except OwnedMxcStopped as stopped:
             self.owned_verified = True
@@ -378,8 +381,8 @@ class _FixtureSession:
                     self.check()
                     if not writable:
                         self.check_image()
-                    raw = _read_observation(role_log / "probe.stdout", 262145)
-                    if len(raw) <= 262144:
+                    raw = _read_observation(role_log / "probe.stdout", output_limit + 1)
+                    if len(raw) <= output_limit:
                         result["stdout"] = raw.decode("utf-8")
                 except (Blocked, OSError, UnicodeError):
                     pass

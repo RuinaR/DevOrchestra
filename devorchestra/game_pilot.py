@@ -31,6 +31,31 @@ FROZEN_CRITERIA_SHA256 = "0aefb917198ad528d5bd4edab0bf778cabb76699f14bac3a600810
 DEVELOPMENT_FILES = ("docs/GAME-DESIGN.md", "project.godot", "scenes/game.tscn", "scenes/player.tscn",
                      "scenes/hud.tscn", "scripts/game.gd", "scripts/player.gd", "scripts/hud.gd")
 ROLE_LIMITS = {"manager-planning": 45000, "developer": 75000, "reviewer": 55000, "manager-final": 45000}
+SESSION_SECONDS = 7200
+SESSION_TOKENS = 750000
+ROLE_SECONDS = {"manager-planning": 600, "developer": 1800, "reviewer": 600, "manager-final": 600}
+ROLE_TOKENS = {"manager-planning": 65000, "developer": 150000, "reviewer": 80000, "manager-final": 65000}
+
+
+def recommended_limits():
+    return {"seconds": SESSION_SECONDS, "tokens": SESSION_TOKENS, "cycles": None,
+            "role_seconds": dict(ROLE_SECONDS), "role_tokens": dict(ROLE_TOKENS)}
+
+
+def validate_limits(limits):
+    if type(limits) is not dict or limits.keys() != recommended_limits().keys():
+        raise Blocked("Invalid game budget fields")
+    seconds, tokens, cycles = (limits[key] for key in ("seconds", "tokens", "cycles"))
+    if (type(seconds) is not int or not 60 <= seconds <= SESSION_SECONDS
+            or type(tokens) is not int or not 1 <= tokens <= SESSION_TOKENS
+            or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50))):
+        raise Blocked("Invalid game session budget")
+    for key, maxima, total in (("role_seconds", ROLE_SECONDS, seconds), ("role_tokens", ROLE_TOKENS, tokens)):
+        values = limits[key]
+        if (type(values) is not dict or values.keys() != maxima.keys()
+                or any(type(values[role]) is not int or not 1 <= values[role] <= min(cap, total)
+                       for role, cap in maxima.items())):
+            raise Blocked(f"Invalid game {key} budget")
 MANUAL_CHECKS = {
     CRITERIA[1]: "In the exported game, observe movement, walls and single-count pickups under keyboard input.",
     CRITERIA[2]: "Play through a hazard failure and a reachable victory and observe the game states.",
@@ -422,7 +447,8 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
         result["window_image"] = observed.pop("image")
         result["window_size"] = observed
 
-    _, stderr = observe("windows-runtime", [], interact, directory=release, executable=exe)
+    _, stderr = observe("windows-runtime", ["--resolution", "800x540"], interact,
+                        directory=release, executable=exe)
     if stderr.strip() or fingerprint(exe, 256 * 1024**2) != identity:
         raise Blocked("Exported game produced unexpected diagnostics or changed")
     output = ledger.local_directory("recovery", create=True) / f"godot-windows-export-{run_id}"

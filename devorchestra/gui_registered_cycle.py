@@ -238,16 +238,31 @@ def _game_preflight(center, panel, runner, state):
 
     def start(export_windows=False, *, online=False, resume=False):
         nonlocal future
+        limits = None
+        if online and not resume:
+            try:
+                limits = {"seconds": int(session_entries["seconds"].get()),
+                          "tokens": int(session_entries["tokens"].get()),
+                          "cycles": int(session_entries["cycles"].get()) if session_entries["cycles"].get().strip() else None,
+                          **{name: {role: int(entry.get()) for role, entry in entries.items()}
+                             for name, entries in role_entries.items()}}
+                game_pilot.validate_limits(limits)
+            except (RuntimeError, ValueError) as error:
+                state.set(f"실행 한도 확인 · {error}")
+                return
         archive = None if resume else filedialog.askopenfilename(parent=panel, filetypes=[("Codex ZIP", "*.zip")])
         if not resume and not archive:
             return
         cancelled.clear()
-        expires = int(time()) + 1750
+        expires = int(time()) + (limits["seconds"] + 240 if limits else 1750)
         resume_args = (game_pilot.PROJECT, expires, 360, 120000)
         if resume:
             rows = registered_cycle.history(runner.ledger, game_pilot.PROJECT)
             if rows and rows[-1].get("reason") == "Manager plan exceeds the approved criteria":
                 resume_args = (game_pilot.PROJECT, expires, *registered_cycle.game_plan_remaining(rows))
+            elif rows and rows[0]["scope"].get("role_deadlines"):
+                reserve = sum(rows[0]["scope"]["role_tokens"][role] for role in ("reviewer", "manager-final"))
+                resume_args = (game_pilot.PROJECT, expires, 1200, reserve + 15000)
 
         def submit(approval=None):
             nonlocal future
@@ -268,9 +283,9 @@ def _game_preflight(center, panel, runner, state):
                         result = registered_cycle.run_resume(runner, *resume_args, approval=approval,
                                                              cancelled=cancelled.is_set)
                     elif approval is None:
-                        result = registered_cycle.review_game(runner, archive, expires)
+                        result = registered_cycle.review_game(runner, archive, expires, limits)
                     else:
-                        result = registered_cycle.run_game(runner, archive, expires, approval=approval,
+                        result = registered_cycle.run_game(runner, archive, expires, limits, approval=approval,
                                                            cancelled=cancelled.is_set)
                     future.set_result(result)
                 except Exception as error:
@@ -289,15 +304,23 @@ def _game_preflight(center, panel, runner, state):
                             state.set("검토 취소됨")
                             return
                         summary = (f"{result['project_id']}\n복제본 {result['replica']}\n"
-                                   f"{result['seconds']:,}초 · {result['tokens']:,}토큰 · 최대 {result['cycles']}사이클\n"
+                                   f"{result['seconds']:,}초 · {result['tokens']:,}토큰 · "
+                                   f"사이클 {result['cycles'] if result['cycles'] is not None else '별도 상한 없음'}\n"
                                    f"{result['model']} · {result['role_tokens']}\n"
-                                   f"호출당 시간 · Developer {result.get('developer_seconds', 120)}초 / 기타 120초\n"
+                                   f"호출당 초 · {result.get('role_deadlines') or {'developer': result.get('developer_seconds', 120), '기타': 120}}\n"
                                    f"편집 파일 {', '.join(result['files'])}\n"
                                    "Godot 및 템플릿 읽기, Developer 임시 폴더, 오프라인 셸, "
                                    "Windows 내보내기 및 소유 창 Verifier를 사용합니다. "
                                    "기존 에셋은 읽기 전용이며 명령 네트워크와 원본 반영은 꺼져 있습니다. "
-                                   "플레이 동작과 시각 품질은 사용자 검증이 필요합니다.")
+                                   "플레이 동작과 시각 품질은 사용자 검증이 필요합니다. "
+                                   "토큰은 호출 전 잔여량을 확인하고 응답 후 판정합니다. 시간 초과·취소는 소유 Job을 회수합니다.")
                         title = "게임 온라인 개발 1회 승인"
+                        if result.get("candidate_base"):
+                            title = "검증된 게임 후보에서 새 작업 승인"
+                            base = result["candidate_base"]
+                            summary += (f"\n후보 {base['source_sha256'][:12]} · 기존 변경 {len(base['changed'])}개. "
+                                        "기존 요청은 REQUEST_UNKNOWN으로 보존합니다. "
+                                        "검증된 파일을 기준으로 새 Manager 계획부터 시작합니다.")
                         if resume:
                             title = "게임 후보 검토 재개 승인"
                             if result["resume"].get("mode") == "after-manager-planning":
@@ -305,9 +328,10 @@ def _game_preflight(center, panel, runner, state):
                                 summary += (f"\n저장된 계획을 재사용합니다. 첫 Developer부터 시작하며 "
                                             f"추가 모델 호출은 최대 {result['model_calls_max']}회입니다.")
                             else:
-                                summary = (f"{result['replica']}\n추가 360초 · 120,000토큰 · 모델 최대 2회\n"
+                                summary = (f"{result['replica']}\n추가 {result['seconds']:,}초 · {result['tokens']:,}토큰 · 모델 최대 2회\n"
                                            "이전 후보의 Reviewer → Verifier → 최종 Manager만 실행합니다. "
-                                           "Reviewer 55,000 · 최종 Manager 45,000토큰. 복제본 편집은 꺼져 있습니다.")
+                                           f"Reviewer {result['role_tokens']['reviewer']:,} · "
+                                           f"최종 Manager {result['role_tokens']['manager-final']:,}토큰. 복제본 편집은 꺼져 있습니다.")
                         if center.confirm(title, summary, parent=panel):
                             submit(digest(result))
                         else:
@@ -335,6 +359,25 @@ def _game_preflight(center, panel, runner, state):
 
     ttk.Label(panel, text="등록 기준의 PNG 가져오기, 리소스 팩 실행, 소유 테스트 창 캡처를 검사합니다.",
               wraplength=580).pack(anchor="w")
+    budget = ttk.Frame(panel)
+    budget.pack(fill="x", pady=4)
+    defaults = game_pilot.recommended_limits()
+    session_entries = {}
+    role_entries = {key: {} for key in ("role_seconds", "role_tokens")}
+    for row, (key, label) in enumerate((("seconds", "세션 초"), ("tokens", "세션 토큰"), ("cycles", "사이클 상한 (선택)"))):
+        ttk.Label(budget, text=label).grid(row=row, column=0, sticky="w")
+        entry = session_entries[key] = ttk.Entry(budget, width=12)
+        entry.grid(row=row, column=1, sticky="w")
+        if defaults[key] is not None:
+            entry.insert(0, str(defaults[key]))
+    ttk.Label(budget, text="역할 초").grid(row=3, column=1, sticky="w")
+    ttk.Label(budget, text="역할 토큰").grid(row=3, column=2, sticky="w")
+    for row, role in enumerate(defaults["role_seconds"], 4):
+        ttk.Label(budget, text=role).grid(row=row, column=0, sticky="w")
+        for column, key in enumerate(role_entries, 1):
+            entry = role_entries[key][role] = ttk.Entry(budget, width=12)
+            entry.insert(0, str(defaults[key][role]))
+            entry.grid(row=row, column=column, sticky="w")
     button = ttk.Button(panel, text="게임 오프라인 사전 검증", command=start)
     button.pack(anchor="w")
     export_button = ttk.Button(panel, text="Windows EXE 내보내기 및 오프라인 검증", command=lambda: start(True))

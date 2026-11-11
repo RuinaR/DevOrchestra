@@ -68,12 +68,20 @@ def _tools(spec, criteria, image, writable):
 
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
-              manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False):
-    if (type(expires) is not int or not time() < expires <= time() + 1800 or type(seconds) is not int
-            or not 60 <= seconds <= 1500 or type(tokens) is not int or not 60000 <= tokens <= 400000
-            or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50))):
+              manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False, game_limits=None):
+    now = time()
+    if game_limits is not None:
+        game_pilot.validate_limits(game_limits)
+        if not game or (seconds, tokens, cycles) != tuple(game_limits[key] for key in ("seconds", "tokens", "cycles")):
+            raise Blocked("Invalid game budget scope")
+    elif (type(seconds) is not int or not 60 <= seconds <= 1500 or type(tokens) is not int
+          or not 60000 <= tokens <= 400000
+          or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50))):
         raise Blocked("Invalid registered session time, token or cycle limit")
-    if type(manager_tokens) is not int or not 1 <= manager_tokens <= min(tokens, 60000):
+    if (type(expires) is not int or not now < expires <= now + (7500 if game_limits else 1800)
+            or (game_limits is not None and expires < now + seconds)):
+        raise Blocked("Approval expiry does not cover the session window")
+    if game_limits is None and (type(manager_tokens) is not int or not 1 <= manager_tokens <= min(tokens, 60000)):
         raise Blocked("Invalid per-call Manager token limit")
     role_tokens = {**ROLE_TOKENS, "manager-planning": manager_tokens, "manager-final": manager_tokens}
     if sorted(permissions) != sorted(PERMISSIONS):
@@ -88,10 +96,15 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         raise Blocked("Godot projects require the game verifier for Windows export and owned-window evidence")
     if game and (not is_godot or project != game_pilot.PROJECT
                  or set(files) != set(game_pilot.DEVELOPMENT_FILES)
-                 or (seconds, tokens, cycles) != (1500, 350000, 2)):
-        raise Blocked("The game pilot requires its fixed initial approval scope")
-    if digest(image) != onboarding["replica_sha256"] or not original_matches(source, frozen):
-        raise Blocked("Original or replica no longer matches onboarding")
+                 or (game_limits is None and (seconds, tokens, cycles) != (1500, 350000, 2))):
+        raise Blocked("The game pilot requires its approved file scope")
+    if not original_matches(source, frozen):
+        raise Blocked("Original no longer matches onboarding")
+    candidate_base = None
+    if digest(image) != onboarding["replica_sha256"]:
+        if game_limits is None:
+            raise Blocked("Replica no longer matches onboarding")
+        candidate_base = _verified_game_base(ledger, events, replica, image, frozen, onboarding, files)
     with _git(ledger, source) as (git, _):
         if _scan(source, git, frozen["local_examples"]) != frozen:
             raise Blocked("Original Git inventory changed after onboarding")
@@ -115,7 +128,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         verifier["manager_brief"] = _read_source(replica, "docs/MANAGER-BRIEF.md", image)
         if not verifier["manager_brief"]:
             raise Blocked("The frozen game planning brief is unavailable")
-        role_tokens = dict(game_pilot.ROLE_LIMITS)
+        role_tokens = dict(game_pilot.ROLE_LIMITS if game_limits is None else game_limits["role_tokens"])
         criteria[game_pilot.CRITERIA[0]]["checks"] = [{"title": game_pilot.CRITERIA[0]}]
     else:
         verifier = _tools(spec, criteria, image, files)
@@ -147,7 +160,11 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "instructions": {phase: public_instruction(phase)["sha256"] for phase in ROLES},
             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles,
             "role_seconds": 120, "role_tokens": role_tokens, "model_calls_max": cycles * 4 if cycles else tokens,
-            **({"developer_seconds": 300, "developer_memory": 1536 * 1024**2} if game else {}),
+            **({"developer_memory": 1536 * 1024**2} if game else {}),
+            **({"developer_seconds": 300} if game and game_limits is None else {}),
+            **({"role_deadlines": dict(game_limits["role_seconds"]), "model_output_bytes": 2 * 1024**2}
+               if game_limits else {}),
+            **({"candidate_base": candidate_base} if candidate_base else {}),
             "ledger_head": head, "network": "COMMANDS_OFF", "install": False, "original_apply": False}
 
 
@@ -157,15 +174,98 @@ def review(runner, *args):
         return _contract(runner, events, head, *args)
 
 
-def _game_args(archive, expires):
-    return (game_pilot.PROJECT, archive, expires, 1500, 350000, 2,
+def _game_args(archive, expires, limits=None):
+    budget = tuple(limits[key] for key in ("seconds", "tokens", "cycles")) if limits else (1500, 350000, 2)
+    return (game_pilot.PROJECT, archive, expires, *budget,
             list(game_pilot.DEVELOPMENT_FILES), list(PERMISSIONS), None)
 
 
-def review_game(runner, archive, expires):
+def review_game(runner, archive, expires, limits=None):
+    limits = game_pilot.recommended_limits() if limits is None else limits
+    game_pilot.validate_limits(limits)
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
-        return _contract(runner, events, head, *_game_args(archive, expires), game=True)
+        return _contract(runner, events, head, *_game_args(archive, expires, limits), game=True, game_limits=limits)
+
+
+def _verified_game_base(ledger, events, replica, image, frozen, onboarding, files):
+    rows = history(ledger, game_pilot.PROJECT)
+    if len(rows) < 4 or rows[-1].get("outcome") != "REQUEST_UNKNOWN":
+        raise Blocked("Changed game replica requires independently verified candidate evidence")
+    start, end = rows[0], rows[-1]
+    prior = start["scope"]
+    if (digest(prior) != start["approval_sha256"] or prior["replica"] != str(replica)
+            or prior["onboarding_sha256"] != digest(onboarding) or end.get("owned_tree") != "DRAINED"
+            or end.get("usage_complete") is not False or end.get("kind") != "native_inspection_result"
+            or not any(row.get("kind") == "native_inspection_role_result" and row.get("phase") == "developer"
+                       and row.get("outcome") == "REQUEST_UNKNOWN" and row.get("owned_tree") == "DRAINED"
+                       for row in rows)
+            or digest({**image, "files": frozen["files"]}) != prior["replica_sha256"]):
+        raise Blocked("Game candidate ownership or original Git baseline cannot be verified")
+    candidate = digest(image)
+    changed = sorted(name for name in image["files"].keys() | frozen["files"].keys()
+                     if image["files"].get(name) != frozen["files"].get(name))
+    if not changed or not set(changed) <= set(files) or any(name not in image["files"] for name in changed):
+        raise Blocked("The game candidate changes files outside its approved scope")
+    for name in changed:
+        _read_source(replica, name, image)
+
+    def evidence(kind):
+        related = [row for row in events if row.get("parent_run_id") == start["run_id"]
+                   and row.get("project_id") == game_pilot.PROJECT and row.get("probe_kind") == kind]
+        for intent in reversed(related):
+            if (intent["kind"] != "native_inspection_intent" or intent.get("source_sha256") != candidate
+                    or intent.get("model_calls") != 0):
+                continue
+            terminal = next((row for row in related if row["run_id"] == intent["run_id"]
+                             and row["kind"] == "native_inspection_result"), None)
+            if (terminal and terminal.get("model_calls") == 0 and terminal.get("outcome") == "COMPLETED"
+                    and terminal.get("owned_tree") == "DRAINED"
+                    and terminal.get("staging_cleanup", {}).get("status") == "REMOVED"):
+                return intent, terminal
+        raise Blocked("Game candidate requires completed offline build and input evidence")
+
+    _, build = evidence("GODOT_STOPPED_CANDIDATE_OFFLINE")
+    input_intent, inputs = evidence("GODOT_CANDIDATE_INPUT_DIAGNOSTIC")
+    verifier = build.get("verification", {})
+    artifact = verifier.get("game", {})
+    name = artifact.get("artifact_directory", "")
+    if (verifier.get("source_sha256") != candidate or verifier.get("owned_tree") != "DRAINED"
+            or artifact.get("outcome") != "PASS" or artifact.get("gui") != "EXPORTED_WINDOW_CAPTURED_AND_CLOSED"
+            or name != inputs.get("artifact_directory")
+            or not re.fullmatch(r"godot-windows-export-[a-f0-9]{32}-cycle-[1-9][0-9]*", name)
+            or input_intent.get("executable") != artifact.get("executable") or inputs.get("inputs") != ["Enter", "D", "R"]):
+        raise Blocked("Game candidate evidence is not bound to the same exported EXE")
+    folder = ledger.local_directory("recovery") / name
+    if fingerprint(folder / "GamePilot.exe", 256 * 1024**2) != artifact["executable"]:
+        raise Blocked("Preserved candidate EXE changed")
+    for label in ("title", "after-enter", "after-d", "after-r"):
+        if fingerprint(folder / "input-diagnostic" / f"{label}.png")["sha256"] != inputs["images"][label]["sha256"]:
+            raise Blocked("Preserved input observation changed")
+    resume = prior.get("resume", {})
+    planning_rows = [row for row in events if row.get("run_id") == resume.get("parent_run_id")
+                     and row.get("project_id") == game_pilot.PROJECT and row.get("probe_kind") == KIND]
+    if len(planning_rows) != 4:
+        raise Blocked("The existing game plan is unavailable")
+    plan_start, _, plan_role, _ = planning_rows
+    if (plan_start.get("approval_sha256") != resume.get("parent_approval_sha256")
+            or plan_role.get("phase") != "manager-planning" or plan_role.get("outcome") != "COMPLETED"
+            or not re.fullmatch(r"native-command-[a-z0-9_]+", plan_start.get("workspace", ""))):
+        raise Blocked("The existing game plan receipt does not match")
+    log = ledger.local_directory("temp") / plan_start["workspace"] / "tmp" / "1-manager-planning" / "probe.stdout"
+    raw = _read_observation(log, 262145)
+    if len(raw) > 262144:
+        raise Blocked("Existing game plan exceeds the observation limit")
+    response = _cli_evidence(raw.decode("utf-8"), command_pattern=r"(?!)", expected="", retain_message=True)
+    if digest(response.get("message")) != plan_role.get("message_sha256"):
+        raise Blocked("Existing game plan bytes do not match")
+    plan = _parse_plan(response["message"], prior["criteria"], game=True)
+    if digest(plan) != resume.get("plan_sha256"):
+        raise Blocked("Existing game plan differs from the approved plan")
+    return {"parent_run_id": start["run_id"], "parent_outcome": "REQUEST_UNKNOWN",
+            "verification_run_id": build["run_id"], "input_run_id": inputs["run_id"],
+            "changed": changed, "source_sha256": candidate, "executable": artifact["executable"],
+            "design_present": "docs/GAME-DESIGN.md" in image["files"], "existing_plan": plan["plan"]}
 
 
 def _read_source(root, name, image):
@@ -368,10 +468,20 @@ def _cycles(session, initial_plan=None):
     project = scope["project_id"]
     criteria = scope["criteria"]
     status = dict.fromkeys(criteria, "NOT_STARTED")
+    base = scope.get("candidate_base")
+    if base:
+        status = {key: ("NOT_VERIFIED" if key == game_pilot.CRITERIA[0] else "USER_TEST_REQUIRED")
+                  for key in criteria}
+        session.progress = status
     known = {digest(session.image["files"])}
     failures = set()
     count = stagnant = 0
-    feedback = None
+    feedback = ({"new_work": True, "existing_files": base["changed"],
+                 "existing_plan": base["existing_plan"],
+                 "observed": "Offline EXE opened and closed; Enter, movement and restart were observed.",
+                 "design_present": base["design_present"],
+                 "unverified": "Wall collision, item collection, win/loss, result screen, full play and visual quality."
+                 } if base else None)
     while scope["cycles"] is None or count < scope["cycles"]:
         count += 1
         session.check()
@@ -387,6 +497,9 @@ def _cycles(session, initial_plan=None):
             pending = list(criteria)
         brief = scope["verifier"].get("manager_brief")
         game_context = f"Game brief (project data): {brief}\n" if brief else ""
+        if base:
+            game_context += ("Continue the existing Lantern Ruins design and preserve the implemented features. "
+                             "Use the earlier plan as project context. Choose the next missing work independently. ")
         if count == 1 and initial_plan is not None:
             plan = initial_plan
             session.record("native_inspection_manager_plan_reused", cycle=count, phase="manager-planning",
@@ -680,17 +793,20 @@ def run(runner, *args, approval, cancelled=lambda: False):
     return _run(runner, args, approval, cancelled, resume=False)
 
 
-def run_game(runner, archive, expires, *, approval, cancelled=lambda: False):
-    return _run(runner, _game_args(archive, expires), approval, cancelled, resume=False, game=True)
+def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False):
+    limits = game_pilot.recommended_limits() if limits is None else limits
+    game_pilot.validate_limits(limits)
+    return _run(runner, _game_args(archive, expires, limits), approval, cancelled, resume=False, game=True,
+                game_limits=limits)
 
 
-def _run(runner, args, approval, cancelled, *, resume, game=False):
+def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None):
     from .runtime import require_admission
 
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
         scope, diff = (_resume_contract(runner, events, head, *args) if resume
-                       else (_contract(runner, events, head, *args, game=game), None))
+                       else (_contract(runner, events, head, *args, game=game, game_limits=game_limits), None))
         if cancelled() or digest(scope) != approval:
             raise Blocked("Registered development approval changed")
         if any(event.get("approval_sha256") == approval for event in events):
