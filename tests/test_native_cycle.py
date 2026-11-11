@@ -79,7 +79,7 @@ class NativeCycleTests(unittest.TestCase):
                 usage = {"input_tokens": 33246, "output_tokens": 167, "cached_input_tokens": 19200}
             rows.append({"type": "turn.completed", "usage": usage})
             stream = "\n".join(map(json.dumps, rows))
-            if interrupted is None and target == "A" and phase == "manager-final":
+            if interrupted is None and target == "A" and phase in {"developer", "manager-final"}:
                 (scratch / "probe.stdout").write_text(stream, encoding="utf-8")
                 raise native_cycle.OwnedMxcStopped("MXC probe timeout")
             return {"stdout": stream, "exitCode": 0, "job_active": 0}
@@ -112,6 +112,10 @@ class NativeCycleTests(unittest.TestCase):
                 self.assertEqual(decision["manager_decision"], "CONTINUE")
                 self.assertEqual(decision["process_result"], "TERMINATED_AND_DRAINED")
                 self.assertIsNone(decision["exit_code"])
+                developer = next(role for role in result["roles"]
+                                 if role["cycle"] == 1 and role["phase"] == "developer")
+                self.assertEqual(developer["process_result"], "TERMINATED_AND_DRAINED")
+                self.assertTrue(developer["test_commands"])
                 rows = [event for event in ledger.read() if event["kind"] == "native_inspection_cycle_progress"]
                 self.assertEqual([list(row["criteria"].values()).count("VERIFIED") for row in rows], [1, 2])
                 self.assertEqual(list(rows[0]["criteria"].values()), ["VERIFIED", "NOT_STARTED"])

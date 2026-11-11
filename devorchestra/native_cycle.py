@@ -352,12 +352,12 @@ class _FixtureSession:
             self.owned_verified = True
             process_result = "TERMINATED_AND_DRAINED"
             result = {"stdout": "", "exitCode": None, "job_active": 0}
-            if not writable and str(stopped) == "MXC probe timeout":
+            if str(stopped) == "MXC probe timeout":
                 # _observe raises this only after proving that the owned Job is empty.
-                # A read-only role can settle from a complete event stream after drain.
                 try:
                     self.check()
-                    self.check_image()
+                    if not writable:
+                        self.check_image()
                     raw = _read_observation(role_log / "probe.stdout", 262145)
                     if len(raw) <= 262144:
                         result["stdout"] = raw.decode("utf-8")
@@ -379,6 +379,9 @@ class _FixtureSession:
         if tokens is not None:
             self.usage += tokens
         settled_process = result["exitCode"] == 0 or process_result == "TERMINATED_AND_DRAINED"
+        recovered_developer = writable and process_result == "TERMINATED_AND_DRAINED"
+        if recovered_developer and not response.get("successful_fixture_command_sha256"):
+            settled_process = False
         outcome = ("REQUEST_UNKNOWN" if not settled_process or "message" not in response else
                    "USAGE_UNKNOWN" if tokens is None else "TOKEN_LIMIT" if tokens > limit else "COMPLETED")
         message = response.get("message")
@@ -398,7 +401,7 @@ class _FixtureSession:
             raise Blocked(outcome)
         self.check()
         if writable:
-            response["diff"] = self.developer_diff(cycle, task, before)
+            response["diff"] = self.developer_diff(cycle, task, before, require_change=recovered_developer)
         else:
             self.check_image()
         response["message"] = message.strip()
@@ -410,11 +413,13 @@ class _FixtureSession:
             raise Blocked("Fixture source is outside the bounded text contract")
         return raw.decode("ascii").replace("\r\n", "\n").splitlines(keepends=True)
 
-    def developer_diff(self, cycle, task, before):
+    def developer_diff(self, cycle, task, before, *, require_change=False):
         updated = snapshot(self.work)
         if snapshot(self.original) != self.original_image:
             raise Blocked("Protected fixture changed")
         changed = changes(self.image, updated, {task["file"]}) if self.image != updated else {}
+        if require_change and not changed:
+            raise Blocked("Recovered Developer did not change the approved file")
         filename = task["file"]
         cycle_diff = "".join(unified_diff(before, self.fixture_lines(filename),
                                           fromfile=f"a/{filename}", tofile=f"b/{filename}"))
@@ -477,7 +482,7 @@ def run(ledger, archive, request, expires, seconds, tokens, cycles, approval=Non
                 # Keep the intent unresolved so other entries require owner recovery.
                 return {**fields, **result, "status": "RECOVERY_REQUIRED", "owned_tree": "UNRESOLVED"}
             preserve = (not session.usage_complete or not hasattr(session, "original_image")
-                        or (session.calls > 0 and result["outcome"] in {"CANCELLED", "TIME_LIMIT"}))
+                        or (session.calls > 0 and result["outcome"] in {"CANCELLED", "TIME_LIMIT", "REQUEST_UNKNOWN"}))
             if not preserve:
                 _release_fixture_git_objects(session.work, session.original)
                 cleanup["preserve"] = False
