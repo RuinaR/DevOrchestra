@@ -14,7 +14,7 @@ from .gui_verification import _Window, _small_file
 from .job_probe import _require
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
-from .mxc_host_probe import PROFILE, _args, _observe
+from .mxc_host_probe import PROFILE, OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder
 from .mxc_owned_gui import _capture, _job_pids
 from .native_command_probe import ARCHIVE_SHA256, _stage_release, _staging
@@ -68,6 +68,95 @@ MANUAL_CHECKS = {
     CRITERIA[3]: "Exercise start, HUD, results and restart, then inspect rendered text, feedback and clipping.",
     CRITERIA[4]: "Review asset provenance and the accepted design against a recorded 5–10 minute playthrough.",
 }
+PLAYER_FEEDBACK_FIELDS = ("controls", "difficulty", "visuals", "progression")
+
+
+def player_candidate(ledger, events):
+    _, replica, _, _ = baseline(ledger, PROJECT)
+    source = digest(snapshot(replica))
+    for row in reversed(events):
+        if (row.get("project_id") != PROJECT or row.get("kind") != "native_inspection_result"
+                or row.get("probe_kind") != EXPORT_KIND or row.get("outcome") != "PASS"
+                or row.get("source_sha256") != source or row.get("owned_tree") != "DRAINED"
+                or row.get("staging_cleanup", {}).get("status") != "REMOVED"):
+            continue
+        name = row["artifact_directory"]
+        if not re.fullmatch(r"godot-windows-export-[a-f0-9]{32}", name):
+            raise Blocked("Unrecognized game export directory")
+        executable = ledger.local_directory("recovery") / name / "GamePilot.exe"
+        if fingerprint(executable, 256 * 1024**2) != row["executable"]:
+            raise Blocked("The verified game executable has changed")
+        return {"run_id": row["run_id"], "source_sha256": source, "executable": str(executable),
+                "identity": row["executable"]}
+    raise Blocked("Export the current game candidate before user playtesting")
+
+
+def save_player_feedback(runner, candidate, ratings, notes, finished):
+    if (ratings.keys() != set(PLAYER_FEEDBACK_FIELDS)
+            or any(value not in {"OK", "ISSUE", "NOT_TESTED"} for value in ratings.values())
+            or type(finished) is not bool or len(notes) > 1000):
+        raise Blocked("Invalid player feedback")
+    ledger = runner.ledger
+    with execution_slot() as abandoned:
+        events, head = runner._idle_diagnostic(abandoned)
+        if player_candidate(ledger, events) != candidate:
+            raise Blocked("The playtest candidate changed")
+        ledger.append(len(events), head, {"kind": "native_inspection_player_feedback", "project_id": PROJECT,
+                      "source_sha256": candidate["source_sha256"], "export_run_id": candidate["run_id"],
+                      "executable_sha256": candidate["identity"]["sha256"], "origin": "USER_REPORTED",
+                      "ratings": dict(ratings), "notes": notes, "finished": finished})
+
+
+def latest_player_feedback(events, source, export_run_id):
+    return next((event for event in reversed(events)
+                 if event["kind"] == "native_inspection_player_feedback" and event.get("project_id") == PROJECT
+                 and event.get("source_sha256") == source and event.get("export_run_id") == export_run_id), None)
+
+
+def run_player_candidate(runner, candidate, *, cancelled):
+    from .runtime import require_admission
+
+    ledger = runner.ledger
+    with execution_slot() as abandoned:
+        events, head = runner._idle_diagnostic(abandoned)
+        if player_candidate(ledger, events) != candidate or cancelled():
+            raise Blocked("The playtest candidate changed or the launch was cancelled")
+        run_id = uuid4().hex
+        fields = {"project_id": PROJECT, "probe_kind": "GODOT_USER_PLAY", "run_id": run_id,
+                  "request_id": run_id, "state": "DIAGNOSTIC", "source_sha256": candidate["source_sha256"],
+                  "export_run_id": candidate["run_id"], "model_calls": 0}
+        with _staging(ledger) as (lab, cleanup):
+            executable = lab / "GamePilot.exe"
+            copyfile(candidate["executable"], executable)
+            if fingerprint(executable, 256 * 1024**2) != candidate["identity"]:
+                raise Blocked("The staged game executable has changed")
+            windows = _known_folder(0x24)
+            env = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,
+                   "PATH": str(windows / "System32"), "LOCALAPPDATA": str(lab), "APPDATA": str(lab),
+                   "HOME": str(lab), "USERPROFILE": str(lab), "TEMP": str(lab), "TMP": str(lab)}
+            count, fence = ledger.append(len(events), head, {
+                **fields, "kind": "native_inspection_intent", "workspace": lab.name,
+                "executable_sha256": candidate["identity"]["sha256"]}, admission=require_admission)
+            cleanup["preserve"] = True
+
+            def check():
+                if cancelled():
+                    raise Blocked("Player closed the playtest panel")
+                runner._check_diagnostic_fence(count, fence)
+
+            try:
+                result = _observe(executable, ["--resolution", "800x540"], lab, lab, env,
+                                  seconds=1200, memory=1024**3,
+                                  check=check, encoding="utf-8", output_limit=65536)
+                outcome = "EXITED" if result["exitCode"] == 0 else "FAILED"
+            except OwnedMxcStopped:
+                outcome = "CANCELLED" if cancelled() else "STOPPED"
+            cleanup["preserve"] = False
+        ledger.append(count, fence, {**fields, "kind": "native_inspection_result", "outcome": outcome,
+                      "owned_tree": "DRAINED", "staging_cleanup": cleanup}, allow_shutdown=True)
+        return outcome
+
+
 ENGINE = "Godot_v4.7.2-stable_win64"
 ENGINE_HASHES = {
     ENGINE + ".exe": "ab1824f85bfd8e0e4128182c000c4003a3e042245b2967848d089b2a04b22424",
@@ -293,9 +382,9 @@ def run(runner, archive, *, cancelled=lambda: False, capture=False, export_windo
         if digest(image) != onboarding["replica_sha256"]:
             if not export_windows:
                 raise Blocked("Game pilot no longer matches its onboarding snapshot")
-            from .registered_cycle import settled_game_rework
+            from .registered_cycle import settled_game_candidate
 
-            candidate = settled_game_rework(ledger, replica, image, frozen, onboarding, DEVELOPMENT_FILES)
+            candidate = settled_game_candidate(ledger, replica, image, frozen, onboarding, DEVELOPMENT_FILES)
         engine = _engine(replica)
         template, template_identity = _template(replica) if export_windows else (None, None)
         assets = sorted(name for name in image["files"] if name.startswith("assets/") and name.endswith(".png"))

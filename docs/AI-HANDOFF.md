@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+Command Center의 **검증된 EXE · 사용자 플레이 기록**에서 현재 후보를 실행하고 관찰을 저장한다. 새 승인으로 게임 계획을 세울 때 Manager는 해당 후보의 사용자 평가와 보존된 Reviewer·최종 Manager의 지적을 참고할 수 있다. 기존 후보에 수정이 필요하지 않으면 계획에 `mode: verify`를 넣어 Developer를 건너뛰고 실제 diff를 Reviewer와 Verifier가 검토한다. 사용자 평가를 근거로 동결 기준을 자동 통과시키지는 않는다. 모델 판정 원문 대신 짧은 근거, 기준, 대상 파일, 우선순위, 응답 해시를 비공개 원장에 남긴다.
+
 Lantern Ruins의 오프라인 재작업 후보는 결과 화면과 재시작 초기화 수정 후 Windows 내보내기 및 실제 시간 키 입력 검사를 통과했다. 검증 스크립트는 `tools/lantern-ruins-playcheck.gd`에 있다. 새 작업은 Command Center에서 **Windows EXE 내보내기 및 오프라인 검증**으로 확정한 후보를 **게임 온라인 개발 검토**에서 검토해 승인한다. 이전 Reviewer의 상세 지적은 원문이 보존되지 않아 확인할 수 없다. 승리·실패·재시작의 재현 근거를 사용하고, 첫 플레이의 난이도와 시각 품질을 별도로 확인한다.
 
 Lantern Ruins의 최신 검토 재개는 `REWORK`로 종료됐다. 확정된 Developer 후보를 그대로 사용했고 Reviewer·최종 Manager만 온라인 호출했다. 독립 Verifier는 C1을 확인했으며 C2–C5의 사용자 플레이 검증은 남아 있다. 다음 개발은 동일 후보의 변경과 동결 기준을 확인한 뒤 새 승인 범위에서 계획한다. 이전 300초 종료로 남은 `REQUEST_UNKNOWN` 영수증은 보존한다.

@@ -7,9 +7,9 @@ import sys
 from tempfile import TemporaryDirectory
 from time import monotonic, time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from devorchestra import cycle_progress, native_cycle, original_apply, project_onboarding, registered_cycle
+from devorchestra import cycle_progress, game_pilot, native_cycle, original_apply, project_onboarding, registered_cycle
 from devorchestra.catalog import Catalog, new_project
 from devorchestra.ledger import Ledger, digest
 from devorchestra.lease import Blocked
@@ -18,6 +18,54 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_feedback_is_linked_and_credential_like_findings_are_omitted(self):
+        session = Mock()
+        session.source.return_value = "source"
+        message = "REWORK — The HUD clips at narrow widths."
+        verdict, finding = registered_cycle._verdict(message, {"REWORK"})
+        registered_cycle._record_feedback(session, 1, "C4", "reviewer", verdict, message, finding, ["hud.gd"])
+        event = session.record.call_args.kwargs
+        self.assertEqual((event["reason"], event["target"], event["files"]),
+                         (finding, "C4", ["hud.gd"]))
+        self.assertEqual(event["message_sha256"], digest(message))
+        registered_cycle._record_feedback(session, 1, "C4", "manager-final", "REWORK",
+                                          "REWORK — password fixture", "password fixture")
+        self.assertEqual(session.record.call_args.kwargs["reason"], "[omitted: possible sensitive text]")
+
+    def test_player_report_is_bound_to_candidate_and_is_not_a_verifier_result(self):
+        candidate = {"source_sha256": "source", "run_id": "export", "identity": {"sha256": "exe"}}
+        runner = Mock()
+        runner._idle_diagnostic.return_value = ([], "head")
+        ratings = dict.fromkeys(game_pilot.PLAYER_FEEDBACK_FIELDS, "OK")
+        with patch.object(game_pilot, "player_candidate", return_value=candidate):
+            game_pilot.save_player_feedback(runner, candidate, ratings, "test note", True)
+        _, _, event = runner.ledger.append.call_args.args
+        self.assertEqual(event["origin"], "USER_REPORTED")
+        self.assertNotIn("verdict", event)
+        self.assertIs(game_pilot.latest_player_feedback([event], "source", "export"), event)
+        self.assertIsNone(game_pilot.latest_player_feedback([event], "source", "other-export"))
+
+    def test_review_only_game_plan_reviews_diff_without_dispatching_developer(self):
+        key = game_pilot.CRITERIA[1]
+        session = Mock()
+        session.image = {"files": {"game.gd": {}}}
+        session.scope = {"project_id": game_pilot.PROJECT, "criteria": {key: {"text": "movement"}},
+                         "goal": "Review play", "files": ["game.gd"], "cycles": None, "requirements": [],
+                         "verifier": {"manager_brief": "game", "executable": "godot"},
+                         "candidate_base": {"changed": ["game.gd"], "existing_plan": "review",
+                                            "design_present": True, "parent_outcome": "REWORK"}}
+        session.call.return_value = json.dumps({"criterion": key, "plan": "Review movement", "mode": "verify"})
+        comparison = {"criteria": {key: "USER_TEST_REQUIRED"}, "newly_verified": [], "regressed": []}
+        with patch.object(registered_cycle, "Catalog"), \
+                patch.object(registered_cycle, "read_frozen_requirements", return_value=[]), \
+                patch.object(registered_cycle, "_read_source", side_effect=["old\n", "new\n"]), \
+                patch.object(registered_cycle, "_review_and_verify",
+                             return_value=("ACCEPT", "ACCEPT", "", {}, comparison)) as verify, \
+                patch.object(registered_cycle, "_decide", return_value="USER_TEST_REQUIRED"):
+            self.assertEqual(registered_cycle._cycles(session), "USER_TEST_REQUIRED")
+        self.assertEqual([call.args[1] for call in session.call.call_args_list], ["manager-planning"])
+        self.assertIn("+new", verify.call_args.args[3])
+
     def test_only_approved_registered_replica_trust_is_accepted(self):
         with TemporaryDirectory(dir=Path.cwd()) as folder:
             root = Path(folder)

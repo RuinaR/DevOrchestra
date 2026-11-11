@@ -352,6 +352,8 @@ def _game_preflight(center, panel, runner, state):
                             summary += (f"\n후보 {base['source_sha256'][:12]} · 기존 변경 {len(base['changed'])}개. "
                                         f"이전 세션 결과 {base['parent_outcome']}를 보존합니다. "
                                         "검증된 파일을 기준으로 새 Manager 계획부터 시작합니다.")
+                            if base.get("player_report"):
+                                summary += "\n사용자 평가와 완주 여부를 Manager 계획에 전달합니다. 메모는 로컬에 저장합니다."
                         if resume:
                             title = "게임 후보 검토 재개 승인"
                             if result["resume"].get("mode") == "after-manager-planning":
@@ -427,6 +429,98 @@ def _game_preflight(center, panel, runner, state):
     resume_button = ttk.Button(panel, text="게임 중단 후보 재개 검토",
                                command=lambda: start(online=True, resume=True))
     resume_button.pack(anchor="w")
+    ttk.Button(panel, text="검증된 EXE · 사용자 플레이 기록",
+               command=lambda: _player_panel(center, runner)).pack(anchor="w")
     ttk.Button(panel, text="닫기 / 중단", command=close).pack(anchor="w")
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: (close(), "break")[1])
+
+
+def _player_panel(center, runner):
+    panel = center.panel()
+    panel.title("Lantern Ruins · 사용자 플레이")
+    state = tk.StringVar(value="")
+    ttk.Label(panel, textvariable=state, wraplength=580).pack(anchor="w")
+    try:
+        events = runner.ledger.read()
+        candidate = game_pilot.player_candidate(runner.ledger, events)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+        state.set(str(error))
+        return
+    ttk.Label(panel, text=f"{candidate['executable']}\nSHA-256 {candidate['identity']['sha256']}",
+              wraplength=580).pack(anchor="w")
+    ttk.Label(panel, text="Enter 시작 · WASD/방향키 이동 · Space 대시 · R 재시작").pack(anchor="w")
+    ratings = {}
+    for key, title in zip(game_pilot.PLAYER_FEEDBACK_FIELDS, ("조작 이해도", "난이도", "화면 품질", "진행 흐름")):
+        row = ttk.Frame(panel)
+        row.pack(fill="x")
+        ttk.Label(row, text=title, width=14).pack(side="left")
+        rating = ratings[key] = tk.StringVar(value="미확인")
+        ttk.Combobox(row, textvariable=rating, values=("미확인", "양호", "문제"), state="readonly").pack(side="left")
+    finished = tk.BooleanVar()
+    ttk.Checkbutton(panel, text="배포 EXE에서 승리까지 직접 플레이함", variable=finished).pack(anchor="w")
+    ttk.Label(panel, text="직접 겪은 문제와 재현 방법 · 비공개 기록").pack(anchor="w")
+    notes = center.editor_box(panel, height=4)
+    labels = {"미확인": "NOT_TESTED", "양호": "OK", "문제": "ISSUE"}
+    saved = game_pilot.latest_player_feedback(events, candidate["source_sha256"], candidate["run_id"])
+    if saved:
+        for label, value in labels.items():
+            for key, previous in saved["ratings"].items():
+                if previous == value:
+                    ratings[key].set(label)
+        finished.set(saved["finished"])
+        notes.insert("1.0", saved["notes"])
+    cancelled = Event()
+    active = None
+
+    def launch():
+        nonlocal active
+        active = Future()
+        cancelled.clear()
+        launch_button.configure(state="disabled")
+        save_button.configure(state="disabled")
+        state.set("플레이 중 · 최대 20분")
+
+        def work():
+            try:
+                active.set_result(game_pilot.run_player_candidate(runner, candidate, cancelled=cancelled.is_set))
+            except Exception as error:
+                active.set_exception(error)
+
+        def poll():
+            if not active.done():
+                panel.after(250, poll)
+                return
+            if cancelled.is_set():
+                panel.destroy()
+                return
+            state.set(str(active.exception() or active.result()))
+            launch_button.configure(state="normal")
+            save_button.configure(state="normal")
+
+        Thread(target=work, daemon=False).start()
+        panel.after(250, poll)
+
+    def save():
+        try:
+            game_pilot.save_player_feedback(runner, candidate, {k: labels[v.get()] for k, v in ratings.items()},
+                                            notes.get("1.0", "end-1c").strip(), finished.get())
+            state.set("사용자 관찰을 비공개 원장에 저장했습니다.")
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            state.set(str(error))
+
+    def close():
+        if active is not None and not active.done():
+            cancelled.set()
+            state.set("게임 종료 대기 중")
+        else:
+            panel.destroy()
+
+    launch_button = ttk.Button(panel, text="검증된 EXE 실행", command=launch)
+    launch_button.pack(side="left")
+    save_button = ttk.Button(panel, text="사용자 플레이 기록 저장", command=save)
+    save_button.pack(side="left")
+    ttk.Button(panel, text="닫기", command=close).pack(side="left")
+    panel.protocol("WM_DELETE_WINDOW", close)
+    panel.bind("<Escape>", lambda _event: (close(), "break")[1])
+    panel.bind("<Destroy>", lambda event: cancelled.set() if event.widget is panel else None, add="+")
