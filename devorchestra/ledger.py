@@ -21,7 +21,7 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
-def check_path(path, *, long_local=False):
+def check_path(path, *, long_local=False, installed_executable=False):
     if not path.is_absolute() or path.drive.startswith("\\\\") or ".." in path.parts:
         raise Blocked("Ledger requires a local absolute path")
     candidates = (*reversed(path.parents), path, *(
@@ -34,7 +34,8 @@ def check_path(path, *, long_local=False):
             continue
         if info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
             raise Blocked("Ledger path contains a reparse point")
-        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+        if (stat.S_ISREG(info.st_mode) and info.st_nlink != 1
+                and not (installed_executable and candidate == path)):
             raise Blocked("Ledger path contains a hard link")
 
 

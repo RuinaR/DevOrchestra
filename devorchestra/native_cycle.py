@@ -194,8 +194,11 @@ class _FixtureSession:
         self.runner, self.scope, self.fields = runner, scope, fields
         self.count, self.fence, self.cancelled = count, fence, cancelled
         self.started = monotonic()
-        self.work, self.original, self.scratch, home = (lab / name for name in ("work", "original", "tmp", "verify"))
-        for path in (self.work, self.original, self.scratch, home):
+        self.work = Path(scope["replica"]) if "replica_sha256" in scope else lab / "work"
+        self.original = Path(scope["original"]) if "replica_sha256" in scope else lab / "original"
+        self.scratch, home = lab / "tmp", lab / "verify"
+        paths = (self.scratch, home) if "replica_sha256" in scope else (self.work, self.original, self.scratch, home)
+        for path in paths:
             path.mkdir()
         windows = _known_folder(0x24)
         self.env = {"SystemRoot": str(windows), "WINDIR": str(windows), "SystemDrive": windows.drive,
@@ -209,7 +212,7 @@ class _FixtureSession:
         self.usage, self.calls, self.phases = 0, 0, []
         self.usage_complete = True
         self.owned_verified = True
-        self.progress = {key: "NOT_STARTED" for key in CRITERIA}
+        self.progress = {key: "NOT_STARTED" for key in scope["criteria"]}
         self.cycles_checked = 0
 
     def record(self, kind, **facts):
@@ -259,6 +262,14 @@ class _FixtureSession:
         if denied["exitCode"] != 1 or denied["job_active"] or not denied["stderr"]:
             raise Blocked("Read-only MXC fixture write denial could not be verified")
         self.check_image()
+        self.check_login()
+        baseline = self.observe("baseline")
+        if [row["actual"] for row in baseline] != [6, 3]:
+            raise Blocked("Both independent fixture criteria must start unmet")
+        self.record("native_inspection_fixture_baseline", source_sha256=self.source(), observations=baseline,
+                    readonly_write_denied=True)
+
+    def check_login(self):
         auth_log = self.logs("auth")
         auth = self.owned(lambda: _observe(
             self.binary, [*trial_flags(self.work, writable=False), "login", "status"],
@@ -268,11 +279,6 @@ class _FixtureSession:
         if auth["exitCode"] != 0 or b"Logged in using ChatGPT" not in (
                 auth["stdout"].encode("utf-8") + b"\n" + stderr).splitlines():
             raise Blocked("Official ChatGPT sign-in is unavailable")
-        baseline = self.observe("baseline")
-        if [row["actual"] for row in baseline] != [6, 3]:
-            raise Blocked("Both independent fixture criteria must start unmet")
-        self.record("native_inspection_fixture_baseline", source_sha256=self.source(), observations=baseline,
-                    readonly_write_denied=True)
 
     def source(self):
         return digest(self.image)
@@ -323,18 +329,27 @@ class _FixtureSession:
         self.record("native_inspection_cycle_progress", cycle=cycle, **comparison)
 
     def role(self, cycle, phase, target, prompt):
+        task = TASKS[target]
+        before = self.fixture_lines(task["file"]) if phase == "developer" else None
+        response, recovered = self.dispatch(cycle, phase, target, prompt,
+                                            test_pattern=rf"\bcall\s+{re.escape(task['file'])}\s+3\b",
+                                            expected=task["expected"])
+        if phase == "developer":
+            response["diff"] = self.developer_diff(cycle, task, before, require_change=recovered)
+        return response
+
+    def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None,
+                 context="This is an isolated arithmetic fixture."):
         self.check()
         self.check_image()
         limit = self.scope["role_tokens"][phase]
         if self.scope["tokens"] - self.usage < limit or self.calls >= self.scope["model_calls_max"]:
             raise Blocked("TOKEN_LIMIT")
         writable = phase == "developer"
-        task = TASKS[target]
-        before = self.fixture_lines(task["file"]) if writable else None
         instructions = public_instruction(phase)
         if instructions["sha256"] != self.scope["instructions"][phase]:
             raise Blocked("Approved role instructions changed")
-        prompt = (f"{instructions['text']}\nThis is an isolated arithmetic fixture. "
+        prompt = (f"{instructions['text']}\n{context} "
                   "Use only the approved fixture scope. No external actions.\n" + prompt)
         self.calls += 1
         self.record("native_inspection_role_intent", cycle=cycle, phase=phase, target=target,
@@ -345,7 +360,8 @@ class _FixtureSession:
         self.usage_complete = False
         process_result = "EXITED"
         try:
-            result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable),
+            result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
+                                                      tool_root=tool_root),
                               self.work, role_log, self.env, seconds=self.seconds(), check=self.check,
                               output_limit=262144, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
         except OwnedMxcStopped as stopped:
@@ -369,8 +385,8 @@ class _FixtureSession:
         stderr = role_log / "probe.stderr"
         details = _failure_evidence(result["stdout"], _read_observation(stderr, 65536) if stderr.is_file() else b"")
         try:
-            response = _cli_evidence(result["stdout"], command_pattern=rf"\bcall\s+{re.escape(task['file'])}\s+3\b",
-                                     expected=task["expected"], retain_message=True)
+            response = _cli_evidence(result["stdout"], command_pattern=test_pattern or r"(?!)",
+                                     expected=expected, retain_message=True)
         except (ValueError, TypeError, KeyError):
             response = {"provider_usage": "UNKNOWN"}
         usage = response["provider_usage"]
@@ -380,7 +396,7 @@ class _FixtureSession:
             self.usage += tokens
         settled_process = result["exitCode"] == 0 or process_result == "TERMINATED_AND_DRAINED"
         recovered_developer = writable and process_result == "TERMINATED_AND_DRAINED"
-        if recovered_developer and not response.get("successful_fixture_command_sha256"):
+        if recovered_developer and test_pattern and not response.get("successful_fixture_command_sha256"):
             settled_process = False
         outcome = ("REQUEST_UNKNOWN" if not settled_process or "message" not in response else
                    "USAGE_UNKNOWN" if tokens is None else "TOKEN_LIMIT" if tokens > limit else "COMPLETED")
@@ -388,7 +404,8 @@ class _FixtureSession:
         receipt = {"outcome": outcome, "exit_code": result["exitCode"], "owned_tree": "DRAINED",
                    "process_result": process_result,
                    "provider_usage": usage, "message_sha256": digest(message),
-                   "test_commands": response.get("successful_fixture_command_sha256", []), **details}
+                   "test_commands": response.get("successful_fixture_command_sha256", []),
+                   "command_events": response.get("command_events", []), **details}
         if outcome == "TOKEN_LIMIT":
             receipt["role_token_limit"] = limit
             receipt["role_reported_tokens"] = tokens
@@ -400,12 +417,10 @@ class _FixtureSession:
         if outcome != "COMPLETED":
             raise Blocked(outcome)
         self.check()
-        if writable:
-            response["diff"] = self.developer_diff(cycle, task, before, require_change=recovered_developer)
-        else:
+        if not writable:
             self.check_image()
         response["message"] = message.strip()
-        return response
+        return response, recovered_developer
 
     def fixture_lines(self, filename):
         raw = _read_observation(self.work / filename, 513)

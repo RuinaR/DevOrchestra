@@ -9,8 +9,8 @@ from .lease import Blocked
 from .ledger import check_path, digest
 
 
-def fingerprint(path, limit=64 * 1024 * 1024):
-    check_path(path)
+def fingerprint(path, limit=64 * 1024 * 1024, *, installed_executable=False):
+    check_path(path, installed_executable=installed_executable)
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
         raise Blocked("Replica file is unsupported or exceeds the evidence limit")

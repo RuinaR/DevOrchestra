@@ -32,10 +32,12 @@ PROFILE = "developer-trial"
 DEFAULT_MODEL = "gpt-6.1-sol"
 
 
-def trial_flags(work, *, writable=True, code_mode=False):
+def trial_flags(work, *, writable=True, code_mode=False, tool_root=None):
     """Keep every temporary override on the owned process command line."""
     rules = ((":root", "deny"), (":minimal", "read"), (str(work), "write" if writable else "read"),
              (str(work / ".git"), "read"))
+    if tool_root is not None:
+        rules += ((str(tool_root), "read"),)
     filesystem = "{ " + ", ".join(f"{json.dumps(path)} = {json.dumps(access)}" for path, access in rules) + " }"
     enabled = {"shell_tool"} | ({"code_mode", "code_mode_host"} if code_mode else set())
     values = [
@@ -78,7 +80,7 @@ def _scope(archive, home, request, expires, ledger_head, model, role_tokens, ses
 def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expected="11", retain_message=False):
     """Retain only bounded event classes, command hashes and reported counts."""
     thread = started = terminal = message = False
-    usage, tests, final_message = None, [], None
+    usage, tests, commands, final_message = None, [], [], None
     for line in output.splitlines():
         row = json.loads(line)
         if type(row) is not dict or terminal:
@@ -104,6 +106,9 @@ def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expec
             if item.get("type") == "command_execution":
                 command = item.get("command")
                 observed = item.get("aggregated_output")
+                if retain_message and isinstance(command, str) and len(commands) < 64:
+                    code = item.get("exit_code")
+                    commands.append({"sha256": digest(command), "exit_code": code if type(code) is int else None})
                 if (isinstance(command, str) and item.get("exit_code") == 0
                         and re.search(command_pattern, command, re.I)
                         and isinstance(observed, str) and expected in observed.splitlines()):
@@ -124,6 +129,7 @@ def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expec
               "successful_fixture_command_sha256": tests}
     if retain_message:
         result["message"] = final_message
+        result["command_events"] = commands
     return result
 
 
@@ -187,8 +193,8 @@ def _verify_output(binary, work, output, environment, check, *, test_command="ca
                     encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
 
 
-def _exec_argv(work, model, prompt, *, writable=True):
-    return [*trial_flags(work, writable=writable, code_mode=True), "exec", "--ignore-user-config", "--json",
+def _exec_argv(work, model, prompt, *, writable=True, tool_root=None):
+    return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root), "exec", "--ignore-user-config", "--json",
             "--ephemeral", "--model", model, "--cd", str(work), prompt]
 
 

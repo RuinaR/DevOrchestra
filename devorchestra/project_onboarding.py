@@ -72,7 +72,8 @@ def _git(ledger, source, staging=None):
     for exe in executables:
         if not _signed_offline(exe):
             raise Blocked("Packaged Git signature is unverified")
-        identity["cmd/git.exe" if exe == git else "ucrt64/bin/git.exe"] = fingerprint(exe)["sha256"]
+        identity["cmd/git.exe" if exe == git else "ucrt64/bin/git.exe"] = fingerprint(
+            exe, installed_executable=True)["sha256"]
     verify_app_server_binary(launcher, approved_sha256=LAUNCHER_PIN)
     with _git_scratch(ledger) as scratch:
         home, output = scratch / "home", scratch / "output"

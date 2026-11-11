@@ -1255,12 +1255,13 @@ class CommandCenter:
 
         show_panel(self, initial)
 
-    def original_apply_panel(self):
+    def original_apply_panel(self, project=None):
         from . import original_apply
 
-        if self.project.current() < 0:
-            return
-        project = self.project_ids[self.project.current()]
+        if project is None:
+            if self.project.current() < 0:
+                return
+            project = self.project_ids[self.project.current()]
         panel = self.panel()
         panel.title("DevOrchestra · 검증된 변경 원본 반영")
         panel.geometry("850x650")
@@ -1793,6 +1794,13 @@ class CommandCenter:
         ttk.Button(panel, text="감독형 Codex 작업으로 계속", command=supervised).pack(anchor="e")
         ttk.Button(panel, text="GUI 검증 및 보고서", command=self.gui_verification_report).pack(anchor="e")
         ttk.Button(panel, text="구독 Manager 계획 승인", command=lambda: self.subscription_manager(project_id)).pack(anchor="e")
+        def native():
+            from .gui_registered_cycle import show
+
+            panel.destroy()
+            show(self, project_id)
+
+        ttk.Button(panel, text="등록 프로젝트 Codex 자동 개발", command=native).pack(anchor="e")
 
     def subscription_manager(self, project_id):
         from .chatgpt_subscription import AccountStore

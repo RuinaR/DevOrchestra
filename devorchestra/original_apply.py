@@ -28,6 +28,11 @@ def _prepare(runner, project, expires):
     if source == replica or source.is_relative_to(replica) or replica.is_relative_to(source):
         raise Blocked("Original and replica must be separate trees")
     end = _find(events, "subscription_session_ended", project_id=project)
+    from .registered_cycle import history
+
+    native = history(ledger, project)
+    if native and (not end or native[-1] in events[events.index(end) + 1:]):
+        return _prepare_registered(events, head, project, expires, source, replica, frozen, onboarding, native)
     if not end or end.get("outcome") != "COMPLETED" or end.get("owned_tree") != "DRAINED":
         raise Blocked("A completed subscription session is required")
     session_sha256 = digest(end)
@@ -118,6 +123,63 @@ def _prepare(runner, project, expires):
              "ledger_head": head, "session_sha256": session_sha256, "verifier_sha256": digest(verifier),
              "onboarding_sha256": digest(onboarding)}
     return scope, frozen, before, after
+
+
+def _prepare_registered(events, head, project, expires, source, replica, frozen, onboarding, history):
+    start, end = history[0], history[-1]
+    scope = start["scope"]
+    if (end["kind"] != "native_inspection_result" or end.get("outcome") != "COMPLETED"
+            or end.get("owned_tree") != "DRAINED" or digest(scope) != start["approval_sha256"]
+            or end["approval_sha256"] != start["approval_sha256"]
+            or scope["onboarding_sha256"] != digest(onboarding)
+            or scope["replica"] != str(replica)
+            or end["criteria_status"] != dict.fromkeys(scope["criteria"], "VERIFIED")):
+        raise Blocked("Registered development requires a completed, matching session")
+    session_sha = digest(end)
+    if _find(events, "original_apply_result", project_id=project, session_sha256=session_sha, result="APPLIED"):
+        raise Blocked("This verified session has already been applied")
+    final_cycle = end["cycle_count"]
+    review = next((row for row in reversed(history) if row["kind"] == "native_inspection_cycle_progress"
+                   and row["cycle"] == final_cycle), {})
+    verified = next((row for row in reversed(history) if row["kind"] == "native_inspection_role_result"
+                     and row["cycle"] == final_cycle and row["phase"] == "verifier"), {})
+    decision = next((row for row in reversed(history) if row["kind"] == "native_inspection_role_result"
+                     and row["cycle"] == final_cycle and row["phase"] == "manager-final"), {})
+    image = snapshot(replica)
+    if (review.get("reviewer") != "ACCEPT" or review.get("controller_decision") != "COMPLETED"
+            or decision.get("manager_decision") != "COMPLETED" or decision.get("outcome") != "COMPLETED"
+            or verified.get("verdict") != "PASS" or verified.get("owned_tree") != "DRAINED"
+            or not (verified.get("source_sha256") == review.get("source_sha256") ==
+                    end["replica_sha256"] == digest(image)) or not original_matches(source, frozen)):
+        raise Blocked("Registered review, verification or source evidence changed")
+    paths = changes({**image, "files": frozen["files"]}, image, set(scope["files"]))
+    if (any(value["after"] is None for value in paths.values())
+            or sum(sum(part["bytes"] for part in row.values() if part) for row in paths.values()) > BATCH_LIMIT):
+        raise Blocked("Registered result exceeds the original write scope")
+    before, after = {}, {}
+    for name, row in paths.items():
+        path = source / _relative(name)
+        check_path(path)
+        if (_protected(name) or name in frozen["staged"] or name in frozen["raw_worktree_changed"]
+                or name in frozen["local_examples"] or not path.parent.is_dir()):
+            raise Blocked(f"Original path is protected or was already modified: {name}")
+        parent = source
+        for part in _relative(name).parts:
+            aliases = [entry.name for entry in parent.iterdir() if entry.name.casefold() == part.casefold()]
+            if aliases and aliases != [part]:
+                raise Blocked("Original path casing is ambiguous")
+            parent /= part
+        before[name] = path.read_bytes() if row["before"] else None
+        after[name] = (replica / name).read_bytes()
+        if ((row["before"] is None and path.exists())
+                or any(sha256(data).hexdigest() != expected["sha256"] for data, expected in
+                       ((before[name], row["before"]), (after[name], row["after"])) if expected)):
+            raise Blocked("Original or registered replica bytes changed")
+    return {"project_id": project, "original": str(source), "replica": str(replica), "expires": expires,
+            "original_head": frozen["head"], "original_git": frozen["git"],
+            "original_directory_id": list(_identity(source)), "paths": paths, "ledger_head": head,
+            "session_sha256": session_sha, "verifier_sha256": digest(verified),
+            "onboarding_sha256": digest(onboarding)}, frozen, before, after
 
 
 def _identity(path):
