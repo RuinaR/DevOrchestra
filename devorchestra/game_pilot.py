@@ -31,10 +31,16 @@ FROZEN_CRITERIA_SHA256 = "0aefb917198ad528d5bd4edab0bf778cabb76699f14bac3a600810
 DEVELOPMENT_FILES = ("docs/GAME-DESIGN.md", "project.godot", "scenes/game.tscn", "scenes/player.tscn",
                      "scenes/hud.tscn", "scripts/game.gd", "scripts/player.gd", "scripts/hud.gd")
 ROLE_LIMITS = {"manager-planning": 45000, "developer": 75000, "reviewer": 55000, "manager-final": 45000}
-SESSION_SECONDS = 7200
-SESSION_TOKENS = 750000
-ROLE_SECONDS = {"manager-planning": 600, "developer": 1800, "reviewer": 600, "manager-final": 600}
-ROLE_TOKENS = {"manager-planning": 65000, "developer": 150000, "reviewer": 80000, "manager-final": 65000}
+SESSION_SECONDS = 14400
+SESSION_TOKENS = 1500000
+ROLE_SECONDS = {"manager-planning": 1200, "developer": 3600, "reviewer": 1200, "manager-final": 1200}
+ROLE_TOKENS = {"manager-planning": 120000, "developer": 350000, "reviewer": 150000, "manager-final": 120000}
+
+
+def graceful_policy(*, followup=False):
+    return {"role_grace_seconds": 900, "idle_seconds": 600, "tool_idle_seconds": 1200,
+            "signoff_seconds": 1800, "signoff_tokens": 300000,
+            "signoff_within_session_tokens": followup}
 
 
 def recommended_limits():
@@ -496,7 +502,7 @@ def verify_development(session, cycle):
         logs.mkdir()
         argv = _args(executable, *args) if executable else _args(engine, "--path", str(work), *args)
         response = session.owned(lambda: _observe(session.binary, argv, directory, logs, env,
-                                                  seconds=min(45, session.seconds()), memory=1024**3,
+                                                  seconds=min(45, session.verification_seconds()), memory=1024**3,
                                                   check=session.check, output_limit=65536, encoding="utf-8",
                                                   interact=interact))
         if response["job_active"]:
@@ -514,8 +520,10 @@ def verify_development(session, cycle):
         _export_release(ledger, f"{session.fields['run_id']}-cycle-{cycle}", session.work,
                         data, lab, observe, session.check, workers, result)
     except Blocked as error:
-        if not session.owned_verified:
+        if not session.owned_verified or str(error) == "SIGNOFF_PENDING":
             raise
+        if str(error) == "MXC probe timeout" and session.signoff_started is not None:
+            session.verification_seconds()
         result.update(outcome="FAIL", reason=str(error))
     finally:
         for worker in workers:

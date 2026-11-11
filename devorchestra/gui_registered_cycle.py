@@ -18,6 +18,14 @@ LABELS = {
 }
 
 
+def _remaining_signoff(checkpoint):
+    if checkpoint.get("comparison") is not None:
+        return "최종 Manager"
+    if checkpoint.get("review") is not None:
+        return "독립 Verifier → 최종 Manager"
+    return "Reviewer → 독립 Verifier → 최종 Manager"
+
+
 def show(center, project):
     runner = center.controller
     panel = center.panel()
@@ -51,8 +59,9 @@ def show(center, project):
     entries = {}
     for index, (key, label, default) in enumerate((
             ("archive", "공식 Codex ZIP", ""), ("files", "수정 파일 경로 (쉼표 구분)", ""),
-            ("seconds", "초", "960"), ("tokens", "토큰", "270000"), ("cycles", "사이클 상한", "2"),
-            ("manager_tokens", "Manager 토큰 / 호출", str(registered_cycle.ROLE_TOKENS["manager-planning"])))):
+            ("seconds", "세션 초", str(game_pilot.SESSION_SECONDS)),
+            ("tokens", "세션 토큰", str(game_pilot.SESSION_TOKENS)), ("cycles", "사이클 상한 (선택)", ""),
+            ("manager_tokens", "Manager 토큰 / 호출", str(game_pilot.ROLE_TOKENS["manager-planning"])))):
         ttk.Label(inputs, text=label).grid(row=index, column=0, sticky="w")
         entry = entries[key] = ttk.Entry(inputs)
         entry.insert(0, default)
@@ -86,6 +95,7 @@ def show(center, project):
         rows = registered_cycle.history(runner.ledger, project)
         roles = [row for row in rows if row["kind"] in {"native_inspection_role_intent", "native_inspection_role_result"}]
         end = next((row for row in reversed(rows) if row["kind"] == "native_inspection_result"), None)
+        stop = next((row for row in rows if row["kind"] == "native_inspection_stop_requested"), None)
         lines = []
         for row in roles:
             usage = row.get("provider_usage")
@@ -95,6 +105,8 @@ def show(center, project):
             if row.get("command_events"):
                 text += f" · 도구 명령 {len(row['command_events'])}회"
             lines.append(text)
+        if stop:
+            lines.append(f"종료 예약 · {stop['reason']} · 현재 작업 마무리")
         if end:
             lines.extend((f"{end['outcome']} · {end['cycle_count']}회 · {end['known_reported_tokens']} 토큰",
                           f"변경: {', '.join(end['changed']) or '없음'}",
@@ -113,7 +125,7 @@ def show(center, project):
         else:
             panel.destroy()
 
-    def submit(args, approval=None, *, resume=False):
+    def submit(args, approval=None, *, resume=False, soft_limits=None, graceful=False):
         nonlocal future, active
         future = Future()
         active = True
@@ -123,12 +135,13 @@ def show(center, project):
 
         def work():
             try:
-                if resume and approval is None:
+                if resume and approval is None and not graceful:
                     registered_cycle.verify_resume_candidate(runner, project, cancelled=cancelled.is_set)
                 review_fn = registered_cycle.review_resume if resume else registered_cycle.review
                 run_fn = registered_cycle.run_resume if resume else registered_cycle.run
-                result = (review_fn(runner, *args) if approval is None
-                          else run_fn(runner, *args, approval=approval, cancelled=cancelled.is_set))
+                options = {"graceful": graceful} if resume else {"soft_limits": soft_limits}
+                result = (review_fn(runner, *args, **options) if approval is None
+                          else run_fn(runner, *args, approval=approval, cancelled=cancelled.is_set, **options))
                 future.set_result(result)
             except Exception as error:
                 future.set_exception(error)
@@ -164,10 +177,10 @@ def show(center, project):
                            f"추가 한도 {result['tokens']:,}토큰 / {result['seconds']}초\n"
                            f"Reviewer {result['role_tokens']['reviewer']:,} / "
                            f"최종 Manager {result['role_tokens']['manager-final']:,}토큰\n"
-                           "Reviewer → 독립 Verifier → 최종 Manager만 실행합니다. "
-                           "모델 최대 2회, Developer 재호출과 원본 반영은 없습니다.")
+                           f"{_remaining_signoff(checkpoint)} · 모델 최대 {result['model_calls_max']}회. "
+                           "Developer 재호출과 원본 반영은 없습니다.")
                 if center.confirm("추가 예산 및 중단 작업 재개 승인", summary, parent=panel):
-                    submit(args, digest(result), resume=True)
+                    submit(args, digest(result), resume=True, graceful=graceful)
                 else:
                     state.set("재개 승인 취소됨")
                 return
@@ -181,8 +194,13 @@ def show(center, project):
                        "Developer는 MXC 안에서 복제본 쓰기와 셸 권한을 사용합니다. "
                        "Controller가 역할 종료 후 지정 파일 밖의 변경을 차단합니다. "
                        "승인된 프로젝트 문맥과 변경 근거가 모델에 전달됩니다. 명령 네트워크는 꺼져 있습니다.")
+            if result.get("graceful_stop"):
+                summary += (f"\n역할 초 {result['role_deadlines']}. 시간과 토큰은 소프트 기준입니다. "
+                            "토큰은 호출 전 잔여량과 공급자 응답 후 사용량을 확인합니다. "
+                            "마무리 최대 1,800초·300,000토큰. 역할 유예 최대 900초. "
+                            "무응답 600초, 도구 실행 중 무응답 1,200초에서 소유 Job을 회수합니다.")
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary, parent=panel):
-                submit(args, digest(result))
+                submit(args, digest(result), soft_limits=soft_limits)
             else:
                 state.set("실행 승인 취소됨")
 
@@ -192,25 +210,36 @@ def show(center, project):
     def start():
         try:
             values = {key: entry.get().strip() for key, entry in entries.items()}
-            args = (project, values["archive"], int(time()) + 1700, int(values["seconds"]), int(values["tokens"]),
-                    int(values["cycles"]) if values["cycles"] else None,
+            seconds, tokens = int(values["seconds"]), int(values["tokens"])
+            cycles = int(values["cycles"]) if values["cycles"] else None
+            manager = int(values["manager_tokens"])
+            role_tokens = game_pilot.ROLE_TOKENS if tokens >= 750000 else registered_cycle.ROLE_TOKENS
+            limits = {"seconds": seconds, "tokens": tokens, "cycles": cycles,
+                      "role_seconds": {role: min(cap, seconds) for role, cap in game_pilot.ROLE_SECONDS.items()},
+                      "role_tokens": {role: manager if role.startswith("manager-") else min(cap, tokens)
+                                      for role, cap in role_tokens.items()}}
+            game_pilot.validate_limits(limits)
+            args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     [name.strip() for name in values["files"].split(",") if name.strip()],
                     [key for key, variable in grants.items() if variable.get()], json.loads(spec.get("1.0", "end")),
                     int(values["manager_tokens"]))
-        except ValueError as error:
+        except (RuntimeError, ValueError) as error:
             state.set(str(error))
             return
         cancelled.clear()
-        submit(args)
+        submit(args, soft_limits=limits)
 
     def resume():
         try:
-            args = (project, int(time()) + 1700, int(entries["seconds"].get()), int(entries["tokens"].get()))
+            rows = registered_cycle.history(runner.ledger, project)
+            graceful = bool(rows and rows[-1].get("outcome") == "SIGNOFF_PENDING")
+            args = (project, int(time()) + (4740 if graceful else 1700),
+                    int(entries["seconds"].get()), int(entries["tokens"].get()))
         except ValueError:
             state.set("추가 시간과 토큰 한도를 숫자로 입력하세요.")
             return
         cancelled.clear()
-        submit(args, resume=True)
+        submit(args, resume=True, graceful=graceful)
 
     buttons = ttk.Frame(panel)
     buttons.pack(fill="x")
@@ -254,15 +283,16 @@ def _game_preflight(center, panel, runner, state):
         if not resume and not archive:
             return
         cancelled.clear()
-        expires = int(time()) + (limits["seconds"] + 240 if limits else 1750)
+        expires = int(time()) + (limits["seconds"] + 2940 if limits else 1750)
         resume_args = (game_pilot.PROJECT, expires, 360, 120000)
+        graceful = False
         if resume:
             rows = registered_cycle.history(runner.ledger, game_pilot.PROJECT)
             if rows and rows[-1].get("reason") == "Manager plan exceeds the approved criteria":
                 resume_args = (game_pilot.PROJECT, expires, *registered_cycle.game_plan_remaining(rows))
             elif rows and rows[0]["scope"].get("role_deadlines"):
-                reserve = sum(rows[0]["scope"]["role_tokens"][role] for role in ("reviewer", "manager-final"))
-                resume_args = (game_pilot.PROJECT, expires, 1200, reserve + 15000)
+                graceful = True
+                resume_args = (game_pilot.PROJECT, int(time()) + 4740, 1800, 300000)
 
         def submit(approval=None):
             nonlocal future
@@ -278,10 +308,10 @@ def _game_preflight(center, panel, runner, state):
                         result = game_pilot.run(runner, archive, cancelled=cancelled.is_set, capture=True,
                                                 export_windows=export_windows)
                     elif resume and approval is None:
-                        result = registered_cycle.review_resume(runner, *resume_args)
+                        result = registered_cycle.review_resume(runner, *resume_args, graceful=graceful)
                     elif resume:
                         result = registered_cycle.run_resume(runner, *resume_args, approval=approval,
-                                                             cancelled=cancelled.is_set)
+                                                             cancelled=cancelled.is_set, graceful=graceful)
                     elif approval is None:
                         result = registered_cycle.review_game(runner, archive, expires, limits)
                     else:
@@ -313,7 +343,8 @@ def _game_preflight(center, panel, runner, state):
                                    "Windows 내보내기 및 소유 창 Verifier를 사용합니다. "
                                    "기존 에셋은 읽기 전용이며 명령 네트워크와 원본 반영은 꺼져 있습니다. "
                                    "플레이 동작과 시각 품질은 사용자 검증이 필요합니다. "
-                                   "토큰은 호출 전 잔여량을 확인하고 응답 후 판정합니다. 시간 초과·취소는 소유 Job을 회수합니다.")
+                                   "시간·토큰은 새 작업 시작을 멈추는 기준입니다. "
+                                   "토큰은 호출 전 잔여량과 공급자 응답 후 사용량을 확인합니다.")
                         title = "게임 온라인 개발 1회 승인"
                         if result.get("candidate_base"):
                             title = "검증된 게임 후보에서 새 작업 승인"
@@ -328,10 +359,19 @@ def _game_preflight(center, panel, runner, state):
                                 summary += (f"\n저장된 계획을 재사용합니다. 첫 Developer부터 시작하며 "
                                             f"추가 모델 호출은 최대 {result['model_calls_max']}회입니다.")
                             else:
-                                summary = (f"{result['replica']}\n추가 {result['seconds']:,}초 · {result['tokens']:,}토큰 · 모델 최대 2회\n"
-                                           "이전 후보의 Reviewer → Verifier → 최종 Manager만 실행합니다. "
+                                summary = (f"{result['replica']}\n추가 {result['seconds']:,}초 · {result['tokens']:,}토큰 · "
+                                           f"모델 최대 {result['model_calls_max']}회\n"
+                                           f"이전 후보의 {_remaining_signoff(result['resume'])}만 실행합니다. "
                                            f"Reviewer {result['role_tokens']['reviewer']:,} · "
                                            f"최종 Manager {result['role_tokens']['manager-final']:,}토큰. 복제본 편집은 꺼져 있습니다.")
+                        if result.get("graceful_stop"):
+                            policy = result["graceful_stop"]
+                            summary += (f"\n시간·토큰 소프트 기준. 역할 초 {result['role_deadlines']}. "
+                                        f"역할 유예 {policy['role_grace_seconds']:,}초, "
+                                        f"무응답 {policy['idle_seconds']:,}초, 도구 실행 중 무응답 "
+                                        f"{policy['tool_idle_seconds']:,}초, 마무리 {policy['signoff_seconds']:,}초. "
+                                        f"마무리 토큰 {policy['signoff_tokens']:,}은 "
+                                        f"{'세션 기준 잔여량 내' if policy['signoff_within_session_tokens'] else '별도 예산'}에서 사용합니다.")
                         if center.confirm(title, summary, parent=panel):
                             submit(digest(result))
                         else:

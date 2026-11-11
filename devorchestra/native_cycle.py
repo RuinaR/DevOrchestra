@@ -1,5 +1,6 @@
 """One approval for a bounded, sequential native Codex fixture session."""
 from difflib import unified_diff
+import json
 from pathlib import Path
 import re
 from time import monotonic, time
@@ -214,6 +215,9 @@ class _FixtureSession:
         self.owned_verified = True
         self.progress = {key: "NOT_STARTED" for key in scope["criteria"]}
         self.cycles_checked = 0
+        self.stop_reason = None
+        self.signoff_started = None
+        self.signoff_tokens = 0
 
     def record(self, kind, **facts):
         self.count, self.fence = self.runner.ledger.append(
@@ -225,8 +229,85 @@ class _FixtureSession:
             raise Blocked("CANCELLED")
         if (len(events), tail) != (self.count, self.fence):
             raise Blocked("Execution fence changed")
-        self.seconds()
+        if "graceful_stop" not in self.scope:
+            self.seconds()
+        elif time() >= self.scope["expires"]:
+            raise Blocked("APPROVAL_EXPIRED")
         return False
+
+    def request_stop(self, reason, phase):
+        if self.stop_reason is None:
+            self.stop_reason = reason
+            self.record("native_inspection_stop_requested", outcome="STOP_REQUESTED", reason=reason,
+                        phase=phase, known_reported_tokens=self.usage)
+
+    def soft_boundary(self, phase):
+        if monotonic() - self.started >= self.scope["seconds"]:
+            self.request_stop("SESSION_TIME", phase)
+        elif self.usage >= self.scope["tokens"]:
+            self.request_stop("SESSION_TOKENS", phase)
+
+    def admit_graceful(self, phase, reserve=0):
+        policy = self.scope["graceful_stop"]
+        self.soft_boundary(phase)
+        finishing = phase in {"reviewer", "verifier", "manager-final"}
+        if self.stop_reason is None and self.scope["tokens"] - self.usage < reserve:
+            self.request_stop("TOKEN_RESERVATION", phase)
+        if self.stop_reason is None:
+            return False
+        if not finishing:
+            raise Blocked("GRACEFUL_STOP")
+        if self.signoff_started is None:
+            self.signoff_started = monotonic()
+        remaining = policy["signoff_tokens"] - self.signoff_tokens
+        if policy["signoff_within_session_tokens"]:
+            remaining = min(remaining, self.scope["tokens"] - self.usage)
+        if (remaining < reserve or monotonic() - self.signoff_started >= policy["signoff_seconds"]):
+            raise Blocked("SIGNOFF_PENDING")
+        return True
+
+    def progress_check(self, phase, started, role_log, output_limit):
+        policy = self.scope["graceful_stop"]
+        role_soft = self.scope["role_deadlines"][phase]
+        last_size, last_progress = 0, started
+        complete_lines = 0
+        active = set()
+        path = role_log / "probe.stdout"
+
+        def check():
+            nonlocal last_size, last_progress, complete_lines
+            self.check()
+            now = monotonic()
+            self.soft_boundary(phase)
+            if now - started >= role_soft:
+                self.request_stop("ROLE_TIME", phase)
+            size = path.stat().st_size if path.is_file() else 0
+            if size > output_limit:
+                raise Blocked("MODEL_EVENT_LIMIT")
+            if size != last_size:
+                last_size = size
+                lines = _read_observation(path, output_limit + 1).split(b"\n")
+                for line in lines[complete_lines:-1]:
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    kind = event.get("type")
+                    item = event.get("item", {})
+                    if kind in {"thread.started", "turn.started", "turn.completed", "turn.failed",
+                                "item.started", "item.updated", "item.completed"}:
+                        last_progress = now
+                    if isinstance(item, dict) and item.get("type") == "command_execution":
+                        if kind == "item.started":
+                            active.add(item.get("id"))
+                        elif kind == "item.completed":
+                            active.discard(item.get("id"))
+                complete_lines = len(lines) - 1
+            if now - last_progress >= policy["tool_idle_seconds" if active else "idle_seconds"]:
+                raise Blocked("MODEL_IDLE_TIMEOUT")
+        return check
 
     def seconds(self, role=None):
         remaining = min(self.scope["seconds"] - (monotonic() - self.started), self.scope["expires"] - time())
@@ -236,6 +317,18 @@ class _FixtureSession:
         if role == "developer" and "role_deadlines" not in self.scope:
             limit = self.scope.get("developer_seconds", limit)
         return min(limit, remaining)
+
+    def verification_seconds(self):
+        if "graceful_stop" not in self.scope:
+            return self.seconds()
+        self.admit_graceful("verifier")
+        remaining = self.scope["expires"] - time()
+        if self.signoff_started is not None:
+            remaining = min(remaining, self.scope["graceful_stop"]["signoff_seconds"]
+                            - (monotonic() - self.signoff_started))
+        if remaining <= 0:
+            raise Blocked("SIGNOFF_PENDING")
+        return min(self.scope["role_seconds"], remaining)
 
     def logs(self, label):
         path = self.scratch / label
@@ -347,7 +440,12 @@ class _FixtureSession:
         self.check()
         self.check_image()
         limit = self.scope["role_tokens"][phase]
-        if self.scope["tokens"] - self.usage < limit or self.calls >= self.scope["model_calls_max"]:
+        graceful = "graceful_stop" in self.scope
+        if self.calls >= self.scope["model_calls_max"]:
+            raise Blocked("SIGNOFF_PENDING" if graceful and phase in {"reviewer", "manager-final"} else "TOKEN_LIMIT")
+        if graceful:
+            finishing = self.admit_graceful(phase, limit)
+        elif self.scope["tokens"] - self.usage < limit:
             raise Blocked("TOKEN_LIMIT")
         writable = phase == "developer"
         instructions = public_instruction(phase)
@@ -364,18 +462,31 @@ class _FixtureSession:
         self.usage_complete = False
         process_result = "EXITED"
         output_limit = self.scope.get("model_output_bytes", 262144)
+        role_started = monotonic()
+        if graceful:
+            policy = self.scope["graceful_stop"]
+            timeout = min(self.scope["role_deadlines"][phase] + policy["role_grace_seconds"],
+                          self.scope["expires"] - time())
+            if finishing:
+                timeout = min(timeout, policy["signoff_seconds"] - (role_started - self.signoff_started)
+                              + policy["role_grace_seconds"])
+            observed_check = self.progress_check(phase, role_started, role_log, output_limit)
+        else:
+            timeout, observed_check = self.seconds(phase), self.check
+        stop_cause = None
         try:
             result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
                                                       tool_root=tool_root, shell_tools=shell_tools,
                                                       extra_read_roots=extra_read_roots, scratch_root=scratch_root),
-                              self.work, role_log, self.env, seconds=self.seconds(phase), check=self.check,
+                              self.work, role_log, self.env, seconds=timeout, check=observed_check,
                               output_limit=output_limit, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
                               memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2)
         except OwnedMxcStopped as stopped:
+            stop_cause = str(stopped)
             self.owned_verified = True
             process_result = "TERMINATED_AND_DRAINED"
             result = {"stdout": "", "exitCode": None, "job_active": 0}
-            if str(stopped) == "MXC probe timeout":
+            if stop_cause == "MXC probe timeout" or (graceful and stop_cause == "MODEL_IDLE_TIMEOUT"):
                 # _observe raises this only after proving that the owned Job is empty.
                 try:
                     self.check()
@@ -401,21 +512,26 @@ class _FixtureSession:
         tokens = usage["input_tokens"] + usage["output_tokens"] if self.usage_complete else None
         if tokens is not None:
             self.usage += tokens
+            if graceful and finishing:
+                self.signoff_tokens += tokens
         settled_process = result["exitCode"] == 0 or process_result == "TERMINATED_AND_DRAINED"
         recovered_developer = writable and process_result == "TERMINATED_AND_DRAINED"
         if recovered_developer and test_pattern and not response.get("successful_fixture_command_sha256"):
             settled_process = False
         outcome = ("REQUEST_UNKNOWN" if not settled_process or "message" not in response else
-                   "USAGE_UNKNOWN" if tokens is None else "TOKEN_LIMIT" if tokens > limit else "COMPLETED")
+                   "USAGE_UNKNOWN" if tokens is None else "TOKEN_LIMIT" if tokens > limit and not graceful else "COMPLETED")
         message = response.get("message")
         receipt = {"outcome": outcome, "exit_code": result["exitCode"], "owned_tree": "DRAINED",
                    "process_result": process_result,
                    "provider_usage": usage, "message_sha256": digest(message),
                    "test_commands": response.get("successful_fixture_command_sha256", []),
                    "command_events": response.get("command_events", []), **details}
-        if outcome == "TOKEN_LIMIT":
+        if tokens is not None and tokens > limit:
             receipt["role_token_limit"] = limit
             receipt["role_reported_tokens"] = tokens
+            receipt["role_token_overage"] = tokens - limit
+        if stop_cause:
+            receipt["process_stop_reason"] = stop_cause
         if phase == "manager-final" and isinstance(message, str):
             decision = message.strip()
             if decision_parser:
@@ -423,9 +539,15 @@ class _FixtureSession:
                     decision = decision_parser(decision)
                 except Blocked:
                     decision = "INVALID"
-            receipt["manager_decision"] = decision if decision in {"CONTINUE", "REWORK", "COMPLETED"} else "INVALID"
+            receipt["manager_decision"] = decision if decision in {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"} else "INVALID"
         self.phases.append({"cycle": cycle, "phase": phase, **receipt})
         self.record("native_inspection_role_result", cycle=cycle, phase=phase, target=target, **receipt)
+        if graceful:
+            if tokens is not None and tokens >= limit:
+                self.request_stop("ROLE_TOKENS", phase)
+            if monotonic() - role_started >= self.scope["role_deadlines"][phase]:
+                self.request_stop("ROLE_TIME", phase)
+            self.soft_boundary(phase)
         if not shell_tools and receipt["command_events"]:
             raise Blocked("A role with shell disabled returned command execution events")
         if outcome != "COMPLETED":

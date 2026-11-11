@@ -13,7 +13,7 @@ from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .default_instructions import public_instruction
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
-from .mxc_host_probe import _args, _observe
+from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder, _signed_offline
 from .native_command_probe import ARCHIVE_SHA256, CODE_MODE_HOST_SHA256, RELEASE_SHA256, _staging
 from .native_cycle import ROLES, ROLE_TOKENS, _FixtureSession
@@ -72,18 +72,20 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     now = time()
     if game_limits is not None:
         game_pilot.validate_limits(game_limits)
-        if not game or (seconds, tokens, cycles) != tuple(game_limits[key] for key in ("seconds", "tokens", "cycles")):
-            raise Blocked("Invalid game budget scope")
+        if (seconds, tokens, cycles) != tuple(game_limits[key] for key in ("seconds", "tokens", "cycles")):
+            raise Blocked("Invalid registered budget scope")
     elif (type(seconds) is not int or not 60 <= seconds <= 1500 or type(tokens) is not int
           or not 60000 <= tokens <= 400000
           or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50))):
         raise Blocked("Invalid registered session time, token or cycle limit")
-    if (type(expires) is not int or not now < expires <= now + (7500 if game_limits else 1800)
-            or (game_limits is not None and expires < now + seconds)):
+    if (type(expires) is not int or not now < expires <= now + (17400 if game_limits else 1800)
+            or (game_limits is not None and expires < now + seconds + 2700)):
         raise Blocked("Approval expiry does not cover the session window")
     if game_limits is None and (type(manager_tokens) is not int or not 1 <= manager_tokens <= min(tokens, 60000)):
         raise Blocked("Invalid per-call Manager token limit")
     role_tokens = {**ROLE_TOKENS, "manager-planning": manager_tokens, "manager-final": manager_tokens}
+    if game_limits is not None:
+        role_tokens = dict(game_limits["role_tokens"])
     if sorted(permissions) != sorted(PERMISSIONS):
         raise Blocked("Approve the required replica, offline shell and Verifier permissions")
     ledger = runner.ledger
@@ -102,7 +104,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         raise Blocked("Original no longer matches onboarding")
     candidate_base = None
     if digest(image) != onboarding["replica_sha256"]:
-        if game_limits is None:
+        if not game or game_limits is None:
             raise Blocked("Replica no longer matches onboarding")
         candidate_base = _verified_game_base(ledger, events, replica, image, frozen, onboarding, files)
     with _git(ledger, source) as (git, _):
@@ -162,16 +164,17 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "role_seconds": 120, "role_tokens": role_tokens, "model_calls_max": cycles * 4 if cycles else tokens,
             **({"developer_memory": 1536 * 1024**2} if game else {}),
             **({"developer_seconds": 300} if game and game_limits is None else {}),
-            **({"role_deadlines": dict(game_limits["role_seconds"]), "model_output_bytes": 2 * 1024**2}
+            **({"role_deadlines": dict(game_limits["role_seconds"]), "model_output_bytes": 2 * 1024**2,
+                "graceful_stop": game_pilot.graceful_policy()}
                if game_limits else {}),
             **({"candidate_base": candidate_base} if candidate_base else {}),
             "ledger_head": head, "network": "COMMANDS_OFF", "install": False, "original_apply": False}
 
 
-def review(runner, *args):
+def review(runner, *args, soft_limits=None):
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
-        return _contract(runner, events, head, *args)
+        return _contract(runner, events, head, *args, game_limits=soft_limits)
 
 
 def _game_args(archive, expires, limits=None):
@@ -388,9 +391,15 @@ class RegisteredSession(_FixtureSession):
             logs = self.logs(f"{cycle}-verify-{key}")
             argv = [*trial_flags(self.work, writable=False, tool_root=Path(tool["root"])),
                     *_args(Path(tool["executable"]), *spec["args"], profile=PROFILE)]
-            result = self.owned(lambda: _observe(self.binary, argv, self.work, logs, self.verify_env,
-                                                 seconds=self.seconds(), check=self.check,
-                                                 output_limit=8192, encoding="utf-8"))
+            seconds = self.verification_seconds()
+            try:
+                result = self.owned(lambda: _observe(self.binary, argv, self.work, logs, self.verify_env,
+                                                     seconds=seconds, check=self.check,
+                                                     output_limit=8192, encoding="utf-8"))
+            except OwnedMxcStopped as error:
+                if str(error) == "MXC probe timeout" and self.signoff_started is not None:
+                    self.verification_seconds()
+                raise
             self.check_image()
             if result["job_active"]:
                 self.owned_verified = False
@@ -408,7 +417,7 @@ class RegisteredSession(_FixtureSession):
 
 
 def _final_decision(message):
-    return _verdict(message, {"CONTINUE", "REWORK", "COMPLETED"})[0]
+    return _verdict(message, {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"})[0]
 
 
 def _review_and_verify(session, count, key, diff, status):
@@ -421,6 +430,18 @@ def _review_and_verify(session, count, key, diff, status):
     review, finding = _verdict(decision, {"ACCEPT", "REWORK"})
     if review == "REWORK" and not finding:
         raise Blocked("Reviewer did not provide a rework finding")
+    session.signoff_state["review"] = review
+    session.record("native_inspection_review_decision", cycle=count, target=key, verdict=review,
+                   finding_sha256=digest(finding), source_sha256=session.source())
+    checked, comparison = _verify_signoff(session, count, key, status)
+    return decision, review, finding, checked, comparison
+
+
+def _verify_signoff(session, count, key, status):
+    scope = session.scope
+    criteria = scope["criteria"]
+    if "graceful_stop" in scope:
+        session.admit_graceful("verifier")
     checked = session.verify_registered(count)
     comparison = cycle_progress.compare(criteria, status, checked)
     for item in checked.get("user_test_required", []):
@@ -431,22 +452,43 @@ def _review_and_verify(session, count, key, diff, status):
             comparison["criteria"][item] = "NOT_STARTED"
     session.progress = comparison["criteria"]
     session.cycles_checked = count
-    return decision, review, finding, checked, comparison
+    session.signoff_state["comparison"] = comparison
+    return checked, comparison
+
+
+def _save_signoff(session):
+    state = session.signoff_state
+    if not state:
+        return
+    diff = state["diff"]
+    folder = session.runner.ledger.local_directory("recovery", create=True)
+    path = folder / f"registered-signoff-{session.fields['run_id']}.diff"
+    check_path(path)
+    with path.open("x", encoding="utf-8", newline="") as stream:
+        stream.write(diff)
+    session.record("native_inspection_signoff_checkpoint",
+                   **{k: v for k, v in state.items() if k != "diff"},
+                   source_sha256=session.source(), diff_sha256=digest(diff))
 
 
 def _decide(session, count, key, review, comparison, expected):
     status = comparison["criteria"]
     session.record("native_inspection_cycle_progress", cycle=count, **comparison, source_sha256=session.source(),
                    controller_decision=expected, reviewer=review)
-    manual = ("USER_TEST_REQUIRED is pending evidence; reply CONTINUE if no regression or rejection "
-              "requires rework. " if session.scope["verifier"].get("mode") == "godot-game" else "")
+    manual = ("USER_TEST_REQUIRED is pending evidence. Reply USER_TEST_REQUIRED if human evidence is "
+              "the next action and no regression or rejection requires rework. "
+              if "graceful_stop" in session.scope and session.scope["verifier"].get("mode") == "godot-game" else
+              "USER_TEST_REQUIRED is pending evidence; reply CONTINUE if no regression or rejection requires rework. "
+              if session.scope["verifier"].get("mode") == "godot-game" else "")
     final = session.call(count, "manager-final", key,
                          f"Current criterion {key}: {status[key]}. All frozen statuses: {status}. "
                          f"Reviewer: {review}. Regression: {comparison['regressed']}. "
                          "Reply REWORK if the current criterion failed, review rejected it or a prior criterion "
                          "regressed. Reply COMPLETED only if all passed with review acceptance. "
                          f"{manual}Otherwise reply CONTINUE for remaining criteria. Reply with the decision only.")
-    if final != expected:
+    human_wait = (final == "USER_TEST_REQUIRED" and expected == "CONTINUE"
+                  and "graceful_stop" in session.scope and "USER_TEST_REQUIRED" in status.values())
+    if final != expected and not human_wait:
         raise Blocked("Manager decision disagrees with Controller evidence")
     return final
 
@@ -485,6 +527,8 @@ def _cycles(session, initial_plan=None):
     while scope["cycles"] is None or count < scope["cycles"]:
         count += 1
         session.check()
+        if "graceful_stop" in scope:
+            session.admit_graceful("manager-planning")
         catalog = Catalog(session.runner.ledger).read()
         documents = read_frozen_requirements(catalog, project, scope["requirements"],
                                             session.runner.ledger.state_boundary)
@@ -525,6 +569,8 @@ def _cycles(session, initial_plan=None):
         if identity in known:
             raise Blocked("NO_PROGRESS")
         known.add(identity)
+        session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
+                                 "changed": session.last_changed, "diff": diff}
         decision, review, finding, checked, comparison = _review_and_verify(session, count, key, diff, status)
         status = comparison["criteria"]
         if comparison["newly_verified"] and not comparison["regressed"] and review == "ACCEPT":
@@ -535,8 +581,11 @@ def _cycles(session, initial_plan=None):
         expected = ("REWORK" if rework else "COMPLETED" if all(v == "VERIFIED" for v in status.values())
                     else "CONTINUE")
         final = _decide(session, count, key, review, comparison, expected)
-        if final == "COMPLETED":
-            return "COMPLETED"
+        session.signoff_state = {}
+        if final in {"COMPLETED", "USER_TEST_REQUIRED"}:
+            return final
+        if "graceful_stop" in scope and session.stop_reason:
+            return "GRACEFUL_STOP"
         if rework:
             failure = cycle_progress.failure_fingerprint(
                 "reviewer" if review != "ACCEPT" else "verifier",
@@ -552,9 +601,11 @@ def _cycles(session, initial_plan=None):
     return "CYCLE_LIMIT"
 
 
-def _resume_contract(runner, events, head, project, expires, seconds, tokens, *, require_proof=True):
-    if (type(expires) is not int or not time() < expires <= time() + 1800
-            or type(seconds) is not int or not 120 <= seconds <= 1500
+def _resume_contract(runner, events, head, project, expires, seconds, tokens, *, require_proof=True, graceful=False):
+    now = time()
+    if (type(expires) is not int or not now < expires <= now + (4800 if graceful else 1800)
+            or type(seconds) is not int or not 120 <= seconds <= (1800 if graceful else 1500)
+            or (graceful and expires < now + seconds + 2700)
             or type(tokens) is not int or not 1 <= tokens <= 400000):
         raise Blocked("Invalid additional review budget")
     rows = history(runner.ledger, project)
@@ -563,7 +614,13 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
     start, end = rows[0], rows[-1]
     prior = start["scope"]
     game = prior["verifier"].get("mode") == "godot-game"
+    if end.get("outcome") == "SIGNOFF_PENDING":
+        return _resume_signoff_contract(runner, events, head, rows, expires, seconds, tokens, graceful)
+    if graceful and (not game or (seconds, tokens) != (1800, 300000)):
+        raise Blocked("The game follow-up requires its approved soft budgets")
     if game and end.get("reason") == "Manager plan exceeds the approved criteria":
+        if graceful:
+            raise Blocked("Use the original planning recovery contract")
         return _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tokens)
     checkpoint = rows[-2] if game else None
     dispatch, role = rows[-4:-2] if game and len(rows) >= 5 else rows[-3:-1]
@@ -611,10 +668,13 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
                   "proof_run_id": None, "cycle": cycle, "criterion": key, "diff_sha256": digest(diff),
                   "changed": checkpoint["changed"], "criteria_status": end["criteria_status"],
                   "parent_reported_tokens": end["known_reported_tokens"]}
+        policy = ({"graceful_stop": game_pilot.graceful_policy(followup=True),
+                   "role_deadlines": dict(game_pilot.ROLE_SECONDS), "role_tokens": dict(game_pilot.ROLE_TOKENS)}
+                  if graceful else {})
         return ({**prior, "resume": resume, "replica_sha256": current_hash, "ledger_head": head,
                  "expires": expires, "seconds": seconds, "tokens": tokens, "model_calls_max": 2,
                  "files": end["changed"], "permissions": ["replica-read", "offline-shell", "pinned-verifier"],
-                 "shell_roles": ["reviewer"]}, diff)
+                 "shell_roles": ["reviewer"], **policy}, diff)
     proof = None
     for intent in events:
         if (intent.get("parent_run_id") != start["run_id"]
@@ -675,6 +735,43 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
              "shell_roles": ["reviewer"]}, diff)
 
 
+def _resume_signoff_contract(runner, events, head, rows, expires, seconds, tokens, graceful):
+    start, checkpoint, end = rows[0], rows[-2], rows[-1]
+    prior = start["scope"]
+    if (not graceful or "graceful_stop" not in prior
+            or checkpoint["kind"] != "native_inspection_signoff_checkpoint"
+            or end.get("owned_tree") != "DRAINED" or not end.get("usage_complete")
+            or digest(prior) != start["approval_sha256"]
+            or not re.fullmatch(r"[a-f0-9]{32}", start["run_id"])
+            or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
+                   for e in events if e["kind"] == "native_inspection_intent")):
+        raise Blocked("The signoff checkpoint is not settled or was already consumed")
+    source, replica, frozen, onboarding = baseline(runner.ledger, prior["project_id"])
+    image = digest(snapshot(replica))
+    if (str(source) != prior["original"] or str(replica) != prior["replica"]
+            or digest(onboarding) != prior["onboarding_sha256"] or not original_matches(source, frozen)
+            or image != checkpoint["source_sha256"] or image != end["replica_sha256"]):
+        raise Blocked("The original or signoff candidate has changed")
+    with _git(runner.ledger, source) as (git, _):
+        if _scan(source, git, frozen["local_examples"]) != frozen:
+            raise Blocked("Original Git inventory changed after onboarding")
+    path = runner.ledger.local_directory("recovery") / f"registered-signoff-{start['run_id']}.diff"
+    diff = _read_observation(path, MAX_DIFF * 4 + 1).decode("utf-8")
+    if len(diff) > MAX_DIFF or digest(diff) != checkpoint["diff_sha256"]:
+        raise Blocked("The signoff diff no longer matches the checkpoint")
+    review = checkpoint.get("review")
+    pending_roles = ("reviewer", "manager-final") if review is None else ("manager-final",)
+    if tokens < sum(prior["role_tokens"][role] for role in pending_roles):
+        raise Blocked("Additional budget must cover the remaining model role reservations")
+    resume = {k: checkpoint[k] for k in ("cycle", "criterion", "criteria_status", "changed", "diff_sha256")}
+    resume.update(mode="signoff", parent_run_id=start["run_id"], review=review,
+                  comparison=checkpoint.get("comparison"), parent_reported_tokens=end["known_reported_tokens"])
+    return ({**prior, "resume": resume, "replica_sha256": image, "ledger_head": head,
+             "expires": expires, "seconds": seconds, "tokens": tokens, "model_calls_max": len(pending_roles),
+             "files": end["changed"], "permissions": ["replica-read", "offline-shell", "pinned-verifier"],
+             "shell_roles": ["reviewer"], "graceful_stop": game_pilot.graceful_policy(followup=True)}, diff)
+
+
 def game_plan_remaining(rows):
     scope, end = rows[0]["scope"], rows[-1]
     return scope["seconds"] - ceil(end["elapsed_seconds"]), scope["tokens"] - end["known_reported_tokens"]
@@ -724,10 +821,10 @@ def _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tok
              "model_calls_max": prior["model_calls_max"] - 1}, plan)
 
 
-def review_resume(runner, *args):
+def review_resume(runner, *args, graceful=False):
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
-        return _resume_contract(runner, events, head, *args)[0]
+        return _resume_contract(runner, events, head, *args, graceful=graceful)[0]
 
 
 def verify_resume_candidate(runner, project, *, cancelled=lambda: False):
@@ -777,20 +874,34 @@ def _resume_remaining(session, diff):
     session.progress = status
     session.cycles_checked = count - 1
     session.changes = session.scope["files"]
-    _, review, _, _, comparison = _review_and_verify(session, count, key, diff, status)
+    session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
+                             "changed": resume["changed"], "diff": diff}
+    review = resume.get("review")
+    comparison = resume.get("comparison")
+    if review is None:
+        _, review, _, _, comparison = _review_and_verify(session, count, key, diff, status)
+    else:
+        session.signoff_state["review"] = review
+        if comparison is None:
+            _, comparison = _verify_signoff(session, count, key, status)
+        else:
+            session.signoff_state["comparison"] = comparison
+            session.progress = comparison["criteria"]
+            session.cycles_checked = count
     status = comparison["criteria"]
     expected = ("REWORK" if review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"}
                 or comparison["regressed"]
                 else "COMPLETED" if all(value == "VERIFIED" for value in status.values()) else "CONTINUE")
-    return _decide(session, count, key, review, comparison, expected)
+    final = _decide(session, count, key, review, comparison, expected)
+    return "GRACEFUL_STOP" if final == "CONTINUE" and getattr(session, "stop_reason", None) else final
 
 
-def run_resume(runner, *args, approval, cancelled=lambda: False):
-    return _run(runner, args, approval, cancelled, resume=True)
+def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False):
+    return _run(runner, args, approval, cancelled, resume=True, graceful=graceful)
 
 
-def run(runner, *args, approval, cancelled=lambda: False):
-    return _run(runner, args, approval, cancelled, resume=False)
+def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None):
+    return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits)
 
 
 def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False):
@@ -800,12 +911,12 @@ def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambd
                 game_limits=limits)
 
 
-def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None):
+def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False):
     from .runtime import require_admission
 
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
-        scope, diff = (_resume_contract(runner, events, head, *args) if resume
+        scope, diff = (_resume_contract(runner, events, head, *args, graceful=graceful) if resume
                        else (_contract(runner, events, head, *args, game=game, game_limits=game_limits), None))
         if cancelled() or digest(scope) != approval:
             raise Blocked("Registered development approval changed")
@@ -838,6 +949,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                                     "workspace": lab.name}, admission=require_admission)
             cleanup["preserve"] = True
             reason = None
+            session.signoff_state = {}
             try:
                 session.prepare()
                 if resume and scope["resume"].get("mode") == "after-manager-planning":
@@ -848,7 +960,13 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             except (Blocked, OSError, ValueError, KeyboardInterrupt) as error:
                 reason = "CANCELLED" if isinstance(error, KeyboardInterrupt) or cancelled() else str(error)
                 outcome = reason if reason in {"CANCELLED", "TIME_LIMIT", "TOKEN_LIMIT", "REQUEST_UNKNOWN",
-                                               "USAGE_UNKNOWN", "NO_PROGRESS"} else "BLOCKED"
+                                               "USAGE_UNKNOWN", "NO_PROGRESS", "GRACEFUL_STOP", "SIGNOFF_PENDING"} else "BLOCKED"
+                if outcome == "SIGNOFF_PENDING" and session.owned_verified:
+                    try:
+                        session.check_image()
+                        _save_signoff(session)
+                    except (Blocked, OSError, ValueError) as checkpoint_error:
+                        outcome, reason = "BLOCKED", str(checkpoint_error)
             if not session.owned_verified:
                 return {**fields, "outcome": "RECOVERY_REQUIRED", "owned_tree": "UNRESOLVED", "reason": reason}
             preserve = outcome in {"REQUEST_UNKNOWN", "USAGE_UNKNOWN", "TIME_LIMIT", "CANCELLED", "BLOCKED"}
@@ -862,6 +980,9 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                    "criteria_status": session.progress, "roles": session.phases,
                    "model_turns_dispatched": session.calls, "known_reported_tokens": session.usage,
                    "elapsed_seconds": round(monotonic() - session.started, 2),
+                   **({"stop_reason": session.stop_reason, "signoff_tokens": session.signoff_tokens,
+                       "session_token_overage": max(0, session.usage - scope["tokens"])}
+                      if "graceful_stop" in scope else {}),
                    "usage_complete": session.usage_complete, "owned_tree": "DRAINED",
                    "changed": getattr(session, "changes", []), "replica_sha256": session.source() if hasattr(session, "image") else None,
                    "staging_cleanup": cleanup}
