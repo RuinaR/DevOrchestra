@@ -9,9 +9,11 @@ Controller가 역할·복제본·승인·예산·세대를 고정하고, 선택�
 | Codex SDK | Node 기반 로컬 코딩·스트림·재개. Windows에서 0.167.0이 설치 CLI를 실행하는 것을 확인했다. 작업 폴더, 읽기/쓰기 및 승인 정책은 하위 CLI에 전달된다. 실제 구독 응답과 취소·사용량 회계는 미검증이다. |
 | App Server | 기존 Controller 소유 Job·stdio·승인·이벤트·정리 어댑터를 보존한다. 온라인 호스트 송신과 서버 내부 도구 사전 차단은 미입증이다. |
 | `codex exec` | 설치 Windows CLI의 JSONL·스키마·재개 옵션을 확인했다. 로컬 코딩은 CLI의 샌드박스·승인 정책을 사용한다. 독립 온라인 입장·회계·종료 어댑터는 준비되지 않았다. |
-| Sign in with ChatGPT 직접 호출 | 도구 없는 Manager 전용. 별도 앱 OAuth 동의, 공식 모델 조회 및 시험 프로젝트의 실제 계획 완료를 확인했다. 로컬 파일·빌드·GUI 도구는 제공하지 않는다. |
+| Sign in with ChatGPT 직접 호출 | 별도 앱 OAuth 동의와 공식 모델 조회를 사용하는 구독 텍스트 경로다. Controller가 승인된 파일 변경 계약과 독립 검증을 수행하며, 모델 호출 자체에는 파일·빌드·GUI 도구가 없다. |
 
 자동 기본 백엔드는 미선정이다. 기존 App Server 검토 명령은 호환성을 위해 남기며 다른 후보로 자동 폴백하지 않는다. VM은 선택적 강화 격리다.
+
+Windows MXC 명령 프로필의 파일·네트워크 권한, App Server 호스트의 제공자 송신, 앱·MCP 및 권한 확대는 별도 집행 지점이다. P2.111의 독립 Git 시험에서 MXC 명령의 소스 쓰기, Git 메타데이터와 테스트 파일 쓰기 거부, 외부 파일과 루프백 접근 거부, 테스트 종료를 관측했다. App Server의 권한 요청 RPC는 요청된 범위 중 승인한 부분을 응답할 수 있다. 호스트와 내장 도구의 실제 집행이 확인돼야 자동 역할을 입장시킨다. [Windows MXC](https://learn.chatgpt.com/docs/windows/windows-sandbox) · [App Server](https://learn.chatgpt.com/docs/app-server)
 
 ### 구독 Manager 실행
 

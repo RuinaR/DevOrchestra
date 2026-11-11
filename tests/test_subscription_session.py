@@ -10,6 +10,26 @@ from devorchestra import session_permissions, subscription_session
 
 
 class SubscriptionSessionTests(unittest.TestCase):
+    def test_wall_time_expiry_and_token_limit_gate_new_roles(self):
+        scope = {"project_id": "fixture-a", "seconds": 30, "tokens": 500, "replica_sha256": "initial",
+                 "expires": 2000}
+        with (patch.object(subscription_session, "monotonic", return_value=100) as clock,
+              patch.object(subscription_session, "time", return_value=1000) as wall):
+            session = subscription_session._Session(None, scope, "fixture", "approval", lambda: False)
+            session.phase = "developer"
+            clock.return_value = 122
+            budget = {"seconds": 60, "tokens": 1000}
+            session.limit(budget, "fixture-a", "developer")
+            self.assertEqual({"seconds": 8, "tokens": 500}, budget)
+            session.remaining = 0
+            with self.assertRaisesRegex(Blocked, "TOKEN_LIMIT"):
+                session.limit(budget, "fixture-a", "developer")
+            wall.return_value = 2000
+            self.assertEqual("APPROVAL_EXPIRED", session.stop_reason())
+            wall.return_value = 1000
+            clock.return_value = 130
+            self.assertEqual("TIME_LIMIT", session.stop_reason())
+
     def test_permissions_require_each_selected_verifier_operation(self):
         grants = session_permissions.contract(None, runtime=True, gui=True)["granted"]
         for excluded in ("owned-window-input", "owned-window-capture", "build-test"):
@@ -42,7 +62,7 @@ class SubscriptionSessionTests(unittest.TestCase):
             ledger.initialize()
             _, head = ledger.snapshot()
             scope = {"ledger_head": head, "replica_sha256": "initial", "seconds": 30, "tokens": 5000,
-                     "expires": 9999999999, "work_limit": 2,
+                     "expires": 9999999999, "work_limit": None,
                      "models": dict.fromkeys(("Manager", "Developer", "Reviewer"), "fixture")}
             calls = []
 
@@ -72,7 +92,7 @@ class SubscriptionSessionTests(unittest.TestCase):
                   patch.object(subscription_session.cycle, "_model_output", return_value={"decision": "NEXT"})):
                 approval = digest(scope)
                 result = subscription_session.run(Runner(ledger), "fixture-a", "fixture", 0, 30, 5000,
-                                                  0, {}, approval, cycles=2)
+                                                  0, {}, approval)
             expected = ["manager-planning", "developer", "reviewer", "verifier", "manager-final"]
             self.assertEqual([(phase, approval) for phase in expected * 2], calls)
             self.assertEqual(("COMPLETED", 2, 8),

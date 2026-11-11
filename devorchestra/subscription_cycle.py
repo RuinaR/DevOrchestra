@@ -184,7 +184,7 @@ def _prepare(runner, project, developer_run, phase, account, model, expires, spe
                             "rather than a reason to request a source edit. Use ACCEPT_FOR_VERIFICATION when "
                             "the diff needs no changes before that verification.")
     if phase == "manager-final":
-        scope["allow_next"] = bool(session and session.scope.get("work_limit", 1) > 1 and not supplemental)
+        scope["allow_next"] = bool(session and session.scope.get("work_limit") != 1 and not supplemental)
         if session and session.previous_cycle:
             context["previous_cycle"] = session.previous_cycle
         if session and (frozen := session.scope.get("gui_contract")):

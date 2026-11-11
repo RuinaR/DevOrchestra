@@ -16,14 +16,15 @@ from .replica_evidence import snapshot
 from . import csharp_sources, mxc_sdk_project, session_permissions
 
 
-def review(runner, project, account, expires, seconds, tokens, reworks, vectors, *, permissions=None, cycles=1):
+def review(runner, project, account, expires, seconds, tokens, reworks, vectors, *, permissions=None, cycles=None):
     from .runtime import require_admission
 
     if (type(expires) is not int or not time() < expires <= time() + 300
-            or type(seconds) is not int or not 1 <= seconds <= 300
-            or type(tokens) is not int or not 1 <= tokens <= 100_000
+            or (seconds is None and tokens is None)
+            or (seconds is not None and (type(seconds) is not int or not 1 <= seconds <= 300))
+            or (tokens is not None and (type(tokens) is not int or not 1 <= tokens <= 100_000))
             or type(reworks) is not int or not 0 <= reworks <= 5
-            or type(cycles) is not int or not 1 <= cycles <= 5):
+            or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 100))):
         raise Blocked("Invalid session expiry, time, token or rework limit")
     events, head = runner.ledger.snapshot()
     require_admission(events)
@@ -42,6 +43,8 @@ def review(runner, project, account, expires, seconds, tokens, reworks, vectors,
     data = catalog["projects"][project]["data"]
     setup = catalog["setups"].get(project)
     limits = catalog["global_budget"]
+    seconds = min(300, limits["seconds"], data["budget"]["seconds"]) if seconds is None else seconds
+    tokens = min(100_000, limits["tokens"], data["budget"]["tokens"]) if tokens is None else tokens
     if (seconds > min(limits["seconds"], data["budget"]["seconds"])
             or tokens > min(limits["tokens"], data["budget"]["tokens"])):
         raise Blocked("Session exceeds registered project or global limits")
@@ -163,7 +166,8 @@ class _Session:
         self.runner, self.scope = runner, scope
         self.id, self.approval = session_id, approval
         self.cancelled = cancelled
-        self.deadline = monotonic() + scope["seconds"]
+        self.started_at = monotonic()
+        self.deadline = self.started_at + scope["seconds"]
         self.remaining = scope["tokens"]
         self.reported = 0
         self.usage_complete = True
@@ -178,12 +182,29 @@ class _Session:
         return held_execution_slot()
 
     def stopped(self):
-        return self.cancelled() or monotonic() >= self.deadline or time() >= self.scope["expires"]
+        return self.stop_reason() is not None
+
+    def stop_reason(self):
+        if self.cancelled():
+            return "CANCELLED"
+        if monotonic() >= self.deadline:
+            return "TIME_LIMIT"
+        if time() >= self.scope["expires"]:
+            return "APPROVAL_EXPIRED"
+        return None
 
     def limit(self, budget, project, phase):
-        if self.stopped() or project != self.scope["project_id"] or phase != self.phase:
-            raise Blocked("Session phase, cancellation or deadline does not permit execution")
+        if reason := self.stop_reason():
+            raise Blocked(reason)
+        if project != self.scope["project_id"] or phase != self.phase:
+            raise Blocked("Session does not permit this project or role")
         self.check_permissions()
+        seconds = int(min(self.deadline - monotonic(), self.scope["expires"] - time()))
+        if seconds < 1:
+            raise Blocked("TIME_LIMIT")
+        if self.remaining <= 0 and phase != "verifier":
+            raise Blocked("TOKEN_LIMIT")
+        budget["seconds"] = min(budget["seconds"], seconds)
         budget["tokens"] = min(budget["tokens"], self.remaining)
 
     def check_permissions(self):
@@ -195,8 +216,8 @@ class _Session:
                 raise Blocked("Role requires permissions outside the approved contract")
 
     def check_scope(self):
-        if self.stopped():
-            raise Blocked("Session cancelled or expired")
+        if reason := self.stop_reason():
+            raise Blocked(reason)
         self.check_permissions()
         replica = Path(self.scope["replica"])
         if (digest(snapshot(replica)) != self.replica_sha256
@@ -213,29 +234,31 @@ class _Session:
             self.reported += receipt["usage"]
             self.remaining = max(0, self.scope["tokens"] - self.reported)
             if self.reported > self.scope["tokens"]:
-                raise Blocked("Session reported usage over budget")
+                raise Blocked("TOKEN_LIMIT")
         elif self.phase != "verifier":
             self.usage_complete = False
         if (receipt["outcome"] != "COMPLETED" or receipt.get("owned_tree") != "DRAINED"
                 or any(receipt.get(key) != value for key, value in self.binding().items())):
             if receipt.get("provider_usage_status") == "LIMIT_REACHED":
-                raise Blocked("ChatGPT usage limit paused requests. Review Settings → Usage and explicitly resume.")
+                raise Blocked("PROVIDER_LIMIT")
+            if receipt.get("outcome") == "UNKNOWN":
+                raise Blocked("REQUEST_UNKNOWN")
             if receipt.get("reason") == "Developer proposed no file change":
                 raise Blocked("NO_PROGRESS")
             raise Blocked("Session role did not settle successfully; no automatic retry")
         if self.phase != "verifier":
             if type(receipt["usage"]) is not int:
-                raise Blocked("Session reported usage unknown")
+                raise Blocked("USAGE_UNKNOWN")
 
 
 def run(runner, project, account, expires, seconds, tokens, reworks, vectors, approved, cancelled=lambda: False, *,
-        permissions=None, revoked=lambda: False, cycles=1, on_progress=lambda _progress: None):
+        permissions=None, revoked=lambda: False, cycles=None, on_progress=lambda _progress: None):
     from .runtime import native_unresolved, require_admission
 
     with execution_slot() as abandoned, ExitStack() as resources:
         events, head = runner._idle_diagnostic(abandoned)
         options = {"permissions": permissions} if permissions is not None else {}
-        if cycles != 1:
+        if cycles is not None:
             options["cycles"] = cycles
         scope = review(runner, project, account, expires, seconds, tokens, reworks, vectors, **options)
         if digest(scope) != approved or scope["ledger_head"] != head:
@@ -291,8 +314,8 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                                         models["Manager"], expires, None)
                         outcome = final["decision"]
                         if outcome == "CONTINUE":
-                            if cycle_count >= scope["work_limit"]:
-                                outcome = "NEED_APPROVAL"
+                            if scope["work_limit"] is not None and cycle_count >= scope["work_limit"]:
+                                outcome = "CYCLE_LIMIT"
                                 reason = "Cycle budget exhausted"
                                 break
                             session.previous_cycle = {"final": cycle._model_output(runner.ledger, final, "manager-final"),
@@ -333,13 +356,16 @@ def run(runner, project, account, expires, seconds, tokens, reworks, vectors, ap
                 session.rework = {"receipt": failure, "feedback": feedback}
         except (Blocked, KeyboardInterrupt) as error:
             reason = str(error) if isinstance(error, Blocked) else "CANCELLED"
-            outcome = ("CANCELLED" if cancelled() or isinstance(error, KeyboardInterrupt) else
-                       "TIME_LIMIT" if session.stopped() else "NO_PROGRESS" if reason == "NO_PROGRESS" else "BLOCKED")
+            outcome = ("CANCELLED" if isinstance(error, KeyboardInterrupt) else
+                       session.stop_reason() or (reason if reason in
+                                                 {"NO_PROGRESS", "TIME_LIMIT", "TOKEN_LIMIT", "PROVIDER_LIMIT",
+                                                  "REQUEST_UNKNOWN", "USAGE_UNKNOWN"} else "BLOCKED"))
         if revoked():
             outcome, reason = "PERMISSIONS_REVOKED", "Session permissions revoked by owner"
         current, tail = runner.ledger.snapshot()
         result = {**fields, "kind": "subscription_session_ended", "outcome": outcome, "reason": reason,
                   "roles": roles, "reworks": attempts, "cycle_count": cycle_count,
+                  "elapsed_seconds": round(monotonic() - session.started_at, 3),
                   "remaining_reported_tokens": session.remaining,
                   "used_reported_tokens": session.reported, "usage_complete": session.usage_complete,
                   "owned_tree": "UNRESOLVED" if native_unresolved(current) else "DRAINED",

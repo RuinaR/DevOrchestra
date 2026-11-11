@@ -1943,7 +1943,7 @@ class CommandCenter:
         row = ttk.Frame(panel)
         row.pack(fill="x")
         values = []
-        for name, default in (("초", 120), ("토큰", 12000), ("재작업", 2), ("최대 사이클", 1)):
+        for name, default in (("초", 120), ("토큰", 12000), ("재작업", 2), ("사이클 상한 (선택)", "")):
             ttk.Label(row, text=name).pack(side="left", padx=4)
             field = ttk.Entry(row, width=8)
             field.insert(0, str(default))
@@ -1983,7 +1983,10 @@ class CommandCenter:
             nonlocal future
             try:
                 spec = json.loads(vectors.get("1.0", "end"))
-                seconds, tokens, reworks, cycles = (int(field.get()) for field in values)
+                seconds, tokens = (int(field.get()) if field.get().strip() else None for field in values[:2])
+                reworks = int(values[2].get())
+                cycles = int(values[3].get()) if values[3].get().strip() else None
+                cycle_label = str(cycles) if cycles is not None else "시간·토큰 한도까지"
                 fields = self.controller, project_id, account, int(time()) + 300, seconds, tokens, reworks, spec
                 permissions = [key for key, choice in choices.items() if choice.get()]
                 scope = subscription_session.review(*fields, permissions=permissions, cycles=cycles)
@@ -1994,11 +1997,11 @@ class CommandCenter:
                             "검토된 WinForms 빌드·소유 창 조작·비공개 캡처" if scope.get("gui_contract")
                             else "파일별 고정 Python 벡터" if scope.get("batch") else "고정 Python 벡터")
             allowed = ", ".join(scope["writable_files"])
-            status.set(f"권한 검토 완료 · {len(permissions)}개 · 사이클 최대 {cycles}회")
+            status.set(f"권한 검토 완료 · {len(permissions)}개 · 사이클 {cycle_label}")
             if not self.confirm("통합 개발 세션 승인",
-                                f"{project_id} · {allowed} · {seconds}초 · {tokens} 토큰\n"
+                                f"{project_id} · {allowed} · {scope['seconds']}초 · {scope['tokens']} 토큰\n"
                                 f"목표: {scope['goal']}\n"
-                                f"복제본 {scope['replica']}\n사이클 최대 {cycles}회 · 재작업 최대 {reworks}회 · {verification}\n"
+                                f"복제본 {scope['replica']}\n사이클 {cycle_label} · 재작업 최대 {reworks}회 · {verification}\n"
                                 f"권한 · {', '.join(session_permissions.AVAILABLE[key] for key in permissions)}\n"
                                 "승인된 문맥과 지정한 소스를 OpenAI에 전송합니다. 모델 셸 권한은 없습니다.",
                                 parent=panel):
@@ -2031,7 +2034,8 @@ class CommandCenter:
                     if progress and not (revocation.is_set() or cancellation.is_set()):
                         role = {"manager-planning": "Manager 계획", "developer": "Developer",
                                 "reviewer": "Reviewer", "verifier": "Verifier", "manager-final": "Manager 최종 판정"}
-                        status.set(f"{progress['cycle']}/{cycles} 사이클 · {role[progress['phase']]} · "
+                        count = f"{progress['cycle']}/{cycles}" if cycles is not None else str(progress["cycle"])
+                        status.set(f"{count} 사이클 · {role[progress['phase']]} · "
                                    f"남은 토큰 {progress['remaining_tokens']} · 승인 {max(0, scope['expires'] - int(time()))}초")
                     panel.after(150, poll)
                     return
