@@ -8,7 +8,7 @@ import tomllib
 from .job_probe import CODEX_DEVELOPER_PROCESS_LIMIT
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
-from .mxc_host_probe import _args, _observe
+from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder
 from .native_command_probe import (
     ARCHIVE_SHA256, RELEASE_SHA256, SOURCE_NAMES, SUBTOTAL, TOTAL,
@@ -131,6 +131,7 @@ def _failure_evidence(stdout, stderr):
     output = (stdout + "\n" + stderr.decode("utf-8", errors="replace")).casefold()
     signals = {
         "MXC_PROCESS_QUOTA_1816": r"createprocessw failed with error code 1816",
+        "CODE_MODE_HOST_DISABLED": r"code mode is unavailable because code-mode host is disabled",
         "MODEL_UNAVAILABLE": r"model_not_found|model.{0,120}(?:not supported|not available|does not exist)",
         "PROVIDER_RATE_LIMIT": r"429 too many requests|rate limit exceeded|usage limit",
         "AUTH_REJECTED": r"401 unauthorized|403 forbidden|token refresh failed|not logged in",
@@ -257,22 +258,34 @@ def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT
                 argv = [*trial_flags(work), "exec", "--ignore-user-config", "--json", "--ephemeral",
                         "--model", model, "--cd", str(work), PROMPT]
                 exec_logs = logs("exec")
-                observed = _observe(binary, argv, work, exec_logs, environment, seconds=min(SECONDS, remaining), check=check,
-                                    output_limit=262144, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
+                process_result = "EXITED"
+                try:
+                    observed = _observe(binary, argv, work, exec_logs, environment, seconds=min(SECONDS, remaining),
+                                        check=check, output_limit=262144, encoding="utf-8",
+                                        process_limit=CODEX_DEVELOPER_PROCESS_LIMIT)
+                except OwnedMxcStopped:
+                    # This exception is raised only after the owned Job was drained.
+                    check()
+                    raw = _read_observation(exec_logs / "probe.stdout", 262145)
+                    observed = {"stdout": raw.decode("utf-8", errors="replace") if len(raw) <= 262144 else "",
+                                "exitCode": "UNKNOWN", "job_active": 0}
+                    process_result = "TERMINATED_AND_DRAINED"
                 result = {"status": "UNVERIFIED", "provider_response": "UNKNOWN", "provider_usage": "UNKNOWN",
-                          "exit_code": observed["exitCode"], "job_active": observed["job_active"]}
+                          "exit_code": observed["exitCode"], "job_active": observed["job_active"],
+                          "process_result": process_result,
+                          **_failure_evidence(observed["stdout"],
+                                              _read_observation(exec_logs / "probe.stderr", 65536))}
                 try:
                     result.update(_cli_evidence(observed["stdout"]))
                 except (KeyError, TypeError, ValueError):
-                    result.update(_failure_evidence(observed["stdout"],
-                                                    _read_observation(exec_logs / "probe.stderr", 65536)))
+                    pass
                 after = snapshot(work)
                 changed = sorted(name for name in before["files"].keys() | after["files"].keys()
                                  if before["files"].get(name) != after["files"].get(name))
                 intact = before["git"] == after["git"] and snapshot(original) == baseline
                 result.update(changed_paths_sha256=digest(changed), baseline_sha256=digest(before),
                               final_sha256=digest(after), original_and_git_unchanged=intact)
-                if intact and changed == sorted(SOURCE_NAMES):
+                if intact and changed == sorted(SOURCE_NAMES) and process_result == "EXITED":
                     git_env = {**verification_env, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "NUL",
                                "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
                     diff = _observe(_fixture_git_binary(),
@@ -285,10 +298,15 @@ def run_trial(ledger, archive, request, expires, approval=None, *, model=DEFAULT
                     result["independent_test_pass"] = (verified["exitCode"] == 0 and verified["stdout"].strip() == "11"
                                                        and not verified["stderr"] and snapshot(work) == after)
                 usage = result["provider_usage"]
+                if result["provider_response"] == "COMPLETED":
+                    result["status"] = "MODEL_RESPONSE_ONLY"
+                if type(usage) is dict:
+                    tokens = usage["input_tokens"] + usage["output_tokens"]
+                    result.update(provider_total_tokens=tokens, token_allowance_exceeded=tokens > TOKEN_ALLOWANCE)
                 if (result.get("independent_test_pass") and result.get("successful_fixture_command_sha256")
                         and result.get("git_diff_sha256")
                         and observed["exitCode"] == 0 and observed["job_active"] == 0 and type(usage) is dict
-                        and usage["input_tokens"] + usage["output_tokens"] <= TOKEN_ALLOWANCE):
+                        and not result["token_allowance_exceeded"]):
                     result["status"] = "REAL_PASS"
             _release_fixture_git_objects(work, original)
             cleanup["preserve"] = False
