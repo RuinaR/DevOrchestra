@@ -37,6 +37,12 @@ class RegisteredTrustTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"), "Requires signed local Windows tools")
 class RegisteredCycleTests(unittest.TestCase):
     def test_onboard_run_verify_and_review_original_write(self):
+        self._exercise(False)
+
+    def test_resume_settled_developer_without_repeating_model_calls(self):
+        self._exercise(True)
+
+    def _exercise(self, resume):
         approved = Path(__file__).resolve().parents[1] / ".ai-local" / "temp"
         with TemporaryDirectory(prefix="registered-test-", dir=approved) as folder:
             base = Path(folder)
@@ -49,14 +55,19 @@ class RegisteredCycleTests(unittest.TestCase):
             runner = Runner(ledger)
             (original / "formatting.py").write_text('GREETING = "old"\nSIGNOFF = "old"\n', encoding="utf-8")
             (original / "check.py").write_text(
-                'import sys\nimport formatting\nprint(getattr(formatting, sys.argv[1]))\n', encoding="utf-8")
+                ('import sys\nimport formatting, closing\n'
+                 'print(formatting.GREETING if sys.argv[1] == "GREETING" else closing.SIGNOFF)\n'
+                 if resume else 'import sys\nimport formatting\nprint(getattr(formatting, sys.argv[1]))\n'),
+                encoding="utf-8")
+            if resume:
+                (original / "closing.py").write_text('SIGNOFF = "old"\n', encoding="utf-8")
             (original / "README.md").write_text("Text formatting utility\n", encoding="utf-8")
             def git(*args):
                 subprocess.run(["git", *args], cwd=original, check=True, timeout=15, capture_output=True)
 
             git("init", "--template=")
             git("config", "core.autocrlf", "false")
-            git("add", "formatting.py", "check.py", "README.md")
+            git("add", ".")
             git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                 "commit", "--no-gpg-sign", "-m", "Existing formatting utility")
             (original / "README.md").write_text("User working change\n", encoding="utf-8")
@@ -72,7 +83,8 @@ class RegisteredCycleTests(unittest.TestCase):
                 keys[0]: {"args": ["-B", "check.py", "GREETING"], "stdout": "hello", "inputs": ["check.py"]},
                 keys[1]: {"args": ["-B", "check.py", "SIGNOFF"], "stdout": "goodbye", "inputs": ["check.py"]}}}
             params = ("registered-test", os.environ["DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"], int(time()) + 600,
-                      300, 270000, 2, ["formatting.py"], list(registered_cycle.PERMISSIONS), tests)
+                      300, 270000, 2, ["formatting.py", "closing.py"] if resume else ["formatting.py"],
+                      list(registered_cycle.PERMISSIONS), tests)
             calls = []
 
             def transport(binary, argv, work, logs, env, **options):
@@ -85,22 +97,47 @@ class RegisteredCycleTests(unittest.TestCase):
                 shell = "true" if phase in {"developer", "reviewer"} else "false"
                 self.assertIn(f"features.shell_tool={shell}", argv)
                 if phase == "developer":
-                    code = 'GREETING = "hello"\nSIGNOFF = "old"\n' if cycle == 1 else (
-                        'GREETING = "hello"\nSIGNOFF = "goodbye"\n')
-                    (work / "formatting.py").write_text(code, encoding="utf-8")
+                    if resume and cycle == 2:
+                        (work / "closing.py").write_text('SIGNOFF = "goodbye"\n', encoding="utf-8")
+                    else:
+                        code = 'GREETING = "hello"\nSIGNOFF = "old"\n' if cycle == 1 else (
+                            'GREETING = "hello"\nSIGNOFF = "goodbye"\n')
+                        (work / "formatting.py").write_text(code, encoding="utf-8")
                 message = {"manager-planning": json.dumps({"criterion": keys[cycle - 1], "plan": "Update the text"}),
                            "developer": "Edited", "reviewer": "ACCEPT — the diff meets the criterion.",
                            "manager-final": "CONTINUE — one check remains." if cycle == 1 else "COMPLETED"}[phase]
                 events = [{"type": "thread.started", "thread_id": "offline"}, {"type": "turn.started"},
                           {"type": "item.completed", "item": {"type": "agent_message", "text": message}},
-                          {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5}}]
+                          {"type": "turn.completed", "usage": {
+                              "input_tokens": 60000 if resume and (cycle, phase) == (2, "developer") else 100,
+                              "output_tokens": 5}}]
                 return {"stdout": "\n".join(map(json.dumps, events)), "exitCode": 0, "job_active": 0}
 
             with patch.object(native_cycle, "_observe", side_effect=transport), patch.object(
                     registered_cycle, "_diagnostic", return_value={"request_id": "offline"}):
                 scope = registered_cycle.review(runner, *params)
                 self.assertEqual(calls, [])
-                if os.environ.get("DEVORCHESTRA_REGISTERED_GUI_QA"):
+                if resume:
+                    stopped = registered_cycle.run(runner, *params, approval=digest(scope))
+                    self.assertEqual(stopped["outcome"], "TOKEN_LIMIT")
+                    args = ("registered-test", int(time()) + 600, 300, 110000)
+                    with self.assertRaisesRegex(Blocked, "No independent"):
+                        registered_cycle.review_resume(runner, *args)
+                    self.assertEqual(registered_cycle.verify_resume_candidate(runner, "registered-test")["verdict"],
+                                     "PASS")
+                    approval = registered_cycle.review_resume(runner, *args)
+                    self.assertEqual(approval["resume"]["changed"], ["closing.py"])
+                    candidate = replica / "closing.py"
+                    original_bytes = candidate.read_bytes()
+                    candidate.write_bytes(b'SIGNOFF = "tampered"\n')
+                    with self.assertRaises(Blocked):
+                        registered_cycle.run_resume(runner, *args, approval=digest(approval))
+                    candidate.write_bytes(original_bytes)
+                    result = registered_cycle.run_resume(runner, *args, approval=digest(approval))
+                    self.assertEqual(calls[-2:], [(2, "reviewer"), (2, "manager-final")])
+                    with self.assertRaises(Blocked):
+                        registered_cycle.run_resume(runner, *args, approval=digest(approval))
+                elif os.environ.get("DEVORCHESTRA_REGISTERED_GUI_QA"):
                     result = self._drive_gui(ledger, params)
                 else:
                     result = registered_cycle.run(runner, *params, approval=digest(scope))
@@ -114,7 +151,7 @@ class RegisteredCycleTests(unittest.TestCase):
             self.assertIn('"old"', (original / "formatting.py").read_text())
             self.assertEqual((original / "README.md").read_text(), "User working change\n")
             apply, patch_text = original_apply.review(runner, "registered-test", int(time()) + 120)
-            self.assertEqual(set(apply["paths"]), {"formatting.py"})
+            self.assertEqual(set(apply["paths"]), set(params[6]))
             self.assertIn('SIGNOFF = "goodbye"', patch_text)
 
     def _drive_gui(self, ledger, params):

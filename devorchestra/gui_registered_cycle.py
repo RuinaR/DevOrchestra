@@ -108,17 +108,22 @@ def show(center, project):
         else:
             panel.destroy()
 
-    def submit(args, approval=None):
+    def submit(args, approval=None, *, resume=False):
         nonlocal future, active
         future = Future()
         active = True
         button.configure(state="disabled")
+        resume_button.configure(state="disabled")
         state.set("승인 범위 확인 중" if approval is None else "Codex 개발 실행 중")
 
         def work():
             try:
-                result = (registered_cycle.review(runner, *args) if approval is None
-                          else registered_cycle.run(runner, *args, approval=approval, cancelled=cancelled.is_set))
+                if resume and approval is None:
+                    registered_cycle.verify_resume_candidate(runner, project, cancelled=cancelled.is_set)
+                review_fn = registered_cycle.review_resume if resume else registered_cycle.review
+                run_fn = registered_cycle.run_resume if resume else registered_cycle.run
+                result = (review_fn(runner, *args) if approval is None
+                          else run_fn(runner, *args, approval=approval, cancelled=cancelled.is_set))
                 future.set_result(result)
             except Exception as error:
                 future.set_exception(error)
@@ -134,6 +139,7 @@ def show(center, project):
                 return
             active = False
             button.configure(state="normal")
+            resume_button.configure(state="normal")
             error = future.exception()
             if error:
                 state.set(str(error))
@@ -144,6 +150,21 @@ def show(center, project):
                 return
             if cancelled.is_set():
                 state.set("검토 취소됨")
+                return
+            if resume:
+                checkpoint = result["resume"]
+                summary = (f"{project}\n복제본 {result['replica']}\n"
+                           f"재검토 대상: {', '.join(checkpoint['changed'])}\n"
+                           f"기존 사용량 {checkpoint['parent_reported_tokens']:,}토큰\n"
+                           f"추가 한도 {result['tokens']:,}토큰 / {result['seconds']}초\n"
+                           f"Reviewer {result['role_tokens']['reviewer']:,} / "
+                           f"최종 Manager {result['role_tokens']['manager-final']:,}토큰\n"
+                           "Reviewer → 독립 Verifier → 최종 Manager만 실행합니다. "
+                           "모델 최대 2회, Developer 재호출과 원본 반영은 없습니다.")
+                if center.confirm("추가 예산 및 중단 작업 재개 승인", summary, parent=panel):
+                    submit(args, digest(result), resume=True)
+                else:
+                    state.set("재개 승인 취소됨")
                 return
             checks = "\n".join(f"{key} · {row['args']} → {row['stdout']}"
                                for key, row in result["verifier"]["checks"].items())
@@ -177,10 +198,21 @@ def show(center, project):
         cancelled.clear()
         submit(args)
 
+    def resume():
+        try:
+            args = (project, int(time()) + 1700, int(entries["seconds"].get()), int(entries["tokens"].get()))
+        except ValueError:
+            state.set("추가 시간과 토큰 한도를 숫자로 입력하세요.")
+            return
+        cancelled.clear()
+        submit(args, resume=True)
+
     buttons = ttk.Frame(panel)
     buttons.pack(fill="x")
     button = ttk.Button(buttons, text="세션 검토 및 시작", command=start)
     button.pack(side="left")
+    resume_button = ttk.Button(buttons, text="중단 작업 재개 검토", command=resume)
+    resume_button.pack(side="left")
     ttk.Button(buttons, text="닫기 / 중단", command=close).pack(side="right")
     ttk.Button(buttons, text="원본 반영 검토", command=lambda: center.original_apply_panel(project)).pack(side="left")
     panel.protocol("WM_DELETE_WINDOW", close)
