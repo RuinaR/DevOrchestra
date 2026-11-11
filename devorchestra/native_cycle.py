@@ -1,4 +1,5 @@
 """One approval for a bounded, sequential native Codex fixture session."""
+from difflib import unified_diff
 from pathlib import Path
 import re
 from time import monotonic, time
@@ -125,7 +126,9 @@ def _execute_cycles(scope, role, verify, source, evidence):
                          "Do not install, use Git write commands or use network.")
         current = source()
         reviewed = role(number, "reviewer", next_task,
-                        f"Independently review {task['text']} against this actual Git diff:\n{developed['diff']}\n"
+                        f"Independently review {task['text']} using the diff from this cycle's starting revision. "
+                        f"Criteria at cycle entry: {previous}. Earlier verified changes are part of that baseline.\n"
+                        f"{developed['diff']}\n"
                         "Reply exactly ACCEPT, or REWORK followed by a concrete finding on one line.")
         decision = reviewed["message"]
         if decision != "ACCEPT" and not re.fullmatch(r"REWORK [^\r\n]{1,220}", decision):
@@ -324,6 +327,8 @@ class _FixtureSession:
         if self.scope["tokens"] - self.usage < limit or self.calls >= self.scope["model_calls_max"]:
             raise Blocked("TOKEN_LIMIT")
         writable = phase == "developer"
+        task = TASKS[target]
+        before = self.fixture_lines(task["file"]) if writable else None
         instructions = public_instruction(phase)
         if instructions["sha256"] != self.scope["instructions"][phase]:
             raise Blocked("Approved role instructions changed")
@@ -359,7 +364,6 @@ class _FixtureSession:
         self.owned_verified = result["job_active"] == 0
         if not self.owned_verified:
             raise Blocked("Owned Job is unresolved")
-        task = TASKS[target]
         stderr = role_log / "probe.stderr"
         details = _failure_evidence(result["stdout"], _read_observation(stderr, 65536) if stderr.is_file() else b"")
         try:
@@ -389,17 +393,26 @@ class _FixtureSession:
             raise Blocked(outcome)
         self.check()
         if writable:
-            response["diff"] = self.developer_diff(cycle, task)
+            response["diff"] = self.developer_diff(cycle, task, before)
         else:
             self.check_image()
         response["message"] = message.strip()
         return response
 
-    def developer_diff(self, cycle, task):
+    def fixture_lines(self, filename):
+        raw = _read_observation(self.work / filename, 513)
+        if len(raw) > 512 or not raw.isascii():
+            raise Blocked("Fixture source is outside the bounded text contract")
+        return raw.decode("ascii").replace("\r\n", "\n").splitlines(keepends=True)
+
+    def developer_diff(self, cycle, task, before):
         updated = snapshot(self.work)
         if snapshot(self.original) != self.original_image:
             raise Blocked("Protected fixture changed")
         changed = changes(self.image, updated, {task["file"]}) if self.image != updated else {}
+        filename = task["file"]
+        cycle_diff = "".join(unified_diff(before, self.fixture_lines(filename),
+                                          fromfile=f"a/{filename}", tofile=f"b/{filename}"))
         env = {**self.verify_env, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "NUL",
                "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
         self.check()
@@ -411,8 +424,9 @@ class _FixtureSession:
             raise Blocked("Cannot bind Git diff to the observed revision")
         self.image = updated
         self.record("native_inspection_developer_diff", cycle=cycle, changed=changed,
-                    source_sha256=self.source(), git_diff_sha256=digest(result["stdout"]))
-        return result["stdout"]
+                    source_sha256=self.source(), git_diff_sha256=digest(result["stdout"]),
+                    cycle_diff_sha256=digest(cycle_diff))
+        return cycle_diff
 
 
 def run(ledger, archive, request, expires, seconds, tokens, cycles, approval=None, *, cancelled=lambda: False):

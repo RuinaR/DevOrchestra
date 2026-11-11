@@ -69,6 +69,10 @@ class NativeCycleTests(unittest.TestCase):
             if phase == "manager-final" and target == "A":
                 self.assertIn("Independent check passed for this feature: True", argv[-1])
                 self.assertIn("Other features pending a later cycle: ['B']", argv[-1])
+            if phase == "reviewer" and target == "B":
+                self.assertIn("--- a/total.cmd", argv[-1])
+                self.assertIn("+++ b/total.cmd", argv[-1])
+                self.assertNotIn("+++ b/subtotal.cmd", argv[-1])
             rows.append({"type": "item.completed", "item": {"type": "agent_message", "text": message}})
             rows.append({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5,
                                                                "cached_input_tokens": 20}})
