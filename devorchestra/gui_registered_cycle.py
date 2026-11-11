@@ -46,7 +46,8 @@ def show(center, project):
     entries = {}
     for index, (key, label, default) in enumerate((
             ("archive", "공식 Codex ZIP", ""), ("files", "수정 파일 경로 (쉼표 구분)", ""),
-            ("seconds", "초", "960"), ("tokens", "토큰", "270000"), ("cycles", "사이클 상한", "2"))):
+            ("seconds", "초", "960"), ("tokens", "토큰", "270000"), ("cycles", "사이클 상한", "2"),
+            ("manager_tokens", "Manager 토큰 / 호출", str(registered_cycle.ROLE_TOKENS["manager-planning"])))):
         ttk.Label(inputs, text=label).grid(row=index, column=0, sticky="w")
         entry = entries[key] = ttk.Entry(inputs)
         entry.insert(0, default)
@@ -168,7 +169,8 @@ def show(center, project):
             args = (project, values["archive"], int(time()) + 1700, int(values["seconds"]), int(values["tokens"]),
                     int(values["cycles"]) if values["cycles"] else None,
                     [name.strip() for name in values["files"].split(",") if name.strip()],
-                    [key for key, variable in grants.items() if variable.get()], json.loads(spec.get("1.0", "end")))
+                    [key for key, variable in grants.items() if variable.get()], json.loads(spec.get("1.0", "end")),
+                    int(values["manager_tokens"]))
         except ValueError as error:
             state.set(str(error))
             return

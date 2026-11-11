@@ -63,11 +63,15 @@ def _tools(spec, criteria, image, writable):
             "checks": checks}
 
 
-def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec):
+def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
+              manager_tokens=ROLE_TOKENS["manager-planning"]):
     if (type(expires) is not int or not time() < expires <= time() + 1800 or type(seconds) is not int
             or not 60 <= seconds <= 1500 or type(tokens) is not int or not 60000 <= tokens <= 400000
             or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50))):
         raise Blocked("Invalid registered session time, token or cycle limit")
+    if type(manager_tokens) is not int or not 1 <= manager_tokens <= min(tokens, 60000):
+        raise Blocked("Invalid per-call Manager token limit")
+    role_tokens = {**ROLE_TOKENS, "manager-planning": manager_tokens, "manager-final": manager_tokens}
     if sorted(permissions) != sorted(PERMISSIONS):
         raise Blocked("Approve the required replica, offline shell and Verifier permissions")
     ledger = runner.ledger
@@ -121,7 +125,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "shell_roles": list(SHELL_ROLES),
             "instructions": {phase: public_instruction(phase)["sha256"] for phase in ROLES},
             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles,
-            "role_seconds": 120, "role_tokens": ROLE_TOKENS, "model_calls_max": cycles * 4 if cycles else tokens,
+            "role_seconds": 120, "role_tokens": role_tokens, "model_calls_max": cycles * 4 if cycles else tokens,
             "ledger_head": head, "network": "COMMANDS_OFF", "install": False, "original_apply": False}
 
 
