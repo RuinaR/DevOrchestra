@@ -296,16 +296,17 @@ class _FixtureSession:
             raise Blocked("SIGNOFF_PENDING")
         return True
 
-    def progress_check(self, phase, started, role_log, output_limit, *, report=None):
+    def progress_check(self, phase, started, role_log, output_limit, *, report=None, settle_image_exit=False):
         policy = self.scope.get("graceful_stop")
         role_soft = self.scope["role_deadlines"][phase] if policy else None
         last_size, last_progress = 0, started
         complete_lines = 0
+        settled_since = None
         active = set()
         path = role_log / "probe.stdout"
 
         def check():
-            nonlocal last_size, last_progress, complete_lines
+            nonlocal last_size, last_progress, complete_lines, settled_since
             self.check()
             now = monotonic()
             if policy:
@@ -317,7 +318,11 @@ class _FixtureSession:
                 raise Blocked("MODEL_EVENT_LIMIT")
             if size != last_size:
                 last_size = size
-                lines = _read_observation(path, output_limit + 1).split(b"\n")
+                raw = _read_observation(path, output_limit + 1)
+                lines = raw.split(b"\n")
+                previous_settlement = settled_since
+                settled_since = None
+                terminal = False
                 for line in lines[complete_lines:-1]:
                     try:
                         event = json.loads(line)
@@ -326,6 +331,7 @@ class _FixtureSession:
                     if not isinstance(event, dict):
                         continue
                     kind = event.get("type")
+                    terminal |= kind == "turn.completed"
                     item = event.get("item", {})
                     if kind in {"thread.started", "turn.started", "turn.completed", "turn.failed",
                                 "item.started", "item.updated", "item.completed"}:
@@ -340,6 +346,15 @@ class _FixtureSession:
                         if activity:
                             report(activity)
                 complete_lines = len(lines) - 1
+                if settle_image_exit and (terminal or previous_settlement is not None):
+                    try:
+                        settled = _cli_evidence(raw.decode("utf-8"), command_pattern=r"(?!)", retain_message=True)
+                        if isinstance(settled["provider_usage"], dict) and not settled["command_events"]:
+                            settled_since = now if previous_settlement is None else previous_settlement
+                    except (ValueError, TypeError, KeyError, UnicodeError):
+                        pass
+            if settled_since is not None and now - settled_since >= 15:
+                raise Blocked("MODEL_SETTLED_EXIT_DELAY")
             if policy and now - last_progress >= policy["tool_idle_seconds" if active else "idle_seconds"]:
                 raise Blocked("MODEL_IDLE_TIMEOUT")
         return check
@@ -532,8 +547,9 @@ class _FixtureSession:
             timeout = self.seconds(phase)
         activity = getattr(self, "activity", None)
         report = (lambda label: activity(cycle, phase, label)) if activity else None
-        observed_check = (self.progress_check(phase, role_started, role_log, output_limit, report=report)
-                          if graceful or report else self.check)
+        observed_check = (self.progress_check(phase, role_started, role_log, output_limit, report=report,
+                                              settle_image_exit=bool(images))
+                          if graceful or report or images else self.check)
         if operation_check is not None:
             normal_check = observed_check
 
@@ -560,10 +576,14 @@ class _FixtureSession:
             self.owned_verified = True
             process_result = "TERMINATED_AND_DRAINED"
             result = {"stdout": "", "exitCode": None, "job_active": 0}
-            if stop_cause == "MXC probe timeout" or (graceful and stop_cause == "MODEL_IDLE_TIMEOUT"):
+            expired_image_turn = bool(images) and stop_cause in {"TIME_LIMIT", "APPROVAL_EXPIRED"}
+            if (stop_cause in {"MXC probe timeout", "MODEL_SETTLED_EXIT_DELAY"}
+                    or (graceful and stop_cause == "MODEL_IDLE_TIMEOUT") or expired_image_turn):
                 # _observe raises this only after proving that the owned Job is empty.
                 try:
-                    self.check()
+                    # Retain settled accounting at expiry. The post-receipt check still denies input.
+                    if not expired_image_turn:
+                        self.check()
                     if not writable:
                         self.check_image()
                     raw = _read_observation(role_log / "probe.stdout", output_limit + 1)

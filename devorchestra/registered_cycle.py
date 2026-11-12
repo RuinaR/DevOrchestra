@@ -1099,6 +1099,17 @@ def _save_signoff(session):
                    source_sha256=session.source(), diff_sha256=digest(diff))
 
 
+def _settled_signoff_process(intent, role):
+    if (role.get("phase") not in {"reviewer", "manager-final"} or role.get("outcome") != "COMPLETED"
+            or role.get("owned_tree") != "DRAINED"):
+        return False
+    if role.get("process_result") == "EXITED" and role.get("exit_code") == 0:
+        return True
+    return (role["phase"] == "reviewer" and bool(intent.get("image_evidence")) and role.get("play_step") is None
+            and role.get("process_result") == "TERMINATED_AND_DRAINED"
+            and role.get("process_stop_reason") == "MODEL_SETTLED_EXIT_DELAY")
+
+
 def _save_postprocess(session, error):
     if not session.owned_verified or not session.usage_complete or not session.signoff_state:
         raise Blocked("역할 응답 또는 소유 자원 상태가 확정되지 않았습니다.")
@@ -1110,9 +1121,7 @@ def _save_postprocess(session, error):
                 and "provider_usage" in row)
     intent = next(row for row in reversed(rows) if row["kind"] == "native_inspection_role_intent"
                   and "role_call" in row)
-    if (rows[0]["run_id"] != session.fields["run_id"] or role["phase"] not in {"reviewer", "manager-final"}
-            or role.get("outcome") != "COMPLETED" or role.get("process_result") != "EXITED"
-            or role.get("exit_code") != 0 or role.get("owned_tree") != "DRAINED"
+    if (rows[0]["run_id"] != session.fields["run_id"] or not _settled_signoff_process(intent, role)
             or intent.get("source_sha256") != session.source()
             or any(role[key] != intent[key] for key in ("cycle", "phase", "target"))
             or (role["cycle"], role["target"]) != (session.signoff_state["cycle"], session.signoff_state["criterion"])):
@@ -2013,9 +2022,7 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
                    for row in results) != end["known_reported_tokens"]):
         raise Blocked("기존 역할 호출 수와 확정 사용량을 대조할 수 없습니다.")
     intent, role = intents[-1], results[-1]
-    if (role["phase"] not in {"reviewer", "manager-final"} or role.get("outcome") != "COMPLETED"
-            or role.get("process_result") != "EXITED" or role.get("exit_code") != 0
-            or role.get("owned_tree") != "DRAINED" or role.get("target") not in prior["criteria"]
+    if (not _settled_signoff_process(intent, role) or role.get("target") not in prior["criteria"]
             or any(role[key] != intent[key] for key in ("cycle", "phase", "target"))
             or intent["source_sha256"] != digest(image)
             or any(row.get("approval_sha256") != start["approval_sha256"] for row in (intent, role))):

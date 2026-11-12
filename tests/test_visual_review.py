@@ -12,6 +12,67 @@ from devorchestra.native_developer_trial import _exec_argv
 
 
 class VisualReviewTests(unittest.TestCase):
+    def test_image_dispatch_keeps_settled_response_after_owned_job_recovery(self):
+        from devorchestra.mxc_host_probe import OwnedMxcStopped
+
+        instruction = public_instruction("reviewer")
+        with TemporaryDirectory() as directory:
+            work = Path(directory)
+
+            def logs(label):
+                path = work / label
+                path.mkdir()
+                return path
+
+            session = SimpleNamespace(check=Mock(), check_image=Mock(), calls=0, usage=0, record=Mock(), phases=[],
+                                      source=lambda: "source", logs=logs, seconds=lambda _: 60, env={},
+                                      progress_check=Mock(),
+                                      scope={"role_tokens": {"reviewer": 100}, "model_calls_max": 1,
+                                             "tokens": 100, "model": "test", "visual_review": True,
+                                             "instructions": {"reviewer": instruction["sha256"]}},
+                                      binary=work / "codex.exe", work=work)
+
+            def recovered(_binary, _argv, _work, logs, _env, **_options):
+                rows = [{"type": "thread.started", "thread_id": "fixture"}, {"type": "turn.started"},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": "settled"}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 15, "output_tokens": 2}}]
+                (logs / "probe.stdout").write_text("\n".join(map(dumps, rows)) + "\n", encoding="utf-8")
+                raise OwnedMxcStopped("MODEL_SETTLED_EXIT_DELAY")
+
+            with patch.object(native_cycle, "_observe", side_effect=recovered):
+                response, _ = native_cycle._FixtureSession.dispatch(
+                    session, 1, "reviewer", "C1", "Inspect the image", shell_tools=False,
+                    images=(work / "F1.png",), image_evidence=({"id": "F1"},))
+        self.assertEqual("settled", response["message"])
+        self.assertEqual(17, session.usage)
+        self.assertTrue(session.owned_verified)
+        self.assertEqual("TERMINATED_AND_DRAINED", session.phases[0]["process_result"])
+        self.assertEqual("MODEL_SETTLED_EXIT_DELAY", session.phases[0]["process_stop_reason"])
+
+    def test_image_turn_reclaims_slow_exit_only_with_settled_usage_and_response(self):
+        with TemporaryDirectory() as directory:
+            log = Path(directory)
+            stream = log / "probe.stdout"
+            session = SimpleNamespace(scope={}, check=Mock())
+            check = native_cycle._FixtureSession.progress_check(session, "reviewer", 0, log, 4096,
+                                                               settle_image_exit=True)
+            events = [{"type": "thread.started", "thread_id": "fixture"}, {"type": "turn.started"},
+                      {"type": "item.completed", "item": {"type": "agent_message", "text": "settled"}},
+                      {"type": "turn.completed", "usage": {"input_tokens": 15, "output_tokens": 2}}]
+            stream.write_text("\n".join(map(dumps, events[:-1])) + "\n", encoding="utf-8")
+            with patch.object(native_cycle, "monotonic", return_value=100):
+                check()
+            stream.write_text("\n".join(map(dumps, events)) + "\n", encoding="utf-8")
+            with patch.object(native_cycle, "monotonic", side_effect=[101, 115, 116]):
+                check()
+                check()
+                with self.assertRaisesRegex(Blocked, "MODEL_SETTLED_EXIT_DELAY"):
+                    check()
+            stream.write_text("\n".join(map(dumps, events + [{"type": "error"}])) + "\n", encoding="utf-8")
+            with patch.object(native_cycle, "monotonic", side_effect=[120, 150]):
+                check()
+                check()
+
     def test_fresh_resume_approval_updates_instructions_without_changing_checkpoint(self):
         saved = {"mode": "postprocess", "saved_response": {"message_sha256": "old-response"}}
         scope = {"instructions": {role: public_instruction(role)["sha256"] for role in registered_cycle.ROLES},
@@ -58,6 +119,7 @@ class VisualReviewTests(unittest.TestCase):
         instruction = public_instruction("reviewer")
         session = SimpleNamespace(check=Mock(), check_image=Mock(), calls=0, usage=0, record=Mock(),
                                   source=lambda: "source", logs=lambda _: Path.cwd(), seconds=lambda _: 10,
+                                  progress_check=Mock(),
                                   scope={"role_tokens": {"reviewer": 100}, "model_calls_max": 1,
                                          "tokens": 100, "model": "test", "visual_review": True,
                                          "instructions": {"reviewer": instruction["sha256"]}},
