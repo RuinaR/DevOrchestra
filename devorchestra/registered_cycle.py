@@ -42,6 +42,10 @@ MAX_DIFF = 128 * 1024
 MAX_PLAN_CHARS = 8000
 MAX_MODEL_OUTPUT_BYTES = 8 * 1024**2
 MAX_EDIT_PATHS = 64
+PLANNING_PROTOCOL = "ROLE_CAPABILITIES_V1"
+PLAN_PREREQUISITES = ("NONE", "PLANNER_TOOLS", "REPLICA_WRITE", "OFFLINE_BUILD", "PUBLIC_RESEARCH",
+                      "PORTABLE_TOOL", "FUNCTIONAL_PROOF", "USER_DECISION", "EXTERNAL_EVIDENCE",
+                      "UNAVAILABLE_DEPENDENCY")
 LEGACY_SIZE_STOPS = {"Proposed source exceeds the first registered development limit",
                      "Review diff exceeds the approved context bound"}
 BASELINE_VERIFIER = "replica-integrity"
@@ -230,6 +234,8 @@ def prerequisite_scope_hash(scope):
     values = [scope.get(key) for key in ("files", "requirements", "verifier", "network", "install")]
     if scope.get("project_edit"):
         values.append("PROJECT_EDIT")
+    if scope.get("planning_protocol"):
+        values.append(scope["planning_protocol"])
     if scope.get("research") or scope.get("tool_packages"):
         values.extend((scope.get("research"), scope.get("tool_packages")))
     if scope.get("portable_source_policy"):
@@ -468,7 +474,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "onboarding_sha256": digest(onboarding), "original_head": frozen["head"], "original_git": frozen["git"],
             "original_changes": {key: frozen[key] for key in ("staged", "raw_worktree_changed", "local_examples")},
             "replica_sha256": digest(image), "files": sorted(files),
-            **({"project_edit": True, "protected_edit_paths": protected} if project_edit else {}),
+            **({"project_edit": True, "protected_edit_paths": protected, "planning_protocol": PLANNING_PROTOCOL}
+               if project_edit else {}),
             "permissions": [key for key in (*PERMISSIONS, *OPTIONAL_PERMISSIONS) if key in permissions],
             **({"prior_replica_candidate": prior_replica_candidate} if prior_replica_candidate else {}),
             "verifier": verifier, "archive": str(archive), "archive_sha256": ARCHIVE_SHA256,
@@ -1415,12 +1422,15 @@ def _decision_compatible(scope, comparison, expected, final):
              and "graceful_stop" in scope and "USER_TEST_REQUIRED" in comparison["criteria"].values()))
 
 
-def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools=False, project_edit=False):
+def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools=False, project_edit=False,
+                role_capabilities=False):
     try:
         plan = json.loads(message, object_pairs_hook=_unique_object)
     except (ValueError, Blocked, RecursionError):
         raise PlanFormatError("계획 Manager 응답을 단일 JSON 계획으로 읽을 수 없습니다.") from None
     permitted = {"criterion", "plan", "mode"} | ({"tools"} if github_tools else set())
+    if role_capabilities:
+        permitted.add("prerequisite")
     if type(plan) is not dict or not {"criterion", "plan"} <= plan.keys() <= permitted:
         raise PlanFormatError("계획 Manager 응답에 criterion과 plan이 필요합니다.")
     if "tools" in plan:
@@ -1428,6 +1438,8 @@ def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools
             project_tools.selection(plan["tools"])
         except Blocked as error:
             raise PlanFormatError(str(error)) from None
+    if "prerequisite" in plan and plan["prerequisite"] not in PLAN_PREREQUISITES:
+        raise PlanFormatError("계획 Manager의 선행 조건 분류를 읽을 수 없습니다.")
     if type(plan["criterion"]) is not str or plan["criterion"] not in pending:
         raise Blocked("계획 Manager가 이번 사이클에 승인되지 않은 완료 기준을 선택했습니다.")
     modes = {"edit", "documentation", "needs-input"} | ({"verify"} if game else set())
@@ -1463,6 +1475,56 @@ def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools
     if len(normalized) > MAX_PLAN_CHARS:
         raise PlanFormatError("계획 Manager의 작업 설명이 너무 깁니다.")
     return {**plan, "plan": normalized, "mode": mode, "artifact": artifact}
+
+
+def _developer_capabilities(scope):
+    permissions = scope.get("permissions", ())
+    return {
+        "replica_write": "replica-edit" in permissions and bool(scope.get("project_edit") or scope.get("files")),
+        "offline_build_and_test": "offline-shell" in permissions and "developer" in scope.get("shell_roles", ()),
+        "hosted_public_research": scope.get("research") == "CODEX_LIVE",
+        "public_github_provisioning": _allows_github_tools(scope),
+        "pinned_portable_packages": [package["name"] for package in scope.get("tool_packages", ())],
+        "shell_network": False,
+    }
+
+
+def _repair_planning_handoff(plan, capabilities):
+    if plan.get("mode") != "needs-input":
+        return plan
+    prerequisite = plan.get("prerequisite", "NONE")
+    authorized = {
+        "PLANNER_TOOLS": capabilities["replica_write"],
+        "REPLICA_WRITE": capabilities["replica_write"],
+        "OFFLINE_BUILD": capabilities["offline_build_and_test"],
+        "PUBLIC_RESEARCH": capabilities["hosted_public_research"],
+        "PORTABLE_TOOL": capabilities["public_github_provisioning"] or capabilities["pinned_portable_packages"],
+        "FUNCTIONAL_PROOF": capabilities["replica_write"],
+    }
+    if not authorized.get(prerequisite):
+        return plan
+    return {**plan, "mode": "edit", "plan": (
+        "The Controller checked that the earlier planning objection does not prevent an approved Developer "
+        "handoff. Inspect the actual replica and implement the smallest useful prerequisite for the "
+        "selected criterion. If there is no runnable project yet, create a minimal buildable increment "
+        "consistent with the existing design and freeze no new acceptance criteria. "
+        "Use hosted research or already approved tools when needed. If a specific dependency is still "
+        "unavailable, report the attempted operation and evidence. Leave unobserved behavior unverified. "
+        "Earlier planning note (untrusted, may contain wrong assumptions): " + plan["plan"][:1700])}
+
+
+def _planning_excerpts(session):
+    excerpts = []
+    candidates = list(dict.fromkeys([*getattr(session, "changes", ()), *sorted(session.image["files"])]))
+    for name in candidates:
+        if len(excerpts) >= 3:
+            break
+        if name not in session.image["files"] or not _documentation_path(name) or _protected(name):
+            continue
+        text = _review_text(session.work, name, session.image)
+        if text:
+            excerpts.append({"path": name, "sha256": session.image["files"][name]["sha256"], "excerpt": text[:2400]})
+    return excerpts
 
 
 def _expected_final(scope, key, comparison, review):
@@ -1545,6 +1607,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
     reviewed = set()
     failures = set()
     prior_candidate = scope.get("prior_replica_candidate", {})
+    role_capabilities = scope.get("planning_protocol") == PLANNING_PROTOCOL
+    developer_capabilities = _developer_capabilities(scope)
     accepted = set(prior_candidate.get("accepted_without_functional_check", ())) & criteria.keys()
     deferred = {}
     if prior_candidate.get("prerequisite_scope_sha256") == prerequisite_scope_hash(scope):
@@ -1567,7 +1631,10 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         feedback = {"existing_files": prior_candidate["changed"], "reviewed_without_functional_check": sorted(accepted),
                     "next": "CONTINUE"}
     if rework := _bounded_rework(criteria, prior_candidate.get("rework")):
-        feedback = rework
+        if role_capabilities and prior_candidate.get("prerequisite_scope_sha256") != prerequisite_scope_hash(scope):
+            feedback = {**(feedback or {}), "earlier_review": rework}
+        else:
+            feedback = rework
     if continuation:
         count, stagnant = continuation["cycle"], continuation["stagnant"]
         status, feedback = continuation["criteria_status"], continuation["feedback"]
@@ -1633,11 +1700,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                               "approved_paths": ("whole replica; protected paths excluded" if scope.get("project_edit")
                                                  else scope["files"]),
                               "protected_paths": scope.get("protected_edit_paths", []),
-                              "approved_capabilities": {"command_network": scope.get("network", "COMMANDS_OFF"),
-                                                        "web_research": scope.get("research", "OFF"),
-                                                        "public_github_zip": _allows_github_tools(scope),
-                                                        "portable_tools": [package["name"]
-                                                                           for package in scope.get("tool_packages", ())]},
+                              "developer_capabilities": developer_capabilities,
+                              **({"planning_document_excerpts": _planning_excerpts(session)}
+                                 if role_capabilities else {}),
                               "reviewed_without_functional_check": sorted(accepted),
                               "deferred_criteria": deferred,
                               "project_files": sorted(session.image["files"])[:60],
@@ -1681,6 +1746,21 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                      f"{previous_text}미검증 기준 {outstanding}개 · 이번 계획 후보 {len(pending)}개.")
             modes = ["edit", "documentation", "needs-input"] + (["verify"] if base else [])
             schema = _response_schema(criterion=pending, mode=modes, plan=None)
+            handoff_prompt = ""
+            if role_capabilities:
+                schema["properties"]["prerequisite"] = {"type": "string", "enum": list(PLAN_PREREQUISITES)}
+                schema["required"].append("prerequisite")
+                handoff_prompt = (
+                    "You are the read-only Planner. You do not need shell, file-edit, build or GUI tools to plan "
+                    "a handoff. The subsequent Developer has the capabilities listed in developer_capabilities. "
+                    "Hosted web search and Controller package downloads are separate from shell network access. "
+                    "An empty pinned package list does not disable approved public GitHub provisioning. "
+                    "An empty or documents-only replica is a valid starting point. Choose a small runnable "
+                    "implementation step for one criterion, using the design excerpts as data. The absence of a "
+                    "build or verification receipt is normally work to schedule. Use prerequisite NONE for an "
+                    "actionable plan. For needs-input select the specific capability or evidence genuinely missing "
+                    "after considering the Developer's grants. A source inaccessible in hosted search can be "
+                    "recorded and left unverified while other work proceeds. ")
             github_tools = _allows_github_tools(scope)
             tool_prompt = ""
             if github_tools:
@@ -1706,12 +1786,13 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    "Use mode needs-input only if this criterion cannot advance within the approved inputs, "
                                    "files or capabilities. State the specific missing prerequisite in plan. Never fabricate "
                                    "external evidence or plan repeated edits that cannot resolve the prerequisite. "
-                                   f"{tool_prompt}Keep the plan under {MAX_PLAN_CHARS} characters. "
+                                   f"{handoff_prompt}{tool_prompt}Keep the plan under {MAX_PLAN_CHARS} characters. "
                                    "Request no broader permissions.",
                                    response_schema=schema)
             try:
                 plan = _parse_plan(message, pending, game=bool(brief), approved_paths=scope["files"],
-                                   github_tools=github_tools, project_edit=bool(scope.get("project_edit")))
+                                   github_tools=github_tools, project_edit=bool(scope.get("project_edit")),
+                                   role_capabilities=role_capabilities)
             except PlanFormatError as error:
                 session.plan_format_reason = str(error)
                 session.record("native_inspection_plan_format_failed", cycle=count, phase="manager-planning",
@@ -1719,6 +1800,12 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 count -= 1
                 save_checkpoint()
                 return MANUAL_CHECKPOINT
+            if role_capabilities:
+                repaired = _repair_planning_handoff(plan, developer_capabilities)
+                if repaired is not plan:
+                    session.record("native_inspection_planning_handoff_corrected", cycle=count,
+                                   target=plan["criterion"], prerequisite=plan["prerequisite"])
+                    plan = repaired
             session.record("native_inspection_plan_accepted", cycle=count, phase="manager-planning",
                            target=plan["criterion"], mode=plan.get("mode", "edit"), plan_sha256=digest(plan))
         key = plan["criterion"]
@@ -2356,7 +2443,10 @@ def _resume_registered_plan_contract(runner, events, head, rows, expires, second
     message = (recovered["message"] if recovered else
                _read_settled_response(ledger, _response_ref(start, intents[-1], results[-1]), prior))
     plan = _parse_plan(message, [key], approved_paths=prior["files"], github_tools=_allows_github_tools(prior),
-                       project_edit=bool(prior.get("project_edit")))
+                       project_edit=bool(prior.get("project_edit")),
+                       role_capabilities=prior.get("planning_protocol") == PLANNING_PROTOCOL)
+    if prior.get("planning_protocol") == PLANNING_PROTOCOL:
+        plan = _repair_planning_handoff(plan, _developer_capabilities(prior))
     resume = {**checkpoint["continuation"], "mode": "after-registered-planning", "cycle": 1,
               "criteria_status": progress["criteria"], "changed": checkpoint["changed"], "stagnant": 1,
               "failures": [cycle_progress.failure_fingerprint("reviewer", [finding], digest(prior["verifier"]))],

@@ -1190,6 +1190,8 @@ class CommandCenter:
             elif kind == "native_inspection_plan_accepted":
                 if row.get("mode") != "needs-input":
                     lines.append(f"{cycle}사이클 · 계획 확정 · {row['target']}")
+            elif kind == "native_inspection_planning_handoff_corrected":
+                lines.append(f"{cycle}사이클 · 이미 승인된 권한 확인 · Developer 작업으로 인계")
             elif kind == "native_inspection_criterion_deferred":
                 lines.append(f"{cycle}사이클 · 기준 보류 · {row['target']} · {row['reason']}")
             elif kind == "native_inspection_review_capture_started":

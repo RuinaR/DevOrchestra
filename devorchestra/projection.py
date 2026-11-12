@@ -99,6 +99,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
                 "native_inspection_plan_format_failed",
                 "native_inspection_manager_plan_reused", "native_inspection_plan_accepted", "native_inspection_developer_skipped",
                 "native_inspection_review_capture_started", "native_inspection_review_capture_result",
+                "native_inspection_planning_handoff_corrected",
                 "native_inspection_manual_checkpoint", "native_inspection_progress_checkpoint",
                 "native_inspection_replan", "native_inspection_criterion_deferred",
                 "native_inspection_project_tool_ready", "native_inspection_project_tools_cleanup"}],

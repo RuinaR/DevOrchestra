@@ -280,6 +280,40 @@ class RegisteredTrustTests(unittest.TestCase):
             self.assertEqual("SKIPPED_NO_CANDIDATE", view["roles"][phase]["outcome"])
         self.assertEqual(5, view["tokens"])
 
+    def test_read_only_planner_cannot_defer_approved_developer_work(self):
+        from devorchestra.replica_evidence import snapshot
+
+        with TemporaryDirectory() as folder:
+            work = Path(folder)
+            (work / "DESIGN.md").write_text("Existing design to preserve", encoding="utf-8")
+            scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Create a runnable app", "checks": []}},
+                     "goal": "Build an app", "files": [], "project_edit": True, "protected_edit_paths": [],
+                     "planning_protocol": registered_cycle.PLANNING_PROTOCOL, "cycles": 1, "requirements": [],
+                     "permissions": list(registered_cycle.PERMISSIONS), "shell_roles": ["developer"],
+                     "research": "CODEX_LIVE", "portable_source_policy": "GITHUB_PUBLIC_ZIP_V1",
+                     "verifier": {"mode": registered_cycle.BASELINE_VERIFIER}}
+            blocked = {"criterion": "C1", "mode": "needs-input", "prerequisite": "PLANNER_TOOLS",
+                       "tools": [], "plan": "I cannot edit from the planning role."}
+            session = SimpleNamespace(scope=scope, work=work, image=snapshot(work), runner=Mock(),
+                                      check=Mock(), check_image=Mock(), record=Mock(), source=lambda: "source",
+                                      changes=[], owned_verified=True, usage_complete=True)
+            session.call = Mock(side_effect=[json.dumps(blocked), registered_cycle.NoDeveloperChange("fixture")])
+            with (patch.object(registered_cycle, "Catalog"),
+                  patch.object(registered_cycle, "read_frozen_requirements", return_value=[])):
+                self.assertEqual("CYCLE_LIMIT", registered_cycle._cycles(session))
+            self.assertEqual(["manager-planning", "developer"], [call.args[1] for call in session.call.call_args_list])
+            self.assertIn("Existing design to preserve", session.call.call_args_list[0].args[3])
+            self.assertIn("Controller checked", session.call.call_args_list[1].args[3])
+            self.assertTrue(any(call.args[0] == "native_inspection_planning_handoff_corrected"
+                                for call in session.record.call_args_list))
+            capabilities = registered_cycle._developer_capabilities(scope)
+            for prerequisite in ("REPLICA_WRITE", "OFFLINE_BUILD", "PUBLIC_RESEARCH", "PORTABLE_TOOL",
+                                 "FUNCTIONAL_PROOF"):
+                result = registered_cycle._repair_planning_handoff({**blocked, "prerequisite": prerequisite}, capabilities)
+                self.assertEqual("edit", result["mode"])
+            genuine = {**blocked, "prerequisite": "EXTERNAL_EVIDENCE"}
+            self.assertIs(genuine, registered_cycle._repair_planning_handoff(genuine, capabilities))
+
     def test_whole_replica_can_add_remove_and_review_binary_assets_but_protects_inputs(self):
         from devorchestra.replica_evidence import snapshot
 
