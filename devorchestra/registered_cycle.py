@@ -5,6 +5,7 @@ import json
 from math import ceil
 from pathlib import Path
 import re
+from shutil import copyfile
 from time import monotonic, time
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder, _signed_offline
+from .mxc_owned_gui import inspect_owned_window
 from .native_command_probe import ARCHIVE_SHA256, CODE_MODE_HOST_SHA256, RELEASE_SHA256, _staging
 from .native_cycle import ROLES, ROLE_TOKENS, _FixtureSession
 from .native_developer_trial import (
@@ -30,6 +32,7 @@ KIND = "REGISTERED_CODEX_CYCLE"
 PERMISSIONS = ("replica-read", "replica-edit", "offline-shell", "pinned-verifier")
 SHELL_ROLES = ("developer", "reviewer")
 MAX_DIFF = 24000
+BASELINE_VERIFIER = "replica-integrity"
 
 
 def _verdict(message, options):
@@ -67,7 +70,10 @@ def _tools(spec, criteria, image, writable):
     if type(checks) is not dict or checks.keys() != criteria.keys():
         raise Blocked("Verification checks must match the frozen criterion IDs")
     for row in checks.values():
-        if (type(row) is not dict or set(row) != {"args", "stdout", "inputs"} or type(row["args"]) is not list
+        required = {"args", "stdout", "inputs"}
+        if (type(row) is not dict or not required <= row.keys() <= required | {"screen_changed"}
+                or ("screen_changed" in row and (windows_text_check or type(row["screen_changed"]) is not bool))
+                or type(row["args"]) is not list
                 or len(row["args"]) > 24 or type(row["stdout"]) is not str or not row["stdout"]
                 or type(row["inputs"]) is not list or len(row["inputs"]) > 16
                 or any(type(name) is not str or name not in image["files"] or name in writable
@@ -84,6 +90,37 @@ def _tools(spec, criteria, image, writable):
     return {"executable": str(binary), "root": str(binary.parent),
             "identity": identity,
             "checks": checks}
+
+
+def godot_verifier_spec(spec):
+    return (type(spec) is dict and spec.get("mode") == game_pilot.REGISTERED_GUI
+            and spec.keys() <= {"mode", "tools_root"})
+
+
+def _expected_observation(check):
+    values = [0, check["stdout"], False]
+    if "screen_changed" in check:
+        values.append(check["screen_changed"])
+    return digest(values)
+
+
+def _settled_integrity_candidate(events, project, replica, onboarding, image):
+    rows = [row for row in events if row.get("project_id") == project and row.get("probe_kind") == KIND]
+    start = next((row for row in reversed(rows) if row["kind"] == "native_inspection_intent"), {})
+    end = rows[-1] if rows else {}
+    prior = start.get("scope", {})
+    image_hash = digest(image)
+    if (end.get("kind") != "native_inspection_result" or end.get("run_id") != start.get("run_id")
+            or end.get("outcome") != "USER_TEST_REQUIRED" or end.get("owned_tree") != "DRAINED"
+            or end.get("replica_sha256") != image_hash or prior.get("replica") != str(replica)
+            or prior.get("onboarding_sha256") != digest(onboarding)
+            or prior.get("verifier", {}).get("mode") not in {BASELINE_VERIFIER, game_pilot.REGISTERED_GUI}
+            or not any(row["kind"] == "native_inspection_role_result" and row.get("phase") == "verifier"
+                       and row.get("run_id") == end["run_id"] and row.get("source_sha256") == image_hash
+                       and (row.get("integrity") == "PASS" or row.get("game", {}).get("outcome") == "PASS")
+                       for row in rows)):
+        raise Blocked("복제본이 온보딩 상태와 다릅니다. 확인된 개발 결과인지 기록·복구에서 확인하세요.")
+    return {"run_id": end["run_id"], "receipt_sha256": digest(end), "changed": end["changed"]}
 
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
@@ -113,8 +150,9 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         raise Blocked("The onboarded replica and original must be separate")
     image = snapshot(replica)
     is_godot = any(name.casefold() == "project.godot" for name in image["files"])
-    if is_godot and not game:
-        raise Blocked("Godot projects require the game verifier for Windows export and owned-window evidence")
+    generic_gui = godot_verifier_spec(spec)
+    if is_godot and not (game or generic_gui):
+        raise Blocked("Godot 프로젝트에는 Windows 내보내기와 소유 창 검증을 선택하세요.")
     if game and (not is_godot or project != game_pilot.PROJECT
                  or set(files) != set(game_pilot.DEVELOPMENT_FILES)
                  or (game_limits is None and (seconds, tokens, cycles) != (1500, 350000, 2))):
@@ -122,10 +160,14 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     if not original_matches(source, frozen):
         raise Blocked("Original no longer matches onboarding")
     candidate_base = None
+    prior_replica_candidate = None
     if digest(image) != onboarding["replica_sha256"]:
-        if not game or game_limits is None:
+        if not game:
+            prior_replica_candidate = _settled_integrity_candidate(events, project, replica, onboarding, image)
+        elif game_limits is None:
             raise Blocked("Replica no longer matches onboarding")
-        candidate_base = _verified_game_base(ledger, events, replica, image, frozen, onboarding, files)
+        else:
+            candidate_base = _verified_game_base(ledger, events, replica, image, frozen, onboarding, files)
     with _git(ledger, source) as (git, _):
         if _scan(source, git, frozen["local_examples"]) != frozen:
             raise Blocked("Original Git inventory changed after onboarding")
@@ -151,10 +193,27 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             raise Blocked("The frozen game planning brief is unavailable")
         role_tokens = dict(game_pilot.ROLE_LIMITS if game_limits is None else game_limits["role_tokens"])
         criteria[game_pilot.CRITERIA[0]]["checks"] = [{"title": game_pilot.CRITERIA[0]}]
+    elif generic_gui:
+        if not is_godot and "project.godot" not in files:
+            raise Blocked("Godot 검증을 시작하려면 project.godot를 수정·생성 범위에 포함하세요.")
+        tools_root = None
+        if "tools_root" in spec:
+            if type(spec["tools_root"]) is not str or not Path(spec["tools_root"]).is_absolute():
+                raise Blocked("Godot 도구 폴더의 절대 경로를 선택하세요.")
+            tools_root = Path(spec["tools_root"])
+            check_path(tools_root)
+            if any(tools_root.is_relative_to(path) or path.is_relative_to(tools_root) for path in (replica, source)):
+                raise Blocked("Godot 도구 폴더를 원본 및 작업 복제본과 분리하세요.")
+        verifier = {**game_pilot.development_tools(replica, tools_root), "mode": game_pilot.REGISTERED_GUI}
+        if tools_root is not None:
+            verifier["tools_root"] = str(tools_root)
     else:
-        verifier = _tools(spec, criteria, image, files)
-        for key, criterion in criteria.items():
-            criterion["checks"] = [{"title": key}]
+        if spec == {"mode": BASELINE_VERIFIER}:
+            verifier = {"mode": BASELINE_VERIFIER}
+        else:
+            verifier = _tools(spec, criteria, image, files)
+            for key, criterion in criteria.items():
+                criterion["checks"] = [{"title": key}]
     requirements = latest_requirements(catalog, project)
     refs = list(requirements)
     if any(ref["path"] in files for ref in refs):
@@ -180,6 +239,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "onboarding_sha256": digest(onboarding), "original_head": frozen["head"], "original_git": frozen["git"],
             "original_changes": {key: frozen[key] for key in ("staged", "raw_worktree_changed", "local_examples")},
             "replica_sha256": digest(image), "files": sorted(files), "permissions": list(PERMISSIONS),
+            **({"prior_replica_candidate": prior_replica_candidate} if prior_replica_candidate else {}),
             "verifier": verifier, "archive": str(archive), "archive_sha256": ARCHIVE_SHA256,
             "binary_sha256": RELEASE_SHA256, "code_mode_host_sha256": CODE_MODE_HOST_SHA256,
             "diagnostic": diagnostic["request_id"], "auth_home": str(home), "model": DEFAULT_MODEL,
@@ -367,9 +427,9 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("Approved replica changed")
         self.check_image()
         self.check_login()
-        self.changes = []
+        self.changes = list(self.scope.get("prior_replica_candidate", {}).get("changed", ()))
         self.last_diff = ""
-        if self.scope["verifier"].get("mode") == "godot-game":
+        if self.scope["verifier"].get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
             self.game_scratch = self.scratch / "developer-game"
             self.game_scratch.mkdir()
 
@@ -380,26 +440,31 @@ class RegisteredSession(_FixtureSession):
         if catalog["projects"][self.scope["project_id"]]["revision"] != self.scope["project_revision"]:
             raise Blocked("Registered project configuration changed")
         tool = self.scope["verifier"]
-        if tool.get("mode") == "godot-game":
-            if game_pilot.development_tools(self.work) != {k: v for k, v in tool.items() if k != "manager_brief"}:
+        if tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
+            tools_root = Path(tool["tools_root"]) if "tools_root" in tool else None
+            expected = {**game_pilot.development_tools(self.work, tools_root), "mode": tool["mode"]}
+            if expected != {k: v for k, v in tool.items() if k not in {"manager_brief", "tools_root"}}:
                 raise Blocked("Approved game tool identity changed")
-        elif fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
+        elif "executable" in tool and fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
             raise Blocked("Approved executable identity changed")
 
     def call(self, cycle, phase, key, prompt):
         before = {name: _read_source(self.work, name, self.image) for name in self.scope["files"]} if phase == "developer" else {}
         tool = self.scope["verifier"]
-        game = tool.get("mode") == "godot-game"
+        game = tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI)
         if game and phase == "developer":
             prompt += ("\nThe Manager's read-only planning instructions do not restrict your approved Developer edits. "
                        f"For development commands, copy the project files to {self.game_scratch} and run Godot "
                        f"there with --headless. Use template {tool['template']} for Windows release export. "
                        "Keep generated imports, .godot cache, and EXEs in scratch. The Controller launches the "
-                       "exported candidate in a separate owned window. Set the main scene to res://scenes/game.tscn, "
-                       "use scripts/game.gd, and document the approved design in docs/GAME-DESIGN.md.")
+                       "exported candidate in a separate owned window.")
+            if tool["mode"] == "godot-game":
+                prompt += (" Set the main scene to res://scenes/game.tscn, use scripts/game.gd, "
+                           "and document the approved design in docs/GAME-DESIGN.md.")
         try:
             response, recovered = self.dispatch(cycle, phase, key, prompt,
-                                                tool_root=Path(tool["root"]) if not game or phase == "developer" else None,
+                                                tool_root=Path(tool["root"]) if "root" in tool and
+                                                (not game or phase == "developer") else None,
                                                 extra_read_roots=(Path(tool["template"]).parent,)
                                                 if game and phase == "developer" else (),
                                                 scratch_root=self.game_scratch if game and phase == "developer" else None,
@@ -408,7 +473,7 @@ class RegisteredSession(_FixtureSession):
                                                 context="Work on this registered Git replica using the approved scope.")
         except Blocked as error:
             last = self.phases[-1] if self.phases else {}
-            if (game and phase == "developer" and str(error) == "TOKEN_LIMIT"
+            if (tool.get("mode") == "godot-game" and phase == "developer" and str(error) == "TOKEN_LIMIT"
                     and last.get("cycle") == cycle and last.get("phase") == phase
                     and last.get("outcome") == "TOKEN_LIMIT" and last.get("process_result") == "EXITED"
                     and last.get("exit_code") == 0 and self.owned_verified):
@@ -454,36 +519,68 @@ class RegisteredSession(_FixtureSession):
 
     def verify_registered(self, cycle):
         tool = self.scope["verifier"]
-        if tool.get("mode") == "godot-game":
+        if tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
             return game_pilot.verify_development(self, cycle)
         observations = []
         self.record("native_inspection_role_intent", cycle=cycle, phase="verifier", source_sha256=self.source())
-        for key, spec in tool["checks"].items():
+        integrity_only = tool.get("mode") == BASELINE_VERIFIER
+        if integrity_only:
+            self.check()
+            self.check_image()
+        for key, spec in tool.get("checks", {}).items():
             self.check()
             self.check_image()
             logs = self.logs(f"{cycle}-verify-{key}")
             argv = [*trial_flags(self.work, writable=False, tool_root=Path(tool["root"])),
                     *_args(Path(tool["executable"]), *spec["args"], profile=PROFILE)]
             seconds = self.verification_seconds()
+            visual, workers = {}, []
+            before, after = logs / "before-input.png", logs / "after-input.png"
+
+            def interact(api, job, deadline):
+                visual.update(inspect_owned_window(api, job, deadline, self.check, after, workers,
+                                                   before_input=before))
+
             try:
                 result = self.owned(lambda: _observe(self.binary, argv, self.work, logs, self.verify_env,
                                                      seconds=seconds, check=self.check,
-                                                     output_limit=8192, encoding="utf-8"))
+                                                     output_limit=8192, encoding="utf-8",
+                                                     interact=interact if "screen_changed" in spec else None))
             except OwnedMxcStopped as error:
                 if str(error) == "MXC probe timeout" and self.signoff_started is not None:
                     self.verification_seconds()
                 raise
+            finally:
+                for worker in workers:
+                    worker.join(1)
+                    if worker.is_alive():
+                        self.owned_verified = False
+                        raise Blocked("Owned GUI capture worker did not settle")
             self.check_image()
             if result["job_active"]:
                 self.owned_verified = False
                 raise Blocked("Verifier Job is unresolved")
             actual = result["stdout"].rstrip("\r\n")
-            observations.append({"title": key, "expected": digest([0, spec["stdout"], False]),
-                                 "actual": digest([result["exitCode"], actual, bool(result["stderr"])]),
-                                 "exit_code": result["exitCode"], "stdout_sha256": digest(actual)})
+            actual_values = [result["exitCode"], actual, bool(result["stderr"])]
+            observation = {"title": key, "expected": _expected_observation(spec),
+                           "exit_code": result["exitCode"], "stdout_sha256": digest(actual)}
+            if "screen_changed" in spec:
+                actual_values.append(visual.get("screen_changed"))
+                if visual:
+                    ledger = self.runner.ledger
+                    artifact = ledger.local_directory("recovery", create=True) / f"gui-{self.fields['run_id']}-{cycle}-{key}"
+                    artifact.mkdir()
+                    for image in (before, after):
+                        copyfile(image, artifact / image.name)
+                    observation["gui"] = {**visual, "artifact_directory": artifact.name}
+            observations.append({**observation, "actual": digest(actual_values)})
         receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
-                   "verdict": "PASS" if all(row["actual"] == row["expected"] for row in observations) else "FAIL",
+                   "verdict": ("NOT_VALIDATED" if integrity_only else
+                               "PASS" if all(row["actual"] == row["expected"] for row in observations) else "FAIL"),
                    "source_sha256": self.source(), "observations": observations}
+        if integrity_only:
+            receipt.update(runtime=BASELINE_VERIFIER, integrity="PASS",
+                           user_test_required=list(self.scope["criteria"]))
         self.record("native_inspection_role_result", cycle=cycle, **receipt)
         self.phases.append({"cycle": cycle, "phase": "verifier", "outcome": receipt["verdict"]})
         return receipt
@@ -565,6 +662,9 @@ def _decide(session, count, key, review, comparison, expected):
               if "graceful_stop" in session.scope and session.scope["verifier"].get("mode") == "godot-game" else
               "USER_TEST_REQUIRED is pending evidence; reply CONTINUE if no regression or rejection requires rework. "
               if session.scope["verifier"].get("mode") == "godot-game" else "")
+    if expected == "USER_TEST_REQUIRED":
+        manual = ("The independent checks recorded their observations. Reply USER_TEST_REQUIRED and explain "
+                  "which functional evidence is still missing. ")
     message = session.call(count, "manager-final", key,
                          f"Current criterion {key}: {status[key]}. All frozen statuses: {status}. "
                          f"Reviewer: {review}. Regression: {comparison['regressed']}. "
@@ -676,11 +776,13 @@ def _cycles(session, initial_plan=None):
             session.record("native_inspection_developer_skipped", cycle=count, target=key,
                            source_sha256=session.source(), diff_sha256=digest(diff))
         else:
+            tool_context = (f"Approved offline verification tool: {tool['executable']}. "
+                            f"Test arguments for this criterion: {verification_args}. " if "executable" in tool else
+                            "The independent Verifier checks replica integrity. Functional evidence is still required. ")
             diff = session.call(count, "developer", key,
                             f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\nPlan: {plan['plan']}\n"
                             f"Only modify or create {scope['files']}. Preserve requirements, verification and Git. "
-                            f"Approved offline verification tool: {scope['verifier']['executable']}. "
-                            f"Test arguments for this criterion: {verification_args}. "
+                            f"{tool_context}"
                             "Inspect the project and choose the implementation. Use installed tools only.")
             identity = digest(session.image["files"])
             if identity in known:
@@ -697,6 +799,7 @@ def _cycles(session, initial_plan=None):
             stagnant += 1
         rework = review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"} or bool(comparison["regressed"])
         expected = ("REWORK" if rework else "COMPLETED" if all(v == "VERIFIED" for v in status.values())
+                    else "USER_TEST_REQUIRED" if tool.get("mode") in (BASELINE_VERIFIER, game_pilot.REGISTERED_GUI)
                     else "CONTINUE")
         final = _decide(session, count, key, review, comparison, expected)
         session.signoff_state = {}
@@ -810,10 +913,11 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
                       and e.get("staging_cleanup", {}).get("status") == "REMOVED"), None)
         if proof:
             observed = {o["title"]: o for o in proof.get("observations", [])}
-            if (observed.keys() == prior["verifier"]["checks"].keys()
+            approved_checks = prior["verifier"].get("checks", {})
+            if (approved_checks and observed.keys() == approved_checks.keys()
                     and all(observed[k]["exit_code"] == 0
-                            and observed[k]["expected"] == observed[k]["actual"] == digest([0, spec["stdout"], False])
-                            for k, spec in prior["verifier"]["checks"].items())
+                            and observed[k]["expected"] == observed[k]["actual"] == _expected_observation(spec)
+                            for k, spec in approved_checks.items())
                     and any(e["kind"] == "native_inspection_role_result" and e.get("phase") == "verifier"
                             and e.get("run_id") == proof["run_id"] and e.get("source_sha256") == current_hash
                             and e.get("observations") == proof["observations"] and e.get("verdict") == "PASS"
@@ -1011,7 +1115,10 @@ def _resume_remaining(session, diff):
     status = comparison["criteria"]
     expected = ("REWORK" if review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"}
                 or comparison["regressed"]
-                else "COMPLETED" if all(value == "VERIFIED" for value in status.values()) else "CONTINUE")
+                else "COMPLETED" if all(value == "VERIFIED" for value in status.values())
+                else "USER_TEST_REQUIRED" if session.scope["verifier"].get("mode") in
+                (BASELINE_VERIFIER, game_pilot.REGISTERED_GUI)
+                else "CONTINUE")
     final = _decide(session, count, key, review, comparison, expected)
     return "GRACEFUL_STOP" if final == "CONTINUE" and getattr(session, "stop_reason", None) else final
 

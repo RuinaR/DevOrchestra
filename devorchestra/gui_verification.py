@@ -98,6 +98,8 @@ class _Window:
         user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
         self.owner = signature(user, "GetWindowThreadProcessId", w.DWORD, w.HWND, c.POINTER(w.DWORD))
         self.ancestor = signature(user, "GetAncestor", w.HWND, w.HWND, w.UINT)
+        self.child_at = signature(user, "ChildWindowFromPointEx", w.HWND, w.HWND, w.POINT, w.UINT)
+        self.map_point = signature(user, "MapWindowPoints", c.c_int, w.HWND, w.HWND, c.POINTER(w.POINT), w.UINT)
         self.send = signature(user, "SendMessageTimeoutW", c.c_ssize_t, w.HWND, w.UINT,
                               w.WPARAM, w.LPARAM, w.UINT, w.UINT, c.POINTER(c.c_size_t))
         self.post = signature(user, "PostMessageW", w.BOOL, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
@@ -136,6 +138,29 @@ class _Window:
 
     def click(self, name):
         self.message(name, 0x00F5)  # BM_CLICK, no desktop input
+
+    def click_client(self, x, y):
+        self.check()
+        root = self.owned("root")
+        target = root
+        point = w.POINT(x, y)
+        for _ in range(16):
+            child = self.child_at(target, point, 7)  # Skip invisible, disabled and transparent windows.
+            if not child or child == target:
+                break
+            if self._owner_thread(child) != self.thread or self.ancestor(child, 2) != root:
+                raise Blocked("GUI click target is outside the owned window")
+            self.map_point(target, child, c.byref(point), 1)
+            target = child
+        else:
+            raise Blocked("Owned GUI control nesting exceeds the verification limit")
+        packed = (point.x & 0xFFFF) | ((point.y & 0xFFFF) << 16)
+        for message, buttons in ((0x0201, 1), (0x0202, 0)):
+            self.check()
+            if self._owner_thread(target) != self.thread or self.ancestor(target, 2) != root:
+                raise Blocked("GUI click target changed")
+            result = c.c_size_t()
+            _require(self.send(target, message, buttons, packed, 0x23, 1000, c.byref(result)))
 
     def click_menu(self, captions):
         self.check()

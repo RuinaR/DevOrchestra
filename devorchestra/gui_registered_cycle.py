@@ -109,13 +109,15 @@ def show(center, project):
         entry.insert(0, draft.get(key, default))
         entry.grid(row=index, column=1, sticky="ew")
     inputs.columnconfigure(1, weight=1)
+    if baseline is not None and baseline["head"] is None and not baseline["files"]:
+        entries["files"].insert(0, "docs/PROJECT-PLAN.md")
     ttk.Label(panel, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
               wraplength=580).pack(anchor="w", pady=4)
 
     def save_budget():
         draft.update((key, entries[key].get()) for key in budget_keys)
 
-    if baseline is None or is_godot:
+    if baseline is None:
         def close_preflight():
             save_budget()
             panel.destroy()
@@ -124,12 +126,9 @@ def show(center, project):
             close_preflight()
             show(center, project)
 
-        if is_godot:
-            state.set("이 Godot 프로젝트에는 독립 Windows 빌드·플레이 검증이 아직 연결되지 않았습니다.")
-        else:
-            ttk.Button(panel, text="Git 온보딩 · 작업 복제본 준비",
-                       command=lambda: center.onboarding_panel(project=project)).pack(anchor="w")
-            ttk.Button(panel, text="복제본 준비 상태 다시 확인", command=reopen).pack(anchor="w")
+        ttk.Button(panel, text="Git 온보딩 · 작업 복제본 준비",
+                   command=lambda: center.onboarding_panel(project=project)).pack(anchor="w")
+        ttk.Button(panel, text="복제본 준비 상태 다시 확인", command=reopen).pack(anchor="w")
         ttk.Button(panel, text="닫기", command=close_preflight).pack(anchor="e")
         panel.protocol("WM_DELETE_WINDOW", close_preflight)
         panel.bind("<Escape>", lambda _event: (close_preflight(), "break")[1])
@@ -146,12 +145,16 @@ def show(center, project):
 
     ttk.Button(inputs, text="찾기", command=archive).grid(row=0, column=2)
     ttk.Label(panel, text="독립 검증 설정").pack(anchor="w")
-    ttk.Label(panel, text="처음에는 검증 도구가 미설정입니다. 실행 파일을 선택하고 완료 기준별 인자와 기대 출력을 입력하세요.",
+    ttk.Label(panel, text="Godot은 Windows 실행·소유 창 입력·캡처를 검증합니다. 실행 대상이 없는 프로젝트는 복제본과 변경 범위를 검사합니다.",
+              wraplength=580).pack(anchor="w")
+    ttk.Label(panel, text="다른 도구에서도 완료 기준에 screen_changed를 설정하면 소유 창 입력 전후 화면을 비교합니다.",
               wraplength=580).pack(anchor="w")
     verifier_actions = ttk.Frame(panel)
     verifier_actions.pack(fill="x")
     spec = center.editor_box(panel, height=6)
     template = {"executable": "", "checks": {key: {"args": [], "stdout": "", "inputs": []} for key in criteria}}
+    default_verifier = {"mode": registered_cycle.BASELINE_VERIFIER}
+    godot_verifier = {"mode": game_pilot.REGISTERED_GUI}
 
     def write_spec(value):
         spec.delete("1.0", "end")
@@ -174,11 +177,23 @@ def show(center, project):
             return
         path = filedialog.askopenfilename(parent=panel, filetypes=[("검증 실행 파일", "*.exe")])
         if path:
+            if value == default_verifier or registered_cycle.godot_verifier_spec(value):
+                value = template.copy()
             value["executable"] = str(Path(path))
             write_spec(value)
             state.set("검증 도구를 선택했습니다. 기준별 실행 인자와 기대 출력을 확인하세요.")
 
-    write_spec(template)
+    write_spec(godot_verifier if is_godot else default_verifier)
+
+    def select_godot():
+        directory = filedialog.askdirectory(parent=panel, mustexist=True, title="검증된 Godot 엔진과 템플릿의 상위 tools 폴더")
+        if not directory:
+            return
+        write_spec({**godot_verifier, "tools_root": str(Path(directory))})
+        if not is_godot and entries["files"].get().strip() == "docs/PROJECT-PLAN.md":
+            entries["files"].delete(0, "end")
+            entries["files"].insert(0, "project.godot, scenes/main.tscn, scripts/main.gd, docs/PROJECT-PLAN.md")
+        state.set("Godot Windows 내보내기, 소유 창 클릭·키 입력, 입력 전후 캡처를 검토합니다.")
 
     def windows_text_check():
         from .mxc_launcher import _known_folder
@@ -189,6 +204,9 @@ def show(center, project):
         state.set("텍스트 읽기 예제를 불러왔습니다. 프로젝트에 맞는 검증 도구, 인자와 기대 출력으로 바꾸세요.")
 
     ttk.Button(verifier_actions, text="검증 도구 선택", command=choose_verifier).pack(side="left")
+    ttk.Button(verifier_actions, text="기본 검증 사용",
+               command=lambda: write_spec(godot_verifier if is_godot else default_verifier)).pack(side="left")
+    ttk.Button(verifier_actions, text="Godot GUI 검증", command=select_godot).pack(side="left")
     ttk.Button(verifier_actions, text="Windows 텍스트 검사 예제", command=windows_text_check).pack(side="left", padx=4)
     detail = center.editor_box(panel, height=8, state="disabled")
     cancelled = Event()
@@ -295,14 +313,22 @@ def show(center, project):
                 else:
                     state.set("재개 승인 취소됨")
                 return
+            verifier = result["verifier"]
             checks = "\n".join(f"{key} · {row['args']} → {row['stdout']}"
-                               for key, row in result["verifier"]["checks"].items())
+                               for key, row in verifier.get("checks", {}).items())
+            if verifier.get("mode") == registered_cycle.BASELINE_VERIFIER:
+                verification = "기본 독립 검증 · 원본 Git과 복제본 변경 범위 확인. 기능 기준은 사용자 검증 필요.\n"
+            elif verifier.get("mode") == game_pilot.REGISTERED_GUI:
+                verification = (f"Godot 엔진 {verifier['executable']}\n"
+                                "Windows EXE를 내보내 소유 창에 키 입력과 클릭을 보내고 입력 전후 화면을 캡처합니다.\n")
+            else:
+                verification = f"검증 EXE {verifier['executable']}\n{checks}\n"
             summary = (f"{project}\n{result['goal']}\n복제본 {result['replica']}\n"
                        f"파일 {', '.join(result['files'])}\n"
                        "사전 권한 · " + " · ".join(LABELS[key] for key in result["permissions"]) + "\n"
                        f"{result['seconds']}초 / {result['tokens']} 토큰 / 사이클 {result['cycles'] or '예산까지'}\n"
                        f"{result['model']} · {result['role_tokens']}\n"
-                       f"검증 EXE {result['verifier']['executable']}\n{checks}\n"
+                       f"{verification}"
                        "Developer는 MXC 안에서 복제본 쓰기와 셸 권한을 사용합니다. "
                        "Controller가 역할 종료 후 지정 파일 밖의 변경을 차단합니다. "
                        "승인된 프로젝트 문맥과 변경 근거가 모델에 전달됩니다. 명령 네트워크는 꺼져 있습니다.")
@@ -325,17 +351,18 @@ def show(center, project):
             return
         try:
             verifier = read_spec()
-            if not isinstance(verifier.get("executable"), str) or not verifier["executable"].strip():
-                raise ValueError("독립 검증 도구가 미설정입니다. ‘검증 도구 선택’에서 실행 파일을 선택하세요.")
-            checks = verifier.get("checks")
-            if not isinstance(checks, dict) or checks.keys() != criteria.keys():
-                raise ValueError("독립 검증 설정에 등록된 완료 기준별 검사 항목을 입력하세요.")
-            missing = [key for key, check in checks.items()
-                       if not isinstance(check, dict) or not isinstance(check.get("stdout"), str)
-                       or not check["stdout"]]
-            if missing:
-                remaining = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
-                raise ValueError("독립 검증의 기대 출력을 입력하세요. " + ", ".join(missing[:3]) + remaining)
+            if verifier != default_verifier and not registered_cycle.godot_verifier_spec(verifier):
+                if not isinstance(verifier.get("executable"), str) or not verifier["executable"].strip():
+                    raise ValueError("검증 도구를 선택하거나 ‘기본 검증 사용’을 누르세요.")
+                checks = verifier.get("checks")
+                if not isinstance(checks, dict) or checks.keys() != criteria.keys():
+                    raise ValueError("독립 검증 설정에 등록된 완료 기준별 검사 항목을 입력하세요.")
+                missing = [key for key, check in checks.items()
+                           if not isinstance(check, dict) or not isinstance(check.get("stdout"), str)
+                           or not check["stdout"]]
+                if missing:
+                    remaining = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
+                    raise ValueError("독립 검증의 기대 출력을 입력하세요. " + ", ".join(missing[:3]) + remaining)
             values = {key: entry.get().strip() for key, entry in entries.items()}
             seconds, tokens = int(values["seconds"]), int(values["tokens"])
             cycles = int(values["cycles"]) if values["cycles"] else None

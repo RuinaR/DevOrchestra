@@ -1,6 +1,4 @@
 """Offline evidence for the existing Godot pilot's frozen bootstrap."""
-import ctypes as c
-from ctypes import wintypes as w
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -10,22 +8,21 @@ from struct import unpack
 from time import monotonic, sleep
 from uuid import uuid4
 
-from .gui_verification import _Window, _small_file
-from .job_probe import _require
+from .gui_verification import _small_file
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_host_probe import PROFILE, OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder
-from .mxc_owned_gui import _capture, _job_pids
+from .mxc_owned_gui import _job_pids, capture_owned_window as _capture_window, inspect_owned_window as _inspect_export
 from .native_command_probe import ARCHIVE_SHA256, _stage_release, _staging
 from .native_developer_trial import _read_observation
 from .project_onboarding import _relative
 from .replica_evidence import fingerprint, snapshot
 from .replica_readiness import baseline, original_matches
-from .system_powershell import _api as signature
 
 
 PROJECT = "native-game-pilot"
+REGISTERED_GUI = "godot-owned-gui"
 CRITERIA = ("C1-555e38d7", "C2-9dcbacb0", "C3-b935f137", "C4-c00426e2", "C5-41940c23")
 FROZEN_CRITERIA_SHA256 = "0aefb917198ad528d5bd4edab0bf778cabb76699f14bac3a600810a8b95413b1"
 DEVELOPMENT_FILES = ("docs/GAME-DESIGN.md", "project.godot", "scenes/game.tscn", "scenes/player.tscn",
@@ -199,8 +196,8 @@ def _profile(work, data, engine, template=None):
             f'[permissions.{PROFILE}.network]\nenabled = false\n')
 
 
-def _engine(replica):
-    folder = replica.parent / "tools" / "godot-4.7.2"
+def _engine(replica, tools_root=None):
+    folder = (tools_root or replica.parent / "tools") / "godot-4.7.2"
     check_path(folder)
     if not folder.is_dir() or {path.name for path in folder.iterdir()} != ENGINE_HASHES.keys():
         raise Blocked("The pinned project-owned Godot installation is incomplete or has extra files")
@@ -210,8 +207,8 @@ def _engine(replica):
     return folder / (ENGINE + "_console.exe")
 
 
-def _template(replica):
-    folder = replica.parent / "tools" / "godot-4.7.2-export-windows-x64"
+def _template(replica, tools_root=None):
+    folder = (tools_root or replica.parent / "tools") / "godot-4.7.2-export-windows-x64"
     path = folder / "windows_release_x86_64.exe"
     check_path(folder)
     if not folder.is_dir() or {item.name for item in folder.iterdir()} != {path.name, "receipt.json"}:
@@ -225,9 +222,9 @@ def _template(replica):
     return path, info
 
 
-def development_tools(replica):
-    engine = _engine(replica)
-    template, identity = _template(replica)
+def development_tools(replica, tools_root=None):
+    engine = _engine(replica, tools_root)
+    template, identity = _template(replica, tools_root)
     return {"executable": str(engine), "root": str(engine.parent), "template": str(template),
             "template_identity": identity, "engine_sha256": ENGINE_HASHES, "mode": "godot-game",
             "manual_checks": MANUAL_CHECKS}
@@ -267,71 +264,6 @@ def _inspect_window(api, job, deadline, check, manifest, image_path, workers):
     if type(pid) is not int or type(hwnd) is not int or pid not in _job_pids(api, job):
         raise Blocked("Godot window is outside the owned Job")
     return _capture_window(api, job, pid, hwnd, current, image_path, workers)
-
-
-def _capture_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False):
-    process = _require(signature(api, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)(0x101000, False, pid))
-    member = signature(api, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
-    try:
-        def alive():
-            value = w.BOOL()
-            return (api.WaitForSingleObject(process, 0) == 258
-                    and bool(member(process, job, c.byref(value)) and value.value))
-
-        window = _Window({"root": hwnd}, {"root"}, pid, check, alive)
-        try:
-            if input_probe:
-                initial = window.dimensions()
-                requested = (initial[0] + 32, initial[1] + 24)
-                window.resize(*requested)
-                while window.dimensions() != requested:
-                    check()
-                    sleep(0.03)
-                window.message("root", 0x0100, 0x20, 0x00390001)  # WM_KEYDOWN, Space
-                window.message("root", 0x0101, 0x20, 0xC0390001)  # WM_KEYUP
-                return {"image": _capture(window, image_path, workers),
-                        "initial_size": list(initial), "resized": list(requested)}
-            return _capture(window, image_path, workers)
-        finally:
-            if alive():
-                window.close()
-    finally:
-        _require(api.CloseHandle(process))
-
-
-def _inspect_export(api, job, deadline, check, image_path, workers):
-    user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
-    callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
-    enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
-    owner = signature(user, "GetWindowThreadProcessId", w.DWORD, w.HWND, c.POINTER(w.DWORD))
-    visible = signature(user, "IsWindowVisible", w.BOOL, w.HWND)
-
-    def current():
-        check()
-        if monotonic() >= deadline:
-            raise Blocked("Exported Godot window did not appear")
-
-    while True:
-        current()
-        members = _job_pids(api, job)
-        if not members:
-            raise Blocked("Exported Godot process exited before window observation")
-        windows = []
-
-        @callback
-        def visit(hwnd, _):
-            pid = w.DWORD()
-            owner(hwnd, c.byref(pid))
-            if pid.value in members and visible(hwnd):
-                windows.append((pid.value, hwnd))
-            return True
-
-        _require(enum(visit, 0))
-        if len(windows) == 1:
-            pid, hwnd = windows[0]
-            sleep(0.4)
-            return _capture_window(api, job, pid, hwnd, current, image_path, workers, input_probe=True)
-        sleep(0.05)
 
 
 def _probe_script(assets, manifest):
@@ -527,7 +459,7 @@ def _preflight(work, data, lab, observe, check, workers, manifest, script, asset
     return None
 
 
-def _export_release(ledger, run_id, replica, data, lab, observe, check, workers, result):
+def _export_release(ledger, run_id, replica, data, lab, observe, check, workers, result, *, generic=False):
     release = data / "release"
     release.mkdir()
     exe = release / "GamePilot.exe"
@@ -545,9 +477,10 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
         raise Blocked("Windows export produced unexpected sidecar files")
     result["export"] = "WINDOWS_X64_EXPORTED"
     screenshot = data / "exported-window.png"
+    before_input = data / "before-input.png" if generic else None
 
     def interact(api, job, deadline):
-        observed = _inspect_export(api, job, deadline, check, screenshot, workers)
+        observed = _inspect_export(api, job, deadline, check, screenshot, workers, before_input=before_input)
         result["window_image"] = observed.pop("image")
         result["window_size"] = observed
 
@@ -558,7 +491,12 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
     output = ledger.local_directory("recovery", create=True) / f"godot-windows-export-{run_id}"
     output.mkdir()
     license_path = replica / "assets" / "kenney" / "License.txt"
-    for source, name in ((exe, exe.name), (screenshot, screenshot.name), (license_path, "Kenney-LICENSE.txt")):
+    files = [(exe, exe.name), (screenshot, screenshot.name)]
+    if generic:
+        files.append((before_input, before_input.name))
+    else:
+        files.append((license_path, "Kenney-LICENSE.txt"))
+    for source, name in files:
         check_path(source)
         copyfile(source, output / name)
     for stage in ("windows-export", "windows-runtime"):
@@ -569,13 +507,15 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
         raise Blocked("Preserved export differs from the executable that was tested")
     result.update(outcome="PASS", gui="EXPORTED_WINDOW_CAPTURED_AND_CLOSED", executable=identity,
                   artifact_directory=output.name, window_image_path=screenshot.name,
-                  input="SPACE_MESSAGES_SENT_RESPONSE_NOT_VALIDATED")
+                  input=("SPACE_AND_CLIENT_CLICK_SENT_RESPONSE_NOT_VALIDATED" if generic
+                         else "SPACE_MESSAGES_SENT_RESPONSE_NOT_VALIDATED"))
 
 
 def verify_development(session, cycle):
     """Build the reviewed candidate under the session fence and preserve independent EXE evidence."""
     scope = session.scope
     tool = scope["verifier"]
+    generic = tool["mode"] == REGISTERED_GUI
     ledger = session.runner.ledger
     engine, template = Path(tool["executable"]), Path(tool["template"])
     session.check()
@@ -588,7 +528,10 @@ def verify_development(session, cycle):
     data.mkdir()
     home.mkdir()
     (home / "config.toml").write_text(_profile(work, data, engine.parent, template), encoding="utf-8")
-    with (work / "export_presets.cfg").open("x", encoding="utf-8") as stream:
+    preset = work / "export_presets.cfg"
+    if generic and preset.exists():
+        preset.unlink()
+    with preset.open("x", encoding="utf-8") as stream:
         stream.write(_export_preset(template))
     env = {**session.verify_env, "APPDATA": str(data), "LOCALAPPDATA": str(data), "HOME": str(data),
            "USERPROFILE": str(data), "TEMP": str(data), "TMP": str(data), "CODEX_HOME": str(home)}
@@ -616,7 +559,7 @@ def verify_development(session, cycle):
 
     try:
         _export_release(ledger, f"{session.fields['run_id']}-cycle-{cycle}", session.work,
-                        data, lab, observe, session.check, workers, result)
+                        data, lab, observe, session.check, workers, result, generic=generic)
     except Blocked as error:
         if not session.owned_verified or str(error) == "SIGNOFF_PENDING":
             raise
@@ -630,6 +573,12 @@ def verify_development(session, cycle):
                 session.owned_verified = False
                 raise Blocked("Game capture thread did not settle")
     session.check_image()
+    if generic:
+        receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
+                   "verdict": result["outcome"], "source_sha256": source_hash, "observations": [],
+                   "user_test_required": list(scope["criteria"]) if result["outcome"] == "PASS" else [],
+                   "game": result}
+        return _record_development_verification(session, cycle, receipt)
     # A successful launch of the original tile sheet is useful evidence but is not C1.
     settings = _small_file(session.work / "project.godot", 24000).decode("utf-8")
     changed_game = (
@@ -644,11 +593,16 @@ def verify_development(session, cycle):
                "verdict": "PASS" if observations[0]["actual"] == observations[0]["expected"] else "FAIL",
                "source_sha256": source_hash, "observations": observations,
                "user_test_required": list(MANUAL_CHECKS), "game": result}
-    if result.get("artifact_directory"):
-        output = ledger.local_directory("recovery") / result["artifact_directory"] / "verification.json"
+    return _record_development_verification(session, cycle, receipt)
+
+
+def _record_development_verification(session, cycle, receipt):
+    artifact = receipt["game"].get("artifact_directory")
+    if artifact:
+        output = session.runner.ledger.local_directory("recovery") / artifact / "verification.json"
         with output.open("x", encoding="utf-8") as stream:
             json.dump(receipt, stream, indent=2, ensure_ascii=False)
     session.record("native_inspection_role_result", cycle=cycle, **receipt)
     session.phases.append({"cycle": cycle, "phase": "verifier", "outcome": receipt["verdict"],
-                           "artifact_directory": result.get("artifact_directory")})
+                           "artifact_directory": artifact})
     return receipt

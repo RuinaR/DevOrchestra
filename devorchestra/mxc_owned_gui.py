@@ -157,6 +157,82 @@ def _capture(window, path, workers):
     return verified_image(path)[1]
 
 
+def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None):
+    process = _require(signature(api, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)(0x101000, False, pid))
+    member = signature(api, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
+    try:
+        def alive():
+            value = w.BOOL()
+            return (api.WaitForSingleObject(process, 0) == 258
+                    and bool(member(process, job, c.byref(value)) and value.value))
+
+        window = _Window({"root": hwnd}, {"root"}, pid, check, alive)
+        try:
+            if input_probe:
+                initial = window.dimensions()
+                requested = (initial[0] + 32, initial[1] + 24)
+                window.resize(*requested)
+                while window.dimensions() != requested:
+                    check()
+                    sleep(0.03)
+                if before_input is not None:
+                    before = _capture(window, before_input, workers)
+                window.message("root", 0x0100, 0x20, 0x00390001)  # WM_KEYDOWN, Space
+                window.message("root", 0x0101, 0x20, 0xC0390001)  # WM_KEYUP
+                if before_input is not None:
+                    window.click_client(24, 24)
+                    sleep(0.2)
+                    check()
+                after = _capture(window, image_path, workers)
+                result = {"image": after, "initial_size": list(initial), "resized": list(requested)}
+                if before_input is not None:
+                    result.update(before_input=before, screen_changed=before["sha256"] != after["sha256"],
+                                  input="SPACE_AND_CLIENT_CLICK_SENT")
+                return result
+            return _capture(window, image_path, workers)
+        finally:
+            if alive():
+                window.close()
+    finally:
+        _require(api.CloseHandle(process))
+
+
+def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None):
+    user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
+    callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
+    enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
+    owner = signature(user, "GetWindowThreadProcessId", w.DWORD, w.HWND, c.POINTER(w.DWORD))
+    visible = signature(user, "IsWindowVisible", w.BOOL, w.HWND)
+
+    def current():
+        check()
+        if monotonic() >= deadline:
+            raise Blocked("Owned verification window did not appear")
+
+    while True:
+        current()
+        members = _job_pids(api, job)
+        if not members:
+            raise Blocked("Owned process exited before window observation")
+        windows = []
+
+        @callback
+        def visit(hwnd, _):
+            pid = w.DWORD()
+            owner(hwnd, c.byref(pid))
+            if pid.value in members and visible(hwnd):
+                windows.append((pid.value, hwnd))
+            return True
+
+        _require(enum(visit, 0))
+        if len(windows) == 1:
+            pid, hwnd = windows[0]
+            sleep(0.4)
+            return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=True,
+                                   before_input=before_input)
+        sleep(0.05)
+
+
 def _inside_client(window, controls):
     user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
     visible = signature(user, "IsWindowVisible", w.BOOL, w.HWND)
