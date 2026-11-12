@@ -112,6 +112,20 @@ def godot_verifier_spec(spec):
             and spec.keys() <= {"mode", "tools_root"})
 
 
+def visual_review_problem(verifier):
+    if verifier.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
+        return None
+    checks = verifier.get("checks")
+    count = sum(type(row) is dict and type(row.get("screen_changed")) is bool
+                for row in checks.values()) if type(checks) is dict else 0
+    if count == 0:
+        return ("AI 시각 검토에 보낼 화면이 없습니다. Godot GUI 검증을 선택하거나, "
+                "독립 검사에 화면 비교(screen_changed)를 추가하세요. 화면 없이 시작하려면 AI 시각 검토를 해제하세요.")
+    if count > 2:
+        return "AI 시각 검토에 첨부할 화면 비교 기준을 1~2개로 줄이세요."
+    return None
+
+
 def _expected_observation(check):
     values = [0, check["stdout"], False]
     if "screen_changed" in check:
@@ -233,9 +247,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
                 criterion["checks"] = [{"title": key}]
     if type(visual_review) is not bool:
         raise Blocked("Invalid visual review approval")
-    if visual_review and not (game or generic_gui or
-                              1 <= sum("screen_changed" in check for check in verifier.get("checks", {}).values()) <= 2):
-        raise Blocked("시각 검토에는 Godot 검증 또는 소유 창 검사가 설정된 완료 기준 1~2개가 필요합니다.")
+    if visual_review and (problem := visual_review_problem(verifier)):
+        raise Blocked(problem)
     requirements = latest_requirements(catalog, project)
     refs = list(requirements)
     if any(ref["path"] in files for ref in refs):

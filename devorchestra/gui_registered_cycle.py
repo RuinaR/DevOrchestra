@@ -174,11 +174,11 @@ def show(center, project):
     draft = center.development_budget_drafts.setdefault(project, {})
     grants = _permission_checkboxes(body, draft)
     use_images = tk.BooleanVar(panel, value=False)
-    ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
-                    variable=use_images).pack(anchor="w", pady=(0, 6))
     ttk.Button(body, text="시각 검토 결과와 캡처 보기",
                command=lambda: _open_visual_report(center, runner, project)).pack(anchor="w")
     if is_godot and project == game_pilot.PROJECT:
+        ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
+                        variable=use_images).pack(anchor="w", pady=(0, 6))
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
         _game_preflight(center, panel, body, footer, runner, state, grants, use_images)
         return
@@ -243,6 +243,10 @@ def show(center, project):
               wraplength=580).pack(anchor="w")
     ttk.Label(body, text="실행 검사에 screen_changed를 설정하면 소유 창의 입력 전후 화면을 비교합니다.",
               wraplength=580).pack(anchor="w")
+    ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
+                    variable=use_images).pack(anchor="w", pady=(0, 6))
+    visual_hint = ttk.Label(body, wraplength=580)
+    visual_hint.pack(fill="x")
     verifier_actions = ttk.Frame(body)
     verifier_actions.pack(fill="x")
     spec = center.editor_box(body, height=6)
@@ -262,6 +266,18 @@ def show(center, project):
         if not isinstance(value, dict):
             raise ValueError("독립 검증 설정은 JSON 객체로 입력하세요.")
         return value
+
+    def update_visual_hint(_event=None):
+        if not spec.edit_modified():
+            return
+        spec.edit_modified(False)
+        try:
+            problem = registered_cycle.visual_review_problem(read_spec())
+        except ValueError:
+            problem = "검증 설정 JSON을 확인하세요."
+        visual_hint.configure(text=problem or "현재 검증 설정은 AI 시각 검토에 필요한 화면을 캡처합니다.")
+
+    spec.bind("<<Modified>>", update_visual_hint, add="+")
 
     def choose_verifier():
         try:
@@ -461,6 +477,10 @@ def show(center, project):
             return
         try:
             verifier = read_spec()
+            if use_images.get() and (problem := registered_cycle.visual_review_problem(verifier)):
+                state.set(problem)
+                body.master.yview_moveto(verifier_actions.winfo_y() / max(1, body.winfo_height()))
+                return
             if verifier != default_verifier and not registered_cycle.godot_verifier_spec(verifier):
                 if not isinstance(verifier.get("executable"), str) or not verifier["executable"].strip():
                     raise ValueError("검증 도구를 선택하거나 ‘기본 검증 사용’을 누르세요.")
