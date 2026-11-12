@@ -280,6 +280,29 @@ class RegisteredTrustTests(unittest.TestCase):
             self.assertEqual("SKIPPED_NO_CANDIDATE", view["roles"][phase]["outcome"])
         self.assertEqual(5, view["tokens"])
 
+    def test_whole_replica_can_add_remove_and_review_binary_assets_but_protects_inputs(self):
+        from devorchestra.replica_evidence import snapshot
+
+        with TemporaryDirectory() as folder:
+            work = Path(folder)
+            (work / "old.txt").write_text("remove this", encoding="utf-8")
+            (work / "fixed.txt").write_text("expected output", encoding="utf-8")
+            session = SimpleNamespace(work=work, original=work, original_image={}, image=snapshot(work),
+                                      scope={"project_edit": True, "protected_edit_paths": ["fixed.txt"]}, changes=[])
+            before = {"old.txt": "remove this", "fixed.txt": "expected output"}
+            (work / "old.txt").unlink()
+            (work / "game.gd").write_text("extends Node\n", encoding="utf-8")
+            (work / "asset.dat").write_bytes(b"\0asset")
+            with patch.object(registered_cycle, "original_matches", return_value=True):
+                diff = registered_cycle.RegisteredSession._accept_developer(session, before)
+                self.assertEqual(["asset.dat", "game.gd", "old.txt"], session.last_changed)
+                self.assertIn("+++ /dev/null", diff)
+                self.assertIn("+extends Node", diff)
+                self.assertIn("sha256", diff)
+                (work / "fixed.txt").write_text("changed expectation", encoding="utf-8")
+                with self.assertRaises(Blocked):
+                    registered_cycle.RegisteredSession._accept_developer(session, {})
+
     def test_explicit_verdicts_and_bounded_multiline_reason(self):
         parse = registered_cycle._parse_verdict
         options = registered_cycle.REVIEW_VERDICTS
@@ -681,6 +704,10 @@ class RegisteredCycleTests(unittest.TestCase):
             panel = next(widget for widget in root.winfo_children()
                          if isinstance(widget, tk.Toplevel) and "Codex 개발 세션" in widget.title())
             children = list(descendants(panel))
+            whole = next(widget for widget in children if isinstance(widget, ttk.Checkbutton)
+                         and widget["text"].startswith("복제본 전체 개발"))
+            self.assertTrue(whole.instate(["selected"]))
+            whole.invoke()
             entries = [widget for widget in children if isinstance(widget, ttk.Entry)]
             for entry, value in zip(entries, (params[1], ",".join(params[6]), "300", "270000", "2", "45000",
                                               "60000", "55000", "45000"),

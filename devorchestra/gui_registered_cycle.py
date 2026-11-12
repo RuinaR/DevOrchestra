@@ -15,8 +15,8 @@ from .ledger import digest
 
 
 LABELS = {
-    "replica-read": "작업 복제본 읽기", "replica-edit": "지정 파일 생성·수정",
-    "offline-shell": "복제본에서 오프라인 명령 실행", "pinned-verifier": "지정된 독립 검증 명령 실행",
+    "replica-read": "작업 복제본 읽기", "replica-edit": "복제본 파일 작업",
+    "offline-shell": "오프라인 빌드·테스트·명령 실행", "pinned-verifier": "독립 검증 실행",
     "web-research": "Codex 인터넷 자료 조사", "portable-tools": "필요한 도구 자동 설치",
 }
 ROLE_LABELS = {"manager-planning": "계획 Manager", "developer": "Developer",
@@ -28,11 +28,11 @@ ROLE_TOKEN_FIELDS = {"manager-planning": "manager_tokens", "developer": "develop
 def _permission_checkboxes(panel, draft):
     options = ttk.LabelFrame(panel, text="자동 개발 사전 권한", padding=6)
     options.pack(fill="x", pady=(4, 6))
-    ttk.Label(options, text="필수 권한과 사용할 선택 권한을 체크하고 최종 승인 화면에서 확인하세요.",
+    ttk.Label(options, text="일반 개발 권한은 기본 선택됩니다. 세션 시작 전 승인 화면에서 확인하세요.",
               wraplength=580).grid(row=0, column=0, columnspan=2, sticky="w")
     grants = {}
     for index, key in enumerate((*registered_cycle.PERMISSIONS, *registered_cycle.OPTIONAL_PERMISSIONS)):
-        grants[key] = tk.BooleanVar(panel, value=draft.get(key, key == "replica-read"))
+        grants[key] = tk.BooleanVar(panel, value=draft.get(key, True))
         ttk.Checkbutton(options, text=LABELS[key], variable=grants[key],
                         command=lambda key=key: draft.update({key: grants[key].get()})).grid(
             row=1 + index // 2, column=index % 2, sticky="w")
@@ -177,7 +177,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     panel.title("등록 프로젝트 · Codex 개발 세션")
     state = tk.StringVar(panel, value="세션 검토를 누른 뒤 승인하면 자동 개발이 시작됩니다.")
     if continue_progress:
-        state.set("기존 복제본을 유지합니다. 수정 파일 경로와 검증을 검토한 뒤 새 범위를 승인하세요.")
+        state.set("기존 복제본을 유지합니다. 새 개발 권한 또는 기존 승인으로 이어서 개발할 수 있습니다.")
     body, footer = _session_layout(panel, state)
     try:
         data = Catalog(runner.ledger).read()["projects"][project]["data"]
@@ -243,10 +243,11 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     inputs = ttk.Frame(body)
     inputs.pack(fill="x")
     entries = {}
+    whole = tk.BooleanVar(panel, value=draft.get("whole_replica", True))
     budget_keys = ("seconds", "tokens", "cycles", *ROLE_TOKEN_FIELDS.values())
     defaults = registered_cycle.recommended_limits()
     for index, (key, label, default) in enumerate((
-            ("archive", "공식 Codex ZIP", ""), ("files", "수정 파일 경로 (쉼표 구분)", ""),
+            ("archive", "공식 Codex ZIP", ""), ("files", "지정 경로만 수정 (선택)", ""),
             ("seconds", "전체 시간 기준 (초)", str(defaults["seconds"])),
             ("tokens", "전체 토큰 기준", str(defaults["tokens"])), ("cycles", "사이클 상한 (선택)", ""),
             *((field, f"{ROLE_LABELS[role]} 호출당 토큰", str(defaults["role_tokens"][role]))
@@ -256,10 +257,17 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         entry.insert(0, draft.get(key, default))
         entry.grid(row=index, column=1, sticky="ew")
     inputs.columnconfigure(1, weight=1)
-    if baseline is not None and baseline["head"] is None and not baseline["files"] and not entries["files"].get():
-        entries["files"].insert(0, "docs/PROJECT-PLAN.md")
-    ttk.Label(inputs, text="기획서만 지정하면 기획서만 편집합니다. 실제 구현에 필요한 새 소스·설정 파일 경로를 "
-              "여기에 추가하고 승인하세요.", wraplength=570).grid(row=len(entries), column=0, columnspan=2, sticky="w")
+
+    def edit_mode():
+        entries["files"].configure(state="disabled" if whole.get() else "normal")
+        draft["whole_replica"] = whole.get()
+
+    ttk.Checkbutton(inputs, text="복제본 전체 개발 · 소스·설정·에셋 생성, 수정 및 삭제",
+                    variable=whole, command=edit_mode).grid(row=len(entries), column=0, columnspan=2, sticky="w")
+    edit_mode()
+    ttk.Label(inputs, text="복제본 전체 개발을 끄면 쉼표로 지정한 파일만 수정합니다. "
+              "등록 요구사항과 독립 검증 입력, 원본 프로젝트는 보호됩니다.",
+              wraplength=570).grid(row=len(entries) + 1, column=0, columnspan=2, sticky="w")
     ttk.Label(body, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
               wraplength=580).pack(anchor="w", pady=4)
     ttk.Label(body, text="빈 역할 입력은 전체 토큰 기준 내에서 해당 역할의 기본값을 사용합니다. "
@@ -359,7 +367,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             write_spec(value)
             state.set("검증 도구를 선택했습니다. 기준별 실행 인자와 기대 출력을 확인하세요.")
 
-    write_spec(godot_verifier if is_godot else default_verifier)
+    write_spec(default_verifier)
 
     def select_godot():
         directory = filedialog.askdirectory(parent=panel, mustexist=True, title="검증된 Godot 엔진과 템플릿의 상위 tools 폴더")
@@ -563,14 +571,16 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 verification = f"검증 EXE {verifier['executable']}\n{checks}\n"
             role_budget = " · ".join(f"{ROLE_LABELS[role]} {result['role_tokens'][role]:,}토큰"
                                      for role in ROLE_LABELS)
+            edit_summary = ("복제본 전체에서 소스·설정·에셋을 생성·수정·삭제합니다. 보호된 파일은 제외합니다."
+                            if result.get("project_edit") else "파일 " + ", ".join(result["files"]))
             summary = (f"{project}\n{result['goal']}\n복제본 {result['replica']}\n"
-                       f"파일 {', '.join(result['files'])}\n"
+                       f"{edit_summary}\n"
                        "사전 권한 · " + " · ".join(LABELS[key] for key in result["permissions"]) + "\n"
                        f"{result['seconds']}초 / {result['tokens']} 토큰 / 사이클 {result['cycles'] or '예산까지'}\n"
                        f"{result['model']}\n{role_budget}\n"
                        f"{verification}"
                        "Developer는 MXC 안에서 복제본 쓰기와 셸 권한을 사용합니다. "
-                       "Controller가 역할 종료 후 지정 파일 밖의 변경을 차단합니다. "
+                       "Controller가 역할 종료 후 승인 범위와 보호 파일의 무결성을 확인합니다. "
                        "승인된 프로젝트 문맥과 변경 근거가 모델에 전달됩니다. 명령 네트워크는 꺼져 있습니다.")
             if result.get("research"):
                 summary += ("\n계획 Manager와 Developer가 공식 Codex 검색으로 공개 자료를 조사합니다. "
@@ -637,10 +647,11 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                       "role_seconds": {role: min(cap, seconds) for role, cap in defaults["role_seconds"].items()},
                       "role_tokens": role_tokens}
             registered_cycle.validate_limits(limits)
+            files = [] if whole.get() else [name.strip() for name in values["files"].split(",") if name.strip()]
+            if not whole.get() and not files:
+                raise ValueError("수정할 파일을 입력하거나 ‘복제본 전체 개발’을 선택하세요.")
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
-                    [name.strip() for name in values["files"].split(",") if name.strip()],
-                    permissions, verifier,
-                    role_tokens["manager-planning"])
+                    files, permissions, verifier, role_tokens["manager-planning"])
         except (RuntimeError, ValueError) as error:
             state.set(str(error))
             return
@@ -750,8 +761,10 @@ def show(center, project, *, resume_only=False, continue_progress=False):
 
     buttons = ttk.Frame(footer)
     buttons.pack(fill="x")
-    button = ttk.Button(buttons, text="세션 검토 및 시작", command=start, style="Primary.TButton")
-    resume_button = ttk.Button(buttons, text="중단 작업 재개 검토", command=resume)
+    button = ttk.Button(buttons, text="새 권한으로 이어서 개발" if continue_progress else "세션 검토 및 시작",
+                        command=start, style="Primary.TButton")
+    resume_button = ttk.Button(buttons, text="기존 권한으로 재개" if continue_progress else "중단 작업 재개 검토",
+                               command=resume)
     close_button = ttk.Button(buttons, text="닫기 / 중단", command=close)
     apply_button = ttk.Button(buttons, text="원본 반영 검토", command=lambda: center.original_apply_panel(project))
     for index, control in enumerate((button, resume_button, apply_button, close_button)):

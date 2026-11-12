@@ -228,11 +228,25 @@ def _expected_observation(check):
 
 def prerequisite_scope_hash(scope):
     values = [scope.get(key) for key in ("files", "requirements", "verifier", "network", "install")]
+    if scope.get("project_edit"):
+        values.append("PROJECT_EDIT")
     if scope.get("research") or scope.get("tool_packages"):
         values.extend((scope.get("research"), scope.get("tool_packages")))
     if scope.get("portable_source_policy"):
         values.append(scope["portable_source_policy"])
     return digest(values)
+
+
+def _editable_paths(paths, protected=(), *, limit=MAX_EDIT_PATHS):
+    blocked = {name.casefold() for name in protected}
+    if (type(paths) is not list or not 1 <= len(paths) <= limit
+            or any(type(name) is not str for name in paths)
+            or len({name.casefold() for name in paths}) != len(paths)
+            or any(_protected(name) or name.casefold() in blocked
+                   or ".git" in {part.casefold() for part in _relative(name).parts}
+                   or _relative(name).name.casefold() in {"agents.md", "agents.override.md"} for name in paths)):
+        raise Blocked(f"복제본에서 보호되지 않은 파일 경로를 최대 {limit}개 선택하세요.")
+    return paths
 
 
 def _allows_github_tools(scope):
@@ -248,18 +262,25 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
     cycle = end.get("cycle_count")
     accepted = []
     saved_progress = rows[-2] if len(rows) >= 2 else {}
+    manual = (end.get("outcome") == MANUAL_CHECKPOINT
+              and saved_progress.get("kind") == "native_inspection_manual_checkpoint")
+    allowed_changes = set(prior.get("files", ())) | set(prior.get("prior_replica_candidate", {}).get("changed", ()))
+    allowed_changes.update(prior.get("resume", {}).get("changed_total", prior.get("resume", {}).get("changed", ())))
+    if prior.get("project_edit"):
+        for row in rows:
+            if row.get("run_id") == end.get("run_id") and row["kind"] == "native_inspection_developer_diff":
+                allowed_changes.update(row["changed"])
     progress_checkpoint = (
-        end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK", NEEDS_INPUT,
-                               "USER_TEST_REQUIRED"}
-        and saved_progress.get("kind") == "native_inspection_progress_checkpoint"
+        (manual or (end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK",
+                                          NEEDS_INPUT, "USER_TEST_REQUIRED"}
+                    and saved_progress.get("kind") == "native_inspection_progress_checkpoint"))
         and saved_progress.get("run_id") == end.get("run_id") and saved_progress.get("source_sha256") == image_hash
         and saved_progress.get("changed") == end.get("changed") and end.get("usage_complete") is True
         and end.get("staging_cleanup", {}).get("status") == "REMOVED"
         and digest(prior) == start.get("approval_sha256") == end.get("approval_sha256")
-        and all(name in prior.get("files", ()) or name in prior.get("prior_replica_candidate", {}).get("changed", ())
-                for name in end.get("changed", ())))
+        and set(end.get("changed", ())) <= allowed_changes)
     if progress_checkpoint:
-        accepted = [key for key in saved_progress["accepted_without_functional_check"] if key in prior["criteria"]]
+        accepted = [key for key in saved_progress.get("accepted_without_functional_check", ()) if key in prior["criteria"]]
     elif end.get("outcome") == "NO_PROGRESS":
         # Admit only a finished, accepted cycle whose final Manager explicitly requested continuation.
         # Other no-progress exits (including repeated edits without a review) remain ineligible.
@@ -294,7 +315,8 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
                        and (row.get("integrity") == "PASS" or row.get("game", {}).get("outcome") == "PASS")
                        for row in rows))):
         raise Blocked("복제본이 온보딩 상태와 다릅니다. 확인된 개발 결과인지 기록·복구에서 확인하세요.")
-    rework = _bounded_rework(prior["criteria"], saved_progress.get("rework")) if progress_checkpoint else None
+    rework = (_bounded_rework(prior["criteria"], saved_progress.get("rework", saved_progress.get("feedback")))
+              if progress_checkpoint else None)
     deferred = {key: value for key, value in saved_progress.get("deferred_criteria", {}).items()
                 if key in prior["criteria"]} if progress_checkpoint else {}
     if rework and end.get("outcome") == "NO_PROGRESS" and not deferred:
@@ -345,10 +367,9 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     if source == replica or source.is_relative_to(replica) or replica.is_relative_to(source):
         raise Blocked("The onboarded replica and original must be separate")
     image = snapshot(replica)
+    project_edit = not game and files == []
     is_godot = any(name.casefold() == "project.godot" for name in image["files"])
     generic_gui = godot_verifier_spec(spec)
-    if is_godot and not (game or generic_gui):
-        raise Blocked("Godot 프로젝트에는 Windows 내보내기와 소유 창 검증을 선택하세요.")
     if game and (not is_godot or project != game_pilot.PROJECT
                  or set(files) != set(game_pilot.DEVELOPMENT_FILES)
                  or (game_limits is None and (seconds, tokens, cycles) != (1500, 350000, 2))):
@@ -370,13 +391,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     with _git(ledger, source) as (git, _):
         if _scan(source, git, frozen["local_examples"]) != frozen:
             raise Blocked("Original Git inventory changed after onboarding")
-    if (type(files) is not list or not 1 <= len(files) <= MAX_EDIT_PATHS
-            or any(type(name) is not str for name in files)
-            or len({name.casefold() for name in files}) != len(files)
-            or any(_protected(name) or ".git" in {part.casefold() for part in _relative(name).parts}
-                   or name.rsplit("/", 1)[-1].casefold() in {"agents.md", "agents.override.md"}
-                   for name in files)):
-        raise Blocked(f"Choose up to {MAX_EDIT_PATHS} exact, non-protected paths")
+    if not project_edit:
+        _editable_paths(files)
     catalog = Catalog(ledger).read()
     row = catalog["projects"][project]
     data = row["data"]
@@ -393,7 +409,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         role_tokens = dict(game_pilot.ROLE_LIMITS if game_limits is None else game_limits["role_tokens"])
         criteria[game_pilot.CRITERIA[0]]["checks"] = [{"title": game_pilot.CRITERIA[0]}]
     elif generic_gui:
-        if not is_godot and "project.godot" not in files:
+        if not is_godot and not project_edit and "project.godot" not in files:
             raise Blocked("Godot 검증을 시작하려면 project.godot를 수정·생성 범위에 포함하세요.")
         tools_root = None
         if "tools_root" in spec:
@@ -419,6 +435,10 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     refs = list(requirements)
     if any(ref["path"] in files for ref in refs):
         raise Blocked("Registered requirements cannot be changed by the Developer")
+    protected = sorted(set(data["documents"].values()) | {ref["path"] for ref in refs}
+                       | {path for check in verifier.get("checks", {}).values() for path in check["inputs"]})
+    if not project_edit:
+        _editable_paths(files, protected)
     archive = Path(archive).absolute()
     check_path(archive)
     if not archive.is_file():
@@ -448,6 +468,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "onboarding_sha256": digest(onboarding), "original_head": frozen["head"], "original_git": frozen["git"],
             "original_changes": {key: frozen[key] for key in ("staged", "raw_worktree_changed", "local_examples")},
             "replica_sha256": digest(image), "files": sorted(files),
+            **({"project_edit": True, "protected_edit_paths": protected} if project_edit else {}),
             "permissions": [key for key in (*PERMISSIONS, *OPTIONAL_PERMISSIONS) if key in permissions],
             **({"prior_replica_candidate": prior_replica_candidate} if prior_replica_candidate else {}),
             "verifier": verifier, "archive": str(archive), "archive_sha256": ARCHIVE_SHA256,
@@ -638,6 +659,33 @@ def _read_source(root, name, image):
         raise Blocked(f"{name} 파일을 UTF-8 텍스트로 읽을 수 없습니다.") from None
 
 
+def _review_text(root, name, image):
+    try:
+        return _read_source(root, name, image)
+    except Blocked:
+        return None
+
+
+def _project_review_diff(root, changed, before, old, updated):
+    pieces = []
+    text_budget = MAX_DIFF // 2
+    for name in changed:
+        previous = before.get(name) if name in old else ""
+        current = _review_text(root, name, updated)
+        if previous is not None and current is not None:
+            text = "".join(unified_diff(previous.splitlines(keepends=True), current.splitlines(keepends=True),
+                                        fromfile=f"a/{name}" if name in old else "/dev/null",
+                                        tofile=f"b/{name}" if name in updated["files"] else "/dev/null"))
+            if text and not text.endswith("\n"):
+                text += "\n"
+            if text and len(text) <= text_budget:
+                pieces.append(text)
+                text_budget -= len(text)
+                continue
+        pieces.append(f"{name}: {json.dumps(old.get(name))} → {json.dumps(updated['files'].get(name))}\n")
+    return "".join(pieces)
+
+
 class RegisteredSession(_FixtureSession):
     def prepare(self):
         _, _, self.original_image, _ = baseline(self.runner.ledger, self.scope["project_id"])
@@ -756,11 +804,20 @@ class RegisteredSession(_FixtureSession):
                         source_sha256=self.source())
             return saved["message"]
         paths = self.scope["files"] if allowed_paths is None else allowed_paths
+        whole = phase == "developer" and self.scope.get("project_edit")
         if phase == "reviewer" and not images:
             response_schema = _response_schema(verdict=REVIEW_VERDICTS, reason=None)
         if allowed_paths is not None and (phase != "developer" or not set(paths) <= set(self.scope["files"])):
             raise Blocked("The planned role paths exceed the approved scope")
-        before = {name: _read_source(self.work, name, self.image) for name in paths} if phase == "developer" else {}
+        if whole:
+            before = {}
+            remaining = 16 * 1024**2
+            for name, info in sorted(self.image["files"].items()):
+                if info["bytes"] <= min(MAX_SOURCE_BYTES, remaining):
+                    before[name] = _review_text(self.work, name, self.image)
+                    remaining -= info["bytes"]
+        else:
+            before = {name: _read_source(self.work, name, self.image) for name in paths} if phase == "developer" else {}
         if phase == "developer":
             prompt += ("\nUse the approved Codex file and offline command tools to inspect the current replica. "
                        "Read existing approved files relative to the working directory. "
@@ -788,9 +845,16 @@ class RegisteredSession(_FixtureSession):
                 "Keep generated files out of the replica. If the project has no runnable GUI yet, "
                 "continue the planned development and leave the preview absent."
             )
+        elif whole:
+            scratch_root = self.logs(f"{cycle}-developer-build")
+            prompt += (f"\nUse {scratch_root} for generated build outputs, caches and temporary test files. "
+                       "Keep source, project configuration and reusable assets in the replica.")
         try:
             with self.portable_tools(cycle, phase, selected_tools) as portable:
                 extra_roots = (Path(tool["template"]).parent,) if game and phase == "developer" else ()
+                if whole:
+                    extra_roots += tuple(self.work / _relative(name) for name in self.scope["protected_edit_paths"]
+                                         if name in self.image["files"])
                 if portable is not None:
                     extra_roots += (portable,)
                     prompt += (f"\nThe Controller provisioned approved portable tools in {portable}. "
@@ -839,14 +903,19 @@ class RegisteredSession(_FixtureSession):
         old = self.image["files"]
         new = updated["files"]
         changed = sorted(name for name in old.keys() | new.keys() if old.get(name) != new.get(name))
+        whole = self.scope.get("project_edit")
         if ({k: v for k, v in updated.items() if k != "files"} !=
                 {k: v for k, v in self.image.items() if k != "files"}
                 or not original_matches(self.original, self.original_image)
-                or any(name not in before or name not in new for name in changed)):
+                or (not whole and any(name not in before or name not in new for name in changed))):
             raise Blocked("Developer changed Git identity, original or an unapproved path")
         if not changed:
             raise NoDeveloperChange("Developer completed without changing the approved files")
-        diff = "".join("".join(unified_diff(before[name].splitlines(keepends=True),
+        if whole:
+            _editable_paths(changed, self.scope["protected_edit_paths"], limit=4096)
+            diff = _project_review_diff(self.work, changed, before, old, updated)
+        else:
+            diff = "".join("".join(unified_diff(before[name].splitlines(keepends=True),
                                             _read_source(self.work, name, updated).splitlines(keepends=True),
                                             fromfile=f"a/{name}", tofile=f"b/{name}")) for name in changed)
         if len(diff) > MAX_DIFF:
@@ -1346,7 +1415,7 @@ def _decision_compatible(scope, comparison, expected, final):
              and "graceful_stop" in scope and "USER_TEST_REQUIRED" in comparison["criteria"].values()))
 
 
-def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools=False):
+def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools=False, project_edit=False):
     try:
         plan = json.loads(message, object_pairs_hook=_unique_object)
     except (ValueError, Blocked, RecursionError):
@@ -1374,7 +1443,12 @@ def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools
                                                   "test_targets", "tools_versions", "outputs_evidence"}:
         raise PlanFormatError("계획 Manager의 작업 설명 형식 또는 길이를 확인하세요.")
     artifact = detail["artifact"]
-    if (type(artifact) is not str or artifact not in approved_paths or detail["mode"] != mode
+    if project_edit:
+        try:
+            _editable_paths([artifact])
+        except Blocked as error:
+            raise PlanFormatError(str(error)) from None
+    if (type(artifact) is not str or (not project_edit and artifact not in approved_paths) or detail["mode"] != mode
             or mode == "verify" or (mode == "documentation" and not _documentation_path(artifact))):
         raise Blocked("계획 Manager가 승인된 파일 또는 작업 유형을 벗어났습니다.")
     for field in ("change", "tools_versions", "outputs_evidence"):
@@ -1556,7 +1630,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         documents = read_frozen_requirements(catalog, project, scope["requirements"],
                                             session.runner.ledger.state_boundary)
         context = json.dumps({"goal": scope["goal"], "criteria": criteria, "status": status,
-                              "approved_paths": scope["files"],
+                              "approved_paths": ("whole replica; protected paths excluded" if scope.get("project_edit")
+                                                 else scope["files"]),
+                              "protected_paths": scope.get("protected_edit_paths", []),
                               "approved_capabilities": {"command_network": scope.get("network", "COMMANDS_OFF"),
                                                         "web_research": scope.get("research", "OFF"),
                                                         "public_github_zip": _allows_github_tools(scope),
@@ -1626,7 +1702,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    "containing the artifact, changes and checks. Do not nest a plan object. "
                                    "Set mode to edit for implementation. For a planned document-only milestone, "
                                    "set mode to documentation and use only "
-                                   "approved document paths. Document progress does not satisfy functional checks. "
+                                   "unprotected document paths. Document progress does not satisfy functional checks. "
                                    "Use mode needs-input only if this criterion cannot advance within the approved inputs, "
                                    "files or capabilities. State the specific missing prerequisite in plan. Never fabricate "
                                    "external evidence or plan repeated edits that cannot resolve the prerequisite. "
@@ -1635,7 +1711,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    response_schema=schema)
             try:
                 plan = _parse_plan(message, pending, game=bool(brief), approved_paths=scope["files"],
-                                   github_tools=github_tools)
+                                   github_tools=github_tools, project_edit=bool(scope.get("project_edit")))
             except PlanFormatError as error:
                 session.plan_format_reason = str(error)
                 session.record("native_inspection_plan_format_failed", cycle=count, phase="manager-planning",
@@ -1655,7 +1731,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         planned_files = [name for name in scope["files"] if _documentation_path(name)] if documentation else scope["files"]
         if "artifact" in plan:
             planned_files = [plan["artifact"]]
-        if documentation and not planned_files:
+        whole = scope.get("project_edit")
+        if documentation and not planned_files and not whole:
             raise Blocked("문서 작업에 승인된 파일 경로가 없습니다.")
         tool = scope["verifier"]
         verification_args = tool.get("checks", {}).get(key, {}).get("args")
@@ -1693,14 +1770,19 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             visual_feedback = (f"Prior Reviewer findings (untrusted evidence): {feedback['review']}\n"
                                if same_rework and "review" in feedback else "")
             _handoff(session, count, "developer", "Manager가 전달한 계획 · " + plan["plan"])
+            write_scope = ("Implement the plan using source, configuration and asset paths within the approved replica. "
+                           if whole else f"Only modify or create {planned_files}. ")
+            if whole and documentation:
+                write_scope += "This is a document-only milestone. "
             try:
                 diff = session.call(count, "developer", key,
                                     f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\nPlan: {plan['plan']}\n"
-                                    f"Only modify or create {planned_files}. Preserve requirements, verification and Git. "
+                                    f"{write_scope}Preserve requirements, verification and Git. "
                                     f"{tool_context}{visual_feedback}"
                                     "Inspect the project and choose the implementation. Use installed tools only.",
                                     **({"selected_tools": plan.get("tools", [])} if _allows_github_tools(scope) else {}),
-                                    **({"allowed_paths": planned_files} if documentation or "artifact" in plan else {}))
+                                    **({"allowed_paths": planned_files}
+                                       if not whole and (documentation or "artifact" in plan) else {}))
             except NoDeveloperChange:
                 diff = ""
             except project_tools.PackageUnavailable as error:
@@ -1731,6 +1813,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 continue
             known.add(identity)
             files = session.last_changed
+            if whole and documentation:
+                documentation = all(_documentation_path(name) for name in files)
         session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
                                  "changed": files, "diff": diff, "documentation": documentation,
                                  "continuation": {"known": sorted(known), "reviewed": sorted(reviewed),
@@ -1961,7 +2045,8 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
         raise Blocked("Additional budget must cover the remaining model role reservations")
     resume = {k: checkpoint[k] for k in ("cycle", "criterion", "criteria_status", "changed", "diff_sha256")}
     resume.update(mode="signoff", parent_run_id=start["run_id"], review=review,
-                  comparison=checkpoint.get("comparison"), parent_reported_tokens=end["known_reported_tokens"])
+                  comparison=checkpoint.get("comparison"), parent_reported_tokens=end["known_reported_tokens"],
+                  **({"changed_total": end["changed"]} if prior.get("project_edit") else {}))
     if checkpoint.get("visual"):
         resume["visual"] = checkpoint["visual"]
     if checkpoint.get("pending_visual"):
@@ -2270,7 +2355,8 @@ def _resume_registered_plan_contract(runner, events, head, rows, expires, second
         raise Blocked("보존된 Reviewer 재작업 근거를 확인할 수 없습니다.")
     message = (recovered["message"] if recovered else
                _read_settled_response(ledger, _response_ref(start, intents[-1], results[-1]), prior))
-    plan = _parse_plan(message, [key], approved_paths=prior["files"], github_tools=_allows_github_tools(prior))
+    plan = _parse_plan(message, [key], approved_paths=prior["files"], github_tools=_allows_github_tools(prior),
+                       project_edit=bool(prior.get("project_edit")))
     resume = {**checkpoint["continuation"], "mode": "after-registered-planning", "cycle": 1,
               "criteria_status": progress["criteria"], "changed": checkpoint["changed"], "stagnant": 1,
               "failures": [cycle_progress.failure_fingerprint("reviewer", [finding], digest(prior["verifier"]))],
@@ -2544,7 +2630,7 @@ def _resume_remaining(session, diff):
     session.progress = status
     session.cycles_checked = count - 1
     postprocess = resume.get("mode") == "postprocess"
-    session.changes = resume["changed_total"] if postprocess else session.scope["files"]
+    session.changes = resume.get("changed_total", session.scope["files"])
     session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
                              "changed": resume["changed"], "diff": diff,
                              "documentation": bool(resume.get("documentation"))}

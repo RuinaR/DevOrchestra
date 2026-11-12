@@ -167,7 +167,8 @@ def _prepare_registered(events, head, project, expires, source, replica, frozen,
             or not (verified.get("source_sha256") == review.get("source_sha256") ==
                     end["replica_sha256"] == digest(image)) or not original_matches(source, frozen)):
         raise Blocked("Registered review, verification or source evidence changed")
-    paths = changes({**image, "files": frozen["files"]}, image, set(scope["files"]))
+    allowed = set(end["changed"] if scope.get("project_edit") else scope["files"])
+    paths = changes({**image, "files": frozen["files"]}, image, allowed)
     if any(value["after"] is None for value in paths.values()):
         raise Blocked("Registered result exceeds the original write scope")
     if sum(part["bytes"] for row in paths.values() for part in row.values() if part) > REGISTERED_APPLY_BYTES:

@@ -1188,7 +1188,10 @@ class CommandCenter:
             elif kind == "native_inspection_developer_diff":
                 lines.append(f"{cycle}사이클 · 파일 변경 확인 · " + ", ".join(row["changed"]))
             elif kind == "native_inspection_plan_accepted":
-                lines.append(f"{cycle}사이클 · 계획 확정 · {row['target']}")
+                if row.get("mode") != "needs-input":
+                    lines.append(f"{cycle}사이클 · 계획 확정 · {row['target']}")
+            elif kind == "native_inspection_criterion_deferred":
+                lines.append(f"{cycle}사이클 · 기준 보류 · {row['target']} · {row['reason']}")
             elif kind == "native_inspection_review_capture_started":
                 lines.append(f"{cycle}사이클 · Reviewer용 화면 준비 시작")
             elif kind == "native_inspection_review_capture_result":
@@ -1403,6 +1406,8 @@ class CommandCenter:
         if progress["checkpoint_kind"] == "native_inspection_progress_checkpoint":
             return end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK",
                                           "NEEDS_INPUT", "USER_TEST_REQUIRED"}
+        if progress["checkpoint_kind"] == "native_inspection_manual_checkpoint":
+            return end.get("outcome") == "CHECKPOINT_SAVED"
         if end.get("outcome") == "USER_TEST_REQUIRED":
             return progress["scope"]["verifier"].get("mode") in {"replica-integrity", "godot-owned-gui"}
         latest = progress.get("latest_progress", {})
