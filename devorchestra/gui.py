@@ -1185,7 +1185,8 @@ class CommandCenter:
             elif kind == "native_inspection_developer_diff":
                 lines.append(f"{cycle}사이클 · 변경 파일 · " + ", ".join(row["changed"]))
             elif kind == "native_inspection_project_tool_ready":
-                lines.append(f"{cycle}사이클 · 프로젝트 도구 준비 · {row['name']}")
+                name = f"{row['repository']} @ {row['ref']}" if "repository" in row else row["name"]
+                lines.append(f"{cycle}사이클 · 프로젝트 도구 준비 · {name}")
             elif kind == "native_inspection_project_tools_cleanup":
                 label = "정리 완료" if row["result"] == "REMOVED" else "정리 확인 필요"
                 lines.append(f"{cycle}사이클 · 프로젝트 도구 · {label}")

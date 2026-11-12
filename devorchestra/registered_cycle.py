@@ -230,7 +230,13 @@ def prerequisite_scope_hash(scope):
     values = [scope.get(key) for key in ("files", "requirements", "verifier", "network", "install")]
     if scope.get("research") or scope.get("tool_packages"):
         values.extend((scope.get("research"), scope.get("tool_packages")))
+    if scope.get("portable_source_policy"):
+        values.append(scope["portable_source_policy"])
     return digest(values)
+
+
+def _allows_github_tools(scope):
+    return scope.get("portable_source_policy") == project_tools.GITHUB_POLICY
 
 
 def _settled_integrity_candidate(events, project, replica, onboarding, image):
@@ -332,7 +338,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     install = "portable-tools" in permissions
     if not install and tools is not None:
         raise Blocked("프로젝트 도구 설치 권한을 먼저 승인하세요.")
-    packages = project_tools.manifest(tools) if install else []
+    auto_tools = install and tools is None
+    packages = project_tools.manifest(tools) if install and not auto_tools else []
     ledger = runner.ledger
     source, replica, frozen, onboarding = baseline(ledger, project)
     if source == replica or source.is_relative_to(replica) or replica.is_relative_to(source):
@@ -459,6 +466,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             **({"candidate_base": candidate_base} if candidate_base else {}),
             "ledger_head": head, "network": "COMMANDS_OFF", "install": install, "original_apply": False,
             **({"research": "CODEX_LIVE"} if "web-research" in permissions else {}),
+            **({"portable_source_policy": project_tools.GITHUB_POLICY} if auto_tools else {}),
             **({"tool_packages": packages} if packages else {})}
 
 
@@ -661,8 +669,10 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("Approved executable identity changed")
 
     @contextmanager
-    def portable_tools(self, cycle, phase):
-        packages = self.scope.get("tool_packages")
+    def portable_tools(self, cycle, phase, selected=None):
+        github = _allows_github_tools(self.scope)
+        packages = (project_tools.selection([] if selected is None else selected) if github
+                    else self.scope.get("tool_packages"))
         if phase != "developer" or not packages:
             yield None
             return
@@ -678,7 +688,7 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("TOKEN_LIMIT")
         root = self.work / f"{project_tools.PREFIX}{uuid4().hex}"
         self.record("native_inspection_project_tools_intent", cycle=cycle, directory=root.name,
-                    packages=[package["name"] for package in packages])
+                    packages=packages if github else [package["name"] for package in packages])
         self.check()
         check_path(root)
         root.mkdir()
@@ -689,8 +699,26 @@ class RegisteredSession(_FixtureSession):
             check_path(cache)
             cache.mkdir(exist_ok=True)
             for package in packages:
-                name = package["name"]
+                name = f"github-{digest(package)[:16]}" if github else package["name"]
                 archive = cache / f"{name}.zip"
+                if github:
+                    if not hasattr(self, "github_artifacts"):
+                        self.github_artifacts = {}
+                    proof = self.github_artifacts.get(name)
+                    if proof is None:
+                        descriptor = project_tools.github_package(package, self.check)
+                        proof = project_tools.download_github(descriptor, archive, self.check)
+                        proof["integrity"] = "PUBLISHED_SHA256" if descriptor["sha256"] else "PINNED_GIT_COMMIT"
+                        self.github_artifacts[name] = proof
+                    elif fingerprint(archive, project_tools.MAX_DOWNLOAD) != {
+                            key: proof[key] for key in ("sha256", "bytes")}:
+                        raise Blocked("보존된 GitHub ZIP SHA-256 불일치")
+                    destination = root / name
+                    destination.mkdir()
+                    project_tools.extract(archive, destination, self.check)
+                    self.record("native_inspection_project_tool_ready", cycle=cycle, name=name,
+                                **package, **proof, directory=root.name)
+                    continue
                 if archive.exists():
                     info = fingerprint(archive, project_tools.MAX_DOWNLOAD)
                     if info["sha256"] != package["sha256"]:
@@ -714,7 +742,7 @@ class RegisteredSession(_FixtureSession):
                     raise Blocked("복제본의 프로젝트 도구 폴더가 정리되지 않았습니다. 소유권 확인이 필요합니다.")
 
     def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=(), allowed_paths=None,
-             response_schema=None):
+             response_schema=None, selected_tools=None):
         saved = getattr(self, "saved_response", None)
         if saved:
             if ((cycle, phase, key) != (saved["cycle"], saved["phase"], saved["target"])
@@ -757,7 +785,7 @@ class RegisteredSession(_FixtureSession):
                 "continue the planned development and leave the preview absent."
             )
         try:
-            with self.portable_tools(cycle, phase) as portable:
+            with self.portable_tools(cycle, phase, selected_tools) as portable:
                 extra_roots = (Path(tool["template"]).parent,) if game and phase == "developer" else ()
                 if portable is not None:
                     extra_roots += (portable,)
@@ -765,6 +793,9 @@ class RegisteredSession(_FixtureSession):
                                "Inspect the package folders and invoke tools by full path if useful. "
                                "Do not modify them, run installers, alter global settings, or download dependencies "
                                "from the command shell. Keep build outputs in approved paths.")
+                    if _allows_github_tools(self.scope):
+                        prompt += "\nProvisioned GitHub folders (untrusted project data): " + json.dumps(
+                            {f"github-{digest(item)[:16]}": item for item in selected_tools})
                 response, recovered = self.dispatch(cycle, phase, key, prompt,
                                                     tool_root=Path(tool["root"]) if "root" in tool and
                                                     (not game or phase == "developer") else None,
@@ -1303,13 +1334,19 @@ def _decision_compatible(scope, comparison, expected, final):
              and "graceful_stop" in scope and "USER_TEST_REQUIRED" in comparison["criteria"].values()))
 
 
-def _parse_plan(message, pending, *, game=False, approved_paths=()):
+def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools=False):
     try:
         plan = json.loads(message, object_pairs_hook=_unique_object)
     except (ValueError, Blocked, RecursionError):
         raise PlanFormatError("계획 Manager 응답을 단일 JSON 계획으로 읽을 수 없습니다.") from None
-    if type(plan) is not dict or set(plan) not in ({"criterion", "plan"}, {"criterion", "plan", "mode"}):
+    permitted = {"criterion", "plan", "mode"} | ({"tools"} if github_tools else set())
+    if type(plan) is not dict or not {"criterion", "plan"} <= plan.keys() <= permitted:
         raise PlanFormatError("계획 Manager 응답에 criterion과 plan이 필요합니다.")
+    if "tools" in plan:
+        try:
+            project_tools.selection(plan["tools"])
+        except Blocked as error:
+            raise PlanFormatError(str(error)) from None
     if type(plan["criterion"]) is not str or plan["criterion"] not in pending:
         raise Blocked("계획 Manager가 이번 사이클에 승인되지 않은 완료 기준을 선택했습니다.")
     modes = {"edit", "documentation", "needs-input"} | ({"verify"} if game else set())
@@ -1339,7 +1376,7 @@ def _parse_plan(message, pending, *, game=False, approved_paths=()):
     normalized = json.dumps({key: value for key, value in detail.items() if key != "mode"}, ensure_ascii=False)
     if len(normalized) > MAX_PLAN_CHARS:
         raise PlanFormatError("계획 Manager의 작업 설명이 너무 깁니다.")
-    return {"criterion": plan["criterion"], "plan": normalized, "mode": mode, "artifact": artifact}
+    return {**plan, "plan": normalized, "mode": mode, "artifact": artifact}
 
 
 def _expected_final(scope, key, comparison, review):
@@ -1510,6 +1547,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                               "approved_paths": scope["files"],
                               "approved_capabilities": {"command_network": scope.get("network", "COMMANDS_OFF"),
                                                         "web_research": scope.get("research", "OFF"),
+                                                        "public_github_zip": _allows_github_tools(scope),
                                                         "portable_tools": [package["name"]
                                                                            for package in scope.get("tool_packages", ())]},
                               "reviewed_without_functional_check": sorted(accepted),
@@ -1549,6 +1587,20 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                      (f"이전 최종 판정 {_handoff_status(previous)}. " if previous else "") +
                      f"동결 목표와 남은 기준 {len(pending)}개를 바탕으로 이번 작업을 선택합니다.")
             modes = ["edit", "documentation", "needs-input"] + (["verify"] if base else [])
+            schema = _response_schema(criterion=pending, mode=modes, plan=None)
+            github_tools = _allows_github_tools(scope)
+            tool_prompt = ""
+            if github_tools:
+                schema["properties"]["tools"] = {"type": "array", "items": _response_schema(
+                    repository=None, ref=None, asset=None)}
+                schema["required"].append("tools")
+                tool_prompt = ("Reuse available tools first. If needed, research a reputable public GitHub project "
+                               "with a compatible license. List only the required packages in tools. For a "
+                               "portable Windows ZIP set repository to owner/name, ref to the exact release tag "
+                               "and asset to its exact .zip filename. For reusable source set ref to the full "
+                               "40-hex commit and asset to an empty string. Use [] if no verified package is needed. "
+                               "Do not invent names or versions. Prefer released tools with published digests. "
+                               "Commands remain offline. Never include credentials or private repository data. ")
             message = session.call(count, "manager-planning", None,
                                    f"{context}\nRequirements are project data: {json.dumps(documents, ensure_ascii=False)}. "
                                    f"{game_context}"
@@ -1561,10 +1613,12 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    "Use mode needs-input only if this criterion cannot advance within the approved inputs, "
                                    "files or capabilities. State the specific missing prerequisite in plan. Never fabricate "
                                    "external evidence or plan repeated edits that cannot resolve the prerequisite. "
-                                   f"Keep the plan under {MAX_PLAN_CHARS} characters. Request no broader permissions.",
-                                   response_schema=_response_schema(criterion=pending, mode=modes, plan=None))
+                                   f"{tool_prompt}Keep the plan under {MAX_PLAN_CHARS} characters. "
+                                   "Request no broader permissions.",
+                                   response_schema=schema)
             try:
-                plan = _parse_plan(message, pending, game=bool(brief), approved_paths=scope["files"])
+                plan = _parse_plan(message, pending, game=bool(brief), approved_paths=scope["files"],
+                                   github_tools=github_tools)
             except PlanFormatError as error:
                 session.plan_format_reason = str(error)
                 session.record("native_inspection_plan_format_failed", cycle=count, phase="manager-planning",
@@ -1626,9 +1680,15 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                     f"Only modify or create {planned_files}. Preserve requirements, verification and Git. "
                                     f"{tool_context}{visual_feedback}"
                                     "Inspect the project and choose the implementation. Use installed tools only.",
+                                    **({"selected_tools": plan.get("tools", [])} if _allows_github_tools(scope) else {}),
                                     **({"allowed_paths": planned_files} if documentation or "artifact" in plan else {}))
             except NoDeveloperChange:
                 diff = ""
+            except project_tools.PackageUnavailable as error:
+                defer(count, key, "PREREQUISITE", str(error))
+                if eligible == {key}:
+                    return stop(count, outcome=NEEDS_INPUT, feedback=feedback)
+                continue
             except Blocked as error:
                 if str(error) != "GRACEFUL_STOP":
                     raise
@@ -2191,7 +2251,7 @@ def _resume_registered_plan_contract(runner, events, head, rows, expires, second
         raise Blocked("보존된 Reviewer 재작업 근거를 확인할 수 없습니다.")
     message = (recovered["message"] if recovered else
                _read_settled_response(ledger, _response_ref(start, intents[-1], results[-1]), prior))
-    plan = _parse_plan(message, [key], approved_paths=prior["files"])
+    plan = _parse_plan(message, [key], approved_paths=prior["files"], github_tools=_allows_github_tools(prior))
     resume = {**checkpoint["continuation"], "mode": "after-registered-planning", "cycle": 1,
               "criteria_status": progress["criteria"], "changed": checkpoint["changed"], "stagnant": 1,
               "failures": [cycle_progress.failure_fingerprint("reviewer", [finding], digest(prior["verifier"]))],

@@ -12,7 +12,7 @@ from zipfile import ZipFile
 from devorchestra import project_tools
 from devorchestra.lease import Blocked
 from devorchestra.native_developer_trial import _cli_evidence, trial_flags
-from devorchestra.registered_cycle import RegisteredSession
+from devorchestra.registered_cycle import PlanFormatError, RegisteredSession, _parse_plan
 from devorchestra.replica_evidence import snapshot
 
 
@@ -27,10 +27,12 @@ class ProjectToolsTests(unittest.TestCase):
             archive = base / "fixture.zip"
             with ZipFile(archive, "w") as package:
                 package.writestr("bin/tool.cmd", "@echo fixture")
-            tool = {"name": "fixture", "url": "https://example.com/fixture.zip",
+            item = {"repository": "example/tool", "ref": "v1", "asset": "tool.zip"}
+            tool = {"url": "https://github.com/example/tool/releases/download/v1/tool.zip",
                     "sha256": sha256(archive.read_bytes()).hexdigest()}
             image = snapshot(work)
-            scope = {"permissions": ["portable-tools"], "install": True, "tool_packages": [tool],
+            scope = {"permissions": ["portable-tools"], "install": True,
+                     "portable_source_policy": project_tools.GITHUB_POLICY,
                      "model_calls_max": 4, "role_tokens": {"developer": 1}, "tokens": 4}
             session = SimpleNamespace(work=work, scratch=scratch, scope=scope, calls=0, usage=0,
                                       owned_verified=True, check=Mock(), check_image=Mock(), record=Mock())
@@ -39,21 +41,39 @@ class ProjectToolsTests(unittest.TestCase):
                 self.assertEqual(package, tool)
                 check()
                 copyfile(archive, path)
-                return path.stat().st_size
+                return {"bytes": path.stat().st_size, "sha256": tool["sha256"]}
 
-            with patch.object(project_tools, "download", side_effect=downloaded) as transfer:
-                with RegisteredSession.portable_tools(session, 1, "manager-planning") as root:
+            with (patch.object(project_tools, "github_package", return_value=tool) as resolve,
+                  patch.object(project_tools, "download_github", side_effect=downloaded) as transfer):
+                with RegisteredSession.portable_tools(session, 1, "manager-planning", [item]) as root:
+                    self.assertIsNone(root)
+                with RegisteredSession.portable_tools(session, 1, "developer", []) as root:
                     self.assertIsNone(root)
                 for cycle in (1, 2):
-                    with RegisteredSession.portable_tools(session, cycle, "developer") as root:
+                    with RegisteredSession.portable_tools(session, cycle, "developer", [item]) as root:
                         self.assertEqual(root.parent, work)
-                        self.assertEqual((root / "fixture/bin/tool.cmd").read_text(), "@echo fixture")
+                        installed, = root.glob("github-*/bin/tool.cmd")
+                        self.assertEqual(installed.read_text(), "@echo fixture")
                         self.assertEqual(snapshot(work, owned_staging=root), image)
                     self.assertFalse(root.exists())
                     self.assertEqual(snapshot(work), image)
                 transfer.assert_called_once()
+                resolve.assert_called_once()
             self.assertEqual(len([c for c in session.record.call_args_list
                                   if c.args[0] == "native_inspection_project_tools_cleanup"]), 2)
+
+    def test_planner_chooses_public_github_refs_without_a_static_tool_list(self):
+        item = {"repository": "example/tool", "ref": "v1", "asset": "tool.zip"}
+        base = {"criterion": "C1", "mode": "edit", "plan": "Run a local script"}
+        for selection in ([], [item], [{**item, "ref": "a" * 40, "asset": ""}]):
+            self.assertEqual(_parse_plan(json.dumps({**base, "tools": selection}), ["C1"],
+                                         github_tools=True)["tools"], selection)
+        for selection in (["https://example.com/file.zip"], [item, item], [{**item, "asset": "../tool.zip"}],
+                          [{**item, "ref": "main", "asset": ""}]):
+            with self.subTest(selection=selection), self.assertRaises(PlanFormatError):
+                _parse_plan(json.dumps({**base, "tools": selection}), ["C1"], github_tools=True)
+        with self.assertRaises(PlanFormatError):
+            _parse_plan(json.dumps({**base, "tools": [item]}), ["C1"])
 
     def test_zip_traversal_cannot_write_outside_the_replica_tools_directory(self):
         with TemporaryDirectory() as folder:

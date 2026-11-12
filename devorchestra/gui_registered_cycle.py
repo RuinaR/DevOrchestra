@@ -17,7 +17,7 @@ from .ledger import digest
 LABELS = {
     "replica-read": "작업 복제본 읽기", "replica-edit": "지정 파일 생성·수정",
     "offline-shell": "복제본에서 오프라인 명령 실행", "pinned-verifier": "지정된 독립 검증 명령 실행",
-    "web-research": "Codex 인터넷 자료 조사", "portable-tools": "승인된 포터블 도구 자동 설치",
+    "web-research": "Codex 인터넷 자료 조사", "portable-tools": "필요한 도구 자동 설치",
 }
 ROLE_LABELS = {"manager-planning": "계획 Manager", "developer": "Developer",
                "reviewer": "Reviewer", "manager-final": "최종 Manager"}
@@ -220,10 +220,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     is_godot = baseline is not None and any(name.casefold() == "project.godot" for name in baseline["files"])
     draft = center.development_budget_drafts.setdefault(project, {})
     grants = _permission_checkboxes(body, draft)
-    ttk.Label(body, text="포터블 도구를 허용할 경우 공식 ZIP의 name, url, sha256을 JSON 목록으로 입력하세요.",
+    ttk.Label(body, text="자동 설치를 허용하면 필요한 공개 GitHub 도구나 소스를 작업 중 찾아 복제본에 준비합니다.",
               wraplength=580).pack(anchor="w")
-    tool_manifest = center.editor_box(body, height=4)
-    tool_manifest.insert("1.0", draft.get("tool_manifest", "[]"))
     use_images = tk.BooleanVar(panel, value=False)
     use_play = tk.BooleanVar(panel, value=False)
 
@@ -435,7 +433,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             save_budget()
             panel.destroy()
 
-    def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False, tools=None):
+    def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False):
         nonlocal future, active
         future = Future()
         active = True
@@ -444,7 +442,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         restart_button.configure(state="disabled")
         state.set("승인 범위 확인 중")
         options = ({"graceful": graceful} if resume else
-                   {"soft_limits": soft_limits, "visual_review": visual_review, "play": play, "tools": tools})
+                   {"soft_limits": soft_limits, "visual_review": visual_review, "play": play})
         review_fn = registered_cycle.review_resume if resume else registered_cycle.review
         run_fn = registered_cycle.run_resume if resume else registered_cycle.run
 
@@ -575,8 +573,11 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             if result.get("research"):
                 summary += ("\n계획 Manager와 Developer가 공식 Codex 검색으로 공개 자료를 조사합니다. "
                             "검색어는 Codex 제공자에게 전달됩니다.")
+            if result.get("portable_source_policy"):
+                summary += ("\n필요할 때 공개 GitHub 릴리스 ZIP 또는 커밋이 고정된 소스 ZIP을 "
+                            "복제본에 설치합니다. 명령 네트워크와 시스템 전체 설치는 꺼져 있습니다.")
             if result.get("tool_packages"):
-                summary += "\n복제본 전용 설치 · Developer 작업 중에만 사용\n" + "\n".join(
+                summary += "\n자동 설치 가능 도구 · 계획에서 선택한 항목만 복제본에 설치\n" + "\n".join(
                     f"{tool['name']} · {tool['url']}\nSHA-256 {tool['sha256']}" for tool in result["tool_packages"])
             if result.get("graceful_stop"):
                 summary += (f"\n역할 초 {result['role_deadlines']}. 시간과 토큰은 소프트 기준입니다. "
@@ -606,8 +607,6 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         if permissions is None:
             return
         try:
-            draft["tool_manifest"] = tool_manifest.get("1.0", "end-1c").strip()
-            packages = json.loads(draft["tool_manifest"]) if "portable-tools" in permissions else None
             verifier = read_spec()
             if verifier != default_verifier and not registered_cycle.godot_verifier_spec(verifier):
                 if not isinstance(verifier.get("executable"), str) or not verifier["executable"].strip():
@@ -644,7 +643,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             state.set(str(error))
             return
         cancelled.clear()
-        submit(args, soft_limits=limits, visual_review=use_images.get(), play=use_play.get(), tools=packages)
+        submit(args, soft_limits=limits, visual_review=use_images.get(), play=use_play.get())
 
     def resume():
         try:
