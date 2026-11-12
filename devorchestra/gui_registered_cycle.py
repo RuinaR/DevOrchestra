@@ -449,8 +449,10 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 checkpoint = result["resume"]
                 if checkpoint.get("mode") == "postprocess":
                     role = ROLE_LABELS[checkpoint["saved_response"]["phase"]]
+                    action = (f"저장된 {role} 응답의 판정을 확정할 수 없어 같은 후보로 {role}만 다시 호출합니다. "
+                              if checkpoint.get("rerun_phase") else f"저장된 {role} 응답과 현재 후보를 사용합니다. ")
                     summary = (f"{project}\n복제본 {result['replica']}\n"
-                               f"저장된 {role} 응답과 현재 후보를 사용합니다. "
+                               f"{action}"
                                f"{checkpoint['cycle']}사이클의 남은 판정부터 이어갑니다.\n"
                                f"이전 확정 사용량 {checkpoint['parent_reported_tokens']:,}토큰\n"
                                f"{'새 승인 예산' if checkpoint.get('renewed_budget') else '남은 예산'} "
@@ -464,12 +466,14 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     else:
                         state.set("재개 승인 취소됨")
                     return
-                if checkpoint.get("mode") == "next-cycle":
+                if checkpoint.get("mode") in {"next-cycle", "after-registered-planning"}:
                     summary = (f"{project}\n복제본 {result['replica']}\n"
                                f"다음 사이클 {checkpoint['cycle'] + 1}부터 이어갑니다.\n"
                                f"남은 승인 예산 {result['seconds']:,}초 · {result['tokens']:,}토큰 · "
                                f"모델 최대 {result['model_calls_max']}회\n"
                                "기존 완료 기준, 파일 범위와 실행 권한을 사용합니다.")
+                    if checkpoint["mode"] == "after-registered-planning":
+                        summary += "\n저장된 Manager 계획을 사용해 Developer부터 실행합니다."
                     if center.confirm("체크포인트에서 이어서 개발", summary, parent=panel):
                         launch(result)
                     else:
@@ -624,7 +628,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             dialog.bind("<Escape>", lambda _event: dialog.destroy())
             dialog.grab_set()
             return
-        if rows and rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT:
+        if rows and (rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT
+                     or registered_cycle.can_review_registered_plan(rows[-1])):
             seconds, tokens, _ = registered_cycle.manual_remaining(rows[0]["scope"], rows[-1])
             cancelled.clear()
             submit((project, int(time()) + seconds + 2940, seconds, tokens), resume=True, graceful=True)

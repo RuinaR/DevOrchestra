@@ -471,7 +471,7 @@ class _FixtureSession:
     def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None, shell_tools=True,
                  decision_parser=None, raw_decision=False,
                  context="This is an isolated arithmetic fixture.", extra_read_roots=(), scratch_root=None,
-                 images=(), image_evidence=()):
+                 images=(), image_evidence=(), response_schema=None):
         self.check()
         self.check_image()
         if images and (phase != "reviewer" or shell_tools or not self.scope.get("visual_review")
@@ -495,6 +495,11 @@ class _FixtureSession:
 
             output_schema = write_schema(self.logs(f"{cycle}-visual-schema") / "review.json",
                                          [frame["id"] for frame in image_evidence])
+        elif response_schema is not None:
+            output_schema = self.logs(f"{cycle}-{phase}-schema") / "response.json"
+            check_path(output_schema)
+            with output_schema.open("x", encoding="utf-8") as stream:
+                json.dump(response_schema, stream)
         prompt = (f"{instructions['text']}\n{context} "
                   "Use only the approved fixture scope. No external actions.\n" + prompt)
         self.calls += 1

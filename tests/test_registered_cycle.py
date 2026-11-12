@@ -21,6 +21,97 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_final_schema_only_offers_evidence_compatible_verdicts(self):
+        session = Mock()
+        session.scope = {"verifier": {}, "graceful_stop": {}}
+        session.signoff_state = {"changed": []}
+        comparison = {"criteria": {"C1": "VERIFIED"}, "newly_verified": ["C1"], "regressed": []}
+        session.call.return_value = '{"verdict":"COMPLETED","reason":"The independent check passed."}'
+        self.assertEqual(registered_cycle._decide(session, 1, "C1", "ACCEPT", comparison, "COMPLETED"),
+                         "COMPLETED")
+        schema = session.call.call_args.kwargs["response_schema"]
+        self.assertEqual(schema["properties"]["verdict"]["enum"], ["COMPLETED"])
+        self.assertEqual(set(schema["required"]), {"verdict", "reason"})
+
+    def test_structured_plan_cannot_widen_the_frozen_criterion_or_file_scope(self):
+        parse = registered_cycle._parse_plan
+        paths = ["docs/DESIGN.md", "src/main.py"]
+        detail = {"mode": "documentation", "artifact": paths[0], "change": "Describe the design",
+                  "acceptance_checks": ["Compare against the goal"], "test_targets": ["Review the diff"],
+                  "tools_versions": "Installed tools", "outputs_evidence": "Project design"}
+        payload = {"criterion": "C1", "plan": detail}
+        plan = parse(json.dumps(payload), ["C1"], approved_paths=paths)
+        self.assertEqual((plan["criterion"], plan["mode"], plan["artifact"]), ("C1", "documentation", paths[0]))
+        self.assertEqual(json.loads(plan["plan"])["test_targets"], detail["test_targets"])
+        for invalid in ({**payload, "criterion": "C2"}, {**payload, "mode": "edit"},
+                        {**payload, "mode": []},
+                        {**payload, "plan": {**detail, "artifact": "../DESIGN.md"}},
+                        {**payload, "plan": {**detail, "artifact": paths[1]}}):
+            with self.subTest(invalid=invalid), self.assertRaises(Blocked) as failure:
+                parse(json.dumps(invalid), ["C1"], approved_paths=paths)
+            self.assertNotIsInstance(failure.exception, registered_cycle.PlanFormatError)
+        with self.assertRaises(registered_cycle.PlanFormatError):
+            parse('{"criterion":"C1","criterion":"C2","plan":"Edit"}', ["C1"], approved_paths=paths)
+        with self.assertRaises(registered_cycle.PlanFormatError):
+            parse(json.dumps({**payload, "plan": {**detail, "test_targets": [False]}}), ["C1"], approved_paths=paths)
+
+    def test_recovered_second_plan_starts_developer_with_prior_review_and_exact_file(self):
+        paths = ["docs/DESIGN.md", "docs/OTHER.md"]
+        scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Design", "checks": []}}, "goal": "Work",
+                 "files": paths, "cycles": 2, "requirements": [], "verifier": {"mode": registered_cycle.BASELINE_VERIFIER},
+                 "resume": {"parent_run_id": "previous"}, "graceful_stop": {}, "model_calls_max": 3}
+        session = SimpleNamespace(scope=scope, image={"files": {"prior": 1}}, runner=Mock(), check=Mock(),
+                                  record=Mock(), source=lambda: digest(session.image), calls=0, stop_reason=None,
+                                  check_image=Mock(), owned_verified=True, usage_complete=True)
+        plan = {"criterion": "C1", "plan": "Resolve the missing evidence", "mode": "documentation",
+                "artifact": paths[0]}
+        continuation = {"cycle": 1, "stagnant": 1, "criteria_status": {"C1": "USER_TEST_REQUIRED"},
+                        "feedback": {"target": "C1", "next": "REWORK", "review": "REWORK · Add test evidence"},
+                        "known": [digest(session.image["files"])], "reviewed": [], "failures": [], "changed": paths[:1]}
+
+        def develop(*_args, **_options):
+            session.image = {"files": {"prior": 2}}
+            session.last_changed = paths[:1]
+            return "new diff"
+
+        session.call = Mock(side_effect=develop)
+        receipt = {"outcome": "COMPLETED", "verdict": "NOT_VALIDATED", "owned_tree": "DRAINED", "observations": []}
+        comparison = {"criteria": {"C1": "USER_TEST_REQUIRED"}, "newly_verified": [], "regressed": []}
+        with (patch.object(registered_cycle, "Catalog"),
+              patch.object(registered_cycle, "read_frozen_requirements", return_value=[]),
+              patch.object(registered_cycle, "_review_and_verify", return_value=("ACCEPT", "ACCEPT", "", receipt, comparison)),
+              patch.object(registered_cycle, "_decide", return_value="CONTINUE")):
+            self.assertEqual(registered_cycle._cycles(session, plan, continuation=continuation), "CYCLE_LIMIT")
+        session.call.assert_called_once()
+        self.assertEqual(session.call.call_args.args[:3], (2, "developer", "C1"))
+        self.assertIn("Add test evidence", session.call.call_args.args[3])
+        self.assertEqual(session.call.call_args.kwargs["allowed_paths"], paths[:1])
+        self.assertEqual(session.cycles_checked, 2)
+
+    def test_unreadable_plan_saves_prior_candidate_and_call_exhaustion_stops_safely(self):
+        scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Design", "checks": []}}, "goal": "Work",
+                 "files": ["docs/DESIGN.md"], "cycles": None, "requirements": [], "verifier": {},
+                 "graceful_stop": {}, "model_calls_max": 1}
+        session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), check_image=Mock(),
+                                  record=Mock(), source=lambda: "verified", owned_verified=True, usage_complete=True,
+                                  admit_graceful=Mock(), request_stop=Mock(), calls=0, call=Mock(return_value="not JSON"))
+        continuation = {"cycle": 1, "stagnant": 1, "criteria_status": {"C1": "USER_TEST_REQUIRED"},
+                        "feedback": {"target": "C1", "next": "REWORK", "review": "REWORK · Evidence missing"},
+                        "known": [], "reviewed": [], "failures": [], "changed": scope["files"]}
+        with (patch.object(registered_cycle, "Catalog"),
+              patch.object(registered_cycle, "read_frozen_requirements", return_value=[])):
+            self.assertEqual(registered_cycle._cycles(session, continuation=continuation),
+                             registered_cycle.MANUAL_CHECKPOINT)
+        self.assertEqual(session.record.call_args.args[0], "native_inspection_manual_checkpoint")
+        self.assertEqual(session.record.call_args.kwargs["cycle"], 1)
+        self.assertEqual(session.record.call_args.kwargs["feedback"]["review"], continuation["feedback"]["review"])
+        self.assertEqual(session.record.call_args.kwargs["changed"], scope["files"])
+        session.calls = 1
+        session.call.reset_mock()
+        self.assertEqual(registered_cycle._cycles(session, continuation=continuation), "GRACEFUL_STOP")
+        session.request_stop.assert_called_once_with("MODEL_CALL_LIMIT", "manager-planning")
+        session.call.assert_not_called()
+
     def test_accepted_planning_rework_advances_without_functional_pass(self):
         first, second = "C1", "C2"
         scope = {"project_id": "fixture", "criteria": {k: {"text": k, "checks": []} for k in (first, second)},
@@ -30,7 +121,7 @@ class RegisteredTrustTests(unittest.TestCase):
                                   source=lambda: digest(session.image), changes=[], cycles_checked=0,
                                   check_image=Mock(), owned_verified=True, usage_complete=True)
 
-        def call(number, phase, target, prompt):
+        def call(number, phase, target, prompt, **_options):
             if phase == "manager-planning":
                 return json.dumps({"criterion": second if number == 3 else first, "plan": "Plan"})
             session.image = {"files": {"docs/PROJECT-PLAN.md": {"revision": number}}}
@@ -117,6 +208,14 @@ class RegisteredTrustTests(unittest.TestCase):
     def test_explicit_verdicts_and_bounded_multiline_reason(self):
         parse = registered_cycle._parse_verdict
         options = registered_cycle.REVIEW_VERDICTS
+        self.assertEqual(parse('{"verdict":"REWORK","reason":"Fix spacing.\\nCheck layout."}', options),
+                         ("REWORK", "Fix spacing.\nCheck layout.", False))
+        self.assertEqual(parse('{"verdict":"REWORK","reason":"ACCEPT: only the layout check passed."}', options),
+                         ("REWORK", "ACCEPT: only the layout check passed.", False))
+        for invalid in ('{"verdict":"REWORK","verdict":"ACCEPT","reason":""}',
+                        '{"verdict":"ACCEPT","reason":[]}'):
+            with self.assertRaises(registered_cycle.VerdictError):
+                parse(invalid, options)
         for message, verdict, reason in [
             ("ACCEPT", "ACCEPT", ""), ("REWORK", "REWORK", ""),
             ("REWORK: fix labels", "REWORK", "fix labels"),
@@ -225,8 +324,12 @@ class RegisteredCycleTests(unittest.TestCase):
     def test_windows_postprocess_reuses_final_manager_and_verifier_without_model_calls(self):
         self._exercise(False, recover="manager")
 
+    def test_windows_final_decision_conflict_recovers_without_replaying_developer(self):
+        self._exercise(False, recover="invalid-manager")
+
     def _exercise(self, resume, *, recover=False):
-        manager_recovery = recover == "manager"
+        manager_recovery = recover in {"manager", "invalid-manager"}
+        retry_decision = recover == "invalid-manager"
         approved = Path(__file__).resolve().parents[1] / ".ai-local" / "temp"
         with TemporaryDirectory(prefix="registered-test-", dir=approved) as folder:
             base = Path(folder)
@@ -279,7 +382,7 @@ class RegisteredCycleTests(unittest.TestCase):
                     keys[0]: {"args": ["/d", "/q", "/c", "type", "greeting.txt"], "stdout": "hello", "inputs": []},
                     keys[1]: {"args": ["/d", "/q", "/c", "type", "closing.txt"], "stdout": "goodbye", "inputs": []}}}
             params = ("registered-test", os.environ["DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"], int(time()) + 600,
-                      300, 270000, 1 if manager_recovery else 2,
+                      300, 270000, 1 if manager_recovery and not retry_decision else 2,
                       ["formatting.py", "closing.py"] if resume else ["greeting.txt", "closing.txt"],
                       list(registered_cycle.PERMISSIONS), tests)
             calls = []
@@ -294,6 +397,10 @@ class RegisteredCycleTests(unittest.TestCase):
                 calls.append((cycle, phase))
                 shell = "true" if phase in {"developer", "reviewer"} else "false"
                 self.assertIn(f"features.shell_tool={shell}", argv)
+                if phase != "developer":
+                    schema = json.loads(Path(argv[argv.index("--output-schema") + 1]).read_text(encoding="utf-8"))
+                    self.assertFalse(schema["additionalProperties"])
+                    self.assertIn("plan" if phase == "manager-planning" else "verdict", schema["required"])
                 command_events = []
                 if phase == "developer":
                     if cycle == 1 and developer_observed is not None:
@@ -334,6 +441,9 @@ class RegisteredCycleTests(unittest.TestCase):
                                              else "REWORK\nThe review requires a fix." if recover and cycle == 1
                                              else "CONTINUE — one check remains." if cycle == 1
                                              else "COMPLETED\nBoth independent checks passed.")}[phase]
+                if retry_decision and phase == "manager-final":
+                    verdict = "CONTINUE" if calls.count((1, "manager-final")) == 1 else "COMPLETED"
+                    message = json.dumps({"verdict": verdict, "reason": "Compare the independent checks."})
                 events = [{"type": "thread.started", "thread_id": "offline"}, {"type": "turn.started"},
                           *command_events,
                           {"type": "item.completed", "item": {"type": "agent_message", "text": message}},
@@ -364,7 +474,7 @@ class RegisteredCycleTests(unittest.TestCase):
                             raise registered_cycle.VerdictError("Simulated previous parser failure")
                         return parse(message, options)
 
-                    with patch.object(registered_cycle, "_parse_verdict", side_effect=legacy_format):
+                    with patch.object(registered_cycle, "_parse_verdict", side_effect=parse if retry_decision else legacy_format):
                         stopped = registered_cycle.run(runner, *params, approval=digest(scope))
                     self.assertEqual(stopped["outcome"], registered_cycle.POSTPROCESS_PENDING)
                     self.assertEqual(stopped["model_turns_dispatched"], 4 if manager_recovery else 3)
@@ -374,6 +484,7 @@ class RegisteredCycleTests(unittest.TestCase):
                     approved = registered_cycle.review_resume(runner, *args, graceful=True)
                     ref = approved["resume"]["saved_response"]
                     self.assertEqual(ref["phase"], "manager-final" if manager_recovery else "reviewer")
+                    self.assertEqual(approved["resume"].get("rerun_phase"), "manager-final" if retry_decision else None)
                     expected_calls = [(1, "manager-planning"), (1, "developer"), (1, "reviewer")]
                     if manager_recovery:
                         expected_calls.append((1, "manager-final"))
@@ -388,9 +499,11 @@ class RegisteredCycleTests(unittest.TestCase):
                         saved_log.write_bytes(saved_bytes)
                     result = registered_cycle.run_resume(runner, *args, approval=digest(approved), graceful=True)
                     self.assertEqual((result["model_turns_dispatched"], result["known_reported_tokens"]),
-                                     (0, 0) if manager_recovery else (5, 525))
+                                     (1, 105) if retry_decision else (0, 0) if manager_recovery else (5, 525))
                     rows = registered_cycle.history(ledger, "registered-test")
-                    self.assertTrue(any(row["kind"] == "native_inspection_role_reused" for row in rows))
+                    self.assertEqual(any(row["kind"] == "native_inspection_role_reused" for row in rows), not retry_decision)
+                    self.assertTrue(any(row["kind"] == "native_inspection_verifier_reused" for row in rows)
+                                    if manager_recovery else True)
                     with self.assertRaises(Blocked):
                         registered_cycle.run_resume(runner, *args, approval=digest(approved), graceful=True)
                 elif resume:
@@ -420,7 +533,7 @@ class RegisteredCycleTests(unittest.TestCase):
                 self.assertEqual(result["outcome"], "COMPLETED", result)
                 with self.assertRaises(Blocked):
                     registered_cycle.run(runner, *params, approval=digest(scope))
-            self.assertEqual(len(calls), 4 if manager_recovery else 8)
+            self.assertEqual(len(calls), 5 if retry_decision else 4 if manager_recovery else 8)
             self.assertEqual(result["cycle_count"], 1 if manager_recovery else 2)
             self.assertEqual(result["criteria_status"], dict.fromkeys(keys, "VERIFIED"))
             self.assertEqual(result["staging_cleanup"]["status"], "REMOVED")

@@ -1181,6 +1181,8 @@ class CommandCenter:
                 lines.append(f"{cycle}사이클 · 체크포인트 기록")
             elif kind == "native_inspection_progress_checkpoint":
                 lines.append(f"{cycle}사이클 · 새 승인으로 이어갈 후보 저장")
+            elif kind == "native_inspection_plan_format_failed":
+                lines.append(f"{cycle}사이클 · 계획 응답 완료 · {row['reason']}")
             elif kind == "native_inspection_replan":
                 reason = {"NO_FILE_CHANGE": "승인 파일 변경 없음", "REPEATED_CANDIDATE": "이전 파일 상태 반복",
                           "REPEATED_REVIEW": "이미 검토한 후보"}.get(row["reason"], row["reason"])
@@ -1216,7 +1218,7 @@ class CommandCenter:
             return "RUNNING" if running and not end else "UNSETTLED"
         if row["kind"] == "native_inspection_role_reused":
             return "RESPONSE_REUSED"
-        if row["kind"] == "native_inspection_postprocess_failed":
+        if row["kind"] in {"native_inspection_postprocess_failed", "native_inspection_plan_format_failed"}:
             return "POSTPROCESS_PENDING"
         if row["kind"] == "native_inspection_role_feedback":
             return "VERDICT_PARSED"
@@ -1390,7 +1392,7 @@ class CommandCenter:
             return False
         if CommandCenter.can_continue_progress_stop(progress):
             return True
-        if registered_cycle.can_review_postprocess(end):
+        if registered_cycle.can_review_postprocess(end) or registered_cycle.can_review_registered_plan(end):
             return end.get("staging_cleanup", {}).get("status") == "RETAINED_FOR_RECOVERY"
         if end["outcome"] == registered_cycle.MANUAL_CHECKPOINT:
             scope = progress["scope"]
@@ -1424,7 +1426,8 @@ class CommandCenter:
             pause = job["pause"].state if active else "NONE"
             available = (active and not job["cancelled"].is_set()
                          and (not job["scope"].get("resume")
-                              or job["scope"]["resume"].get("mode") in {"next-cycle", "after-manager-planning"}))
+                              or job["scope"]["resume"].get("mode") in {
+                                  "next-cycle", "after-manager-planning", "after-registered-planning"}))
             end = (progress or {}).get("end") or {}
             resumable = not active and self.can_resume_registered(progress)
             allowed = {"request": available and pause == "NONE", "cancel": available and pause == "SCHEDULED",

@@ -60,7 +60,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
         elif kind == "native_inspection_review_decision":
             roles["reviewer"] = {**roles.get("reviewer", {}), **row, "phase": "reviewer"}
         elif kind in {"native_inspection_decision_applied", "native_inspection_decision_rejected",
-                      "native_inspection_postprocess_failed"}:
+                      "native_inspection_postprocess_failed", "native_inspection_plan_format_failed"}:
             phase = row["phase"]
             roles[phase] = {**roles.get(phase, {}), **row}
         elif kind == "native_inspection_developer_diff":
@@ -80,6 +80,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
                 "native_inspection_review_decision", "native_inspection_visual_review", "native_inspection_role_feedback",
                 "native_inspection_role_reused", "native_inspection_decision_applied",
                 "native_inspection_decision_rejected", "native_inspection_postprocess_failed",
+                "native_inspection_plan_format_failed",
                 "native_inspection_manager_plan_reused", "native_inspection_developer_skipped",
                 "native_inspection_manual_checkpoint", "native_inspection_progress_checkpoint",
                 "native_inspection_replan"}],

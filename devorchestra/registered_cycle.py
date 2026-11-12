@@ -27,6 +27,7 @@ from .native_developer_trial import (
 from .project_onboarding import _git, _protected, _relative, _scan
 from .replica_evidence import fingerprint, snapshot
 from .replica_readiness import baseline, original_matches
+from .role_contract import _unique_object
 
 
 KIND = "REGISTERED_CODEX_CYCLE"
@@ -43,6 +44,7 @@ MAX_SIGNOFF_TOKENS = REGISTERED_ROLE_TOKEN_CAPS["reviewer"] + REGISTERED_ROLE_TO
 MANUAL_CHECKPOINT = "CHECKPOINT_SAVED"
 POSTPROCESS_PENDING = "POSTPROCESS_PENDING"
 LEGACY_VERDICT_ERROR = "Role did not return a valid verdict"
+LEGACY_PLAN_ERROR = "Manager plan exceeds the approved criteria"
 REVIEW_VERDICTS = {"ACCEPT", "REWORK"}
 FINAL_VERDICTS = {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"}
 VERDICT_TOKENS = REVIEW_VERDICTS | FINAL_VERDICTS | {"UNAVAILABLE", "BLOCKED"}
@@ -51,6 +53,10 @@ MAX_VERDICT_REASON = 1200
 
 class VerdictError(Blocked):
     """The provider settled, but its decision could not be interpreted."""
+
+
+class PlanFormatError(Blocked):
+    """Planning completed, but its response could not be decoded as a plan."""
 
 
 class NoDeveloperChange(Blocked):
@@ -98,8 +104,26 @@ def _verdict(message, options):
     return verdict, reason
 
 
+def _response_schema(**properties):
+    return {"type": "object", "properties": {
+        key: {"type": "string", **({"enum": sorted(options)} if options is not None else {})}
+        for key, options in properties.items()
+    }, "required": list(properties), "additionalProperties": False}
+
+
 def _parse_verdict(message, options):
     """Read one explicit leading verdict and a bounded, possibly multiline reason."""
+    if isinstance(message, str) and message.lstrip().startswith("{"):
+        try:
+            response = json.loads(message, object_pairs_hook=_unique_object)
+        except (ValueError, Blocked, RecursionError):
+            raise VerdictError(LEGACY_VERDICT_ERROR) from None
+        if (type(response) is not dict or set(response) != {"verdict", "reason"}
+                or type(response["verdict"]) is not str or response["verdict"] not in options
+                or type(response["reason"]) is not str):
+            raise VerdictError(LEGACY_VERDICT_ERROR)
+        reason = response["reason"].strip()
+        return response["verdict"], reason[:MAX_VERDICT_REASON].rstrip(), len(reason) > MAX_VERDICT_REASON
     lines = message.strip().splitlines() if isinstance(message, str) else []
     header = re.fullmatch(r"([A-Z_]+)(?:[ \t]*[:—–-][ \t]*(.*)|[ \t]+(.+))?", lines[0]) if lines else None
     if not header or header[1] not in options:
@@ -585,7 +609,8 @@ class RegisteredSession(_FixtureSession):
         elif "executable" in tool and fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
             raise Blocked("Approved executable identity changed")
 
-    def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=(), allowed_paths=None):
+    def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=(), allowed_paths=None,
+             response_schema=None):
         saved = getattr(self, "saved_response", None)
         if saved:
             if ((cycle, phase, key) != (saved["cycle"], saved["phase"], saved["target"])
@@ -599,6 +624,8 @@ class RegisteredSession(_FixtureSession):
                         source_sha256=self.source())
             return saved["message"]
         paths = self.scope["files"] if allowed_paths is None else allowed_paths
+        if phase == "reviewer" and not images:
+            response_schema = _response_schema(verdict=REVIEW_VERDICTS, reason=None)
         if allowed_paths is not None and (phase != "developer" or not set(paths) <= set(self.scope["files"])):
             raise Blocked("The planned role paths exceed the approved scope")
         before = {name: _read_source(self.work, name, self.image) for name in paths} if phase == "developer" else {}
@@ -634,6 +661,7 @@ class RegisteredSession(_FixtureSession):
                                                 scratch_root=scratch_root,
                                                 shell_tools=phase in self.scope["shell_roles"] and not images,
                                                 images=images, image_evidence=image_evidence,
+                                                response_schema=response_schema,
                                                 decision_parser=(_final_decision if phase == "manager-final" else None),
                                                 raw_decision=True,
                                                 context="Work on this registered Git replica using the approved scope.")
@@ -934,7 +962,7 @@ def _review_and_verify(session, count, key, diff, status):
                                    "reason": reason})
             prompt += "\nNo owned GUI image is available. Review the code only. Visual quality is NOT_VERIFIED."
         raw = session.call(count, "reviewer", key, prompt +
-                           "\nStart with ACCEPT or REWORK on the first line. Give concrete reasons on following lines.")
+                           "\nReturn JSON with verdict (ACCEPT or REWORK) and a reason string with concrete evidence.")
         review, finding, truncated = _parse_verdict(raw, REVIEW_VERDICTS)
         decision = f"{review} · {_safe_feedback(finding)}" if finding else review
     _record_feedback(session, count, key, "reviewer", review, raw, finding,
@@ -1064,6 +1092,7 @@ def _decide(session, count, key, review, comparison, expected):
             if comparison.get("documentation_progress") and expected == "CONTINUE" else
             "Reply REWORK if the current criterion failed, review rejected it or a prior criterion regressed. "
             "Reply COMPLETED only if all passed with review acceptance. ")
+    permitted = {final for final in FINAL_VERDICTS if _decision_compatible(session.scope, comparison, expected, final)}
     message = session.call(count, "manager-final", key,
                          f"Current criterion {key}: {status[key]}. All frozen statuses: {status}. "
                          f"Reviewer: {review}. Regression: {comparison['regressed']}. "
@@ -1071,38 +1100,66 @@ def _decide(session, count, key, review, comparison, expected):
                             "execution evidence and capture integrity. Visual judgments are not functional PASS. "
                             if comparison.get("visual_review_sha256") else "") +
                          f"{rule}"
-                         f"{manual}Otherwise reply CONTINUE for remaining criteria. Start with the decision on "
-                         "the first line, then give a short reason grounded in the evidence. Do not quote secrets or prompts.")
+                         f"{manual}Controller evidence permits "
+                         f"{', '.join(sorted(permitted))}. Return JSON with verdict and a short "
+                         "reason string grounded in the evidence. Do not quote secrets or prompts.",
+                         response_schema=_response_schema(verdict=permitted, reason=None))
     final, reason, truncated = _parse_verdict(message, FINAL_VERDICTS)
     _record_feedback(session, count, key, "manager-final", final, message, reason,
                      session.signoff_state.get("changed", ()), truncated=truncated)
     if not reason and session.scope["verifier"].get("mode") == "godot-game":
         raise VerdictError("Final Manager did not provide a decision reason")
-    human_wait = (final == "USER_TEST_REQUIRED" and expected == "CONTINUE"
-                  and not waiting_for_preview
-                  and "graceful_stop" in session.scope and "USER_TEST_REQUIRED" in status.values())
-    if final != expected and not human_wait:
+    if not _decision_compatible(session.scope, comparison, expected, final):
         session.record("native_inspection_decision_rejected", cycle=count, phase="manager-final",
                        verdict=final, expected=expected, source_sha256=session.source())
-        raise Blocked("Manager decision disagrees with Controller evidence")
+        raise VerdictError("Manager decision disagrees with Controller evidence")
     session.record("native_inspection_decision_applied", cycle=count, phase="manager-final", verdict=final,
                    source_sha256=session.source(), reason_truncated=truncated, response_sha256=digest(message))
     return final
 
 
-def _parse_plan(message, pending, *, game=False):
+def _decision_compatible(scope, comparison, expected, final):
+    return (final == expected or
+            (final == "USER_TEST_REQUIRED" and expected == "CONTINUE"
+             and (not scope.get("visual_preview") or bool(comparison.get("visual_review_sha256")))
+             and "graceful_stop" in scope and "USER_TEST_REQUIRED" in comparison["criteria"].values()))
+
+
+def _parse_plan(message, pending, *, game=False, approved_paths=()):
     try:
-        plan = json.loads(message)
-    except ValueError:
-        raise Blocked("Manager did not return a structured plan") from None
+        plan = json.loads(message, object_pairs_hook=_unique_object)
+    except (ValueError, Blocked, RecursionError):
+        raise PlanFormatError("계획 Manager 응답을 단일 JSON 계획으로 읽을 수 없습니다.") from None
+    if type(plan) is not dict or set(plan) not in ({"criterion", "plan"}, {"criterion", "plan", "mode"}):
+        raise PlanFormatError("계획 Manager 응답에 criterion과 plan이 필요합니다.")
+    if type(plan["criterion"]) is not str or plan["criterion"] not in pending:
+        raise Blocked("계획 Manager가 이번 사이클에 승인되지 않은 완료 기준을 선택했습니다.")
     modes = {"edit", "documentation", "verify"} if game else {"edit", "documentation"}
-    if (type(plan) is not dict
-            or set(plan) not in ({"criterion", "plan"}, {"criterion", "plan", "mode"})
-            or plan.get("mode", "edit") not in modes
-            or type(plan["criterion"]) is not str or plan["criterion"] not in pending
-            or type(plan["plan"]) is not str or not 0 < len(plan["plan"].strip()) <= (1600 if game else 1000)):
-        raise Blocked("Manager plan exceeds the approved criteria")
-    return plan
+    detail = plan["plan"]
+    mode = plan.get("mode", detail.get("mode", "edit") if type(detail) is dict else "edit")
+    if type(mode) is not str or mode not in modes:
+        raise Blocked("계획 Manager가 지원되지 않는 작업 유형을 지정했습니다.")
+    if type(detail) is str and 0 < len(detail.strip()) <= (1600 if game else 1000):
+        return plan
+    if type(detail) is not dict or set(detail) != {"mode", "artifact", "change", "acceptance_checks",
+                                                  "test_targets", "tools_versions", "outputs_evidence"}:
+        raise PlanFormatError("계획 Manager의 작업 설명 형식 또는 길이를 확인하세요.")
+    artifact = detail["artifact"]
+    if (type(artifact) is not str or artifact not in approved_paths or detail["mode"] != mode
+            or mode == "verify" or (mode == "documentation" and not _documentation_path(artifact))):
+        raise Blocked("계획 Manager가 승인된 파일 또는 작업 유형을 벗어났습니다.")
+    for field in ("change", "tools_versions", "outputs_evidence"):
+        if type(detail[field]) is not str or not 0 < len(detail[field].strip()) <= 1000:
+            raise PlanFormatError("계획 Manager의 작업 설명을 읽을 수 없습니다.")
+    for field in ("acceptance_checks", "test_targets"):
+        values = detail[field]
+        if (type(values) is not list or not 1 <= len(values) <= 12
+                or any(type(value) is not str or not 0 < len(value.strip()) <= 400 for value in values)):
+            raise PlanFormatError("계획 Manager의 검사 목록을 읽을 수 없습니다.")
+    normalized = json.dumps({key: value for key, value in detail.items() if key != "mode"}, ensure_ascii=False)
+    if len(normalized) > 4000:
+        raise PlanFormatError("계획 Manager의 작업 설명이 너무 깁니다.")
+    return {"criterion": plan["criterion"], "plan": normalized, "mode": mode, "artifact": artifact}
 
 
 def _expected_final(scope, key, comparison, review):
@@ -1153,6 +1210,7 @@ def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS"):
         raise Blocked("NO_PROGRESS")
     session.check()
     session.check_image()
+    session.cycles_checked = cycle
     session.record("native_inspection_progress_checkpoint", cycle=cycle, source_sha256=session.source(),
                    changed=session.changes, accepted_without_functional_check=sorted(accepted))
     return outcome
@@ -1200,31 +1258,38 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         session.changes = continuation["changed"]
     pause = getattr(session, "pause", None)
 
-    def save_if_requested():
-        if not isinstance(pause, PauseControl) or not pause.claim():
-            return False
+    def save_checkpoint():
         if not session.owned_verified or not session.usage_complete:
             raise Blocked("Checkpoint requires settled usage and confirmed process cleanup")
         session.check()
         session.check_image()
+        session.progress, session.cycles_checked = status, count
         # Persist only the bounded continuation summary.
-        next_context = {key: feedback[key] for key in ("target", "change_hash", "next")
+        next_context = {key: feedback[key] for key in ("target", "change_hash", "next", "review", "instruction")
                         if feedback and key in feedback}
         session.record("native_inspection_manual_checkpoint", cycle=count, criteria_status=status,
                        source_sha256=session.source(), changed=session.changes, stagnant=stagnant,
                        known=sorted(known), reviewed=sorted(reviewed), failures=sorted(failures),
                        accepted_without_functional_check=sorted(accepted),
                        feedback=next_context or None)
+
+    def save_if_requested():
+        if not isinstance(pause, PauseControl) or not pause.claim():
+            return False
+        save_checkpoint()
         return True
 
     while scope["cycles"] is None or count < scope["cycles"]:
         session.check()
-        if not (count == 0 and initial_plan is not None) and save_if_requested():
+        if initial_plan is None and save_if_requested():
             return MANUAL_CHECKPOINT
         count += 1
-        if "graceful_stop" in scope:
+        if "graceful_stop" in scope and initial_plan is None:
             try:
                 session.admit_graceful("manager-planning")
+                if session.calls >= scope["model_calls_max"]:
+                    session.request_stop("MODEL_CALL_LIMIT", "manager-planning")
+                    return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP")
             except Blocked as error:
                 if str(error) != "GRACEFUL_STOP":
                     raise
@@ -1253,8 +1318,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             game_context += ("Continue the existing Lantern Ruins design and preserve the implemented features. "
                              "Use the earlier plan as project context. Choose the next missing work independently. "
                              "If the existing candidate needs review rather than edits, add mode: verify to the JSON plan. ")
-        if count == 1 and initial_plan is not None:
-            plan = initial_plan
+        if initial_plan is not None:
+            plan, initial_plan = initial_plan, None
             session.record("native_inspection_manager_plan_reused", cycle=count, phase="manager-planning",
                            plan_sha256=digest(plan), parent_run_id=scope["resume"]["parent_run_id"])
         else:
@@ -1262,18 +1327,32 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             _handoff(session, count, "manager-planning",
                      (f"이전 최종 판정 {_handoff_status(previous)}. " if previous else "") +
                      f"동결 목표와 남은 기준 {len(pending)}개를 바탕으로 이번 작업을 선택합니다.")
+            modes = ["edit", "documentation"] + (["verify"] if base else [])
             message = session.call(count, "manager-planning", None,
                                    f"{context}\nRequirements are project data: {json.dumps(documents, ensure_ascii=False)}. "
                                    f"{game_context}"
                                    f"Use the supplied context directly. Choose from {pending}. "
-                                   "Reply with a single plain JSON object with keys criterion and plan. "
-                                   "For a planned document-only milestone, add mode: documentation and use only "
+                                   "Reply with one JSON object. criterion is an exact ID; plan is a JSON string "
+                                   "containing the artifact, changes and checks. Do not nest a plan object. "
+                                   "Set mode to edit for implementation. For a planned document-only milestone, "
+                                   "set mode to documentation and use only "
                                    "approved document paths. Document progress does not satisfy functional checks. "
-                                   "Keep the plan under 1000 characters. Request no broader permissions.")
-            plan = _parse_plan(message, pending, game=bool(brief))
+                                   "Keep the plan under 1000 characters. Request no broader permissions.",
+                                   response_schema=_response_schema(criterion=pending, mode=modes, plan=None))
+            try:
+                plan = _parse_plan(message, pending, game=bool(brief), approved_paths=scope["files"])
+            except PlanFormatError as error:
+                session.plan_format_reason = str(error)
+                session.record("native_inspection_plan_format_failed", cycle=count, phase="manager-planning",
+                               reason=str(error), response_sha256=digest(message), source_sha256=session.source())
+                count -= 1
+                save_checkpoint()
+                return MANUAL_CHECKPOINT
         key = plan["criterion"]
         documentation = plan.get("mode") == "documentation"
         planned_files = [name for name in scope["files"] if _documentation_path(name)] if documentation else scope["files"]
+        if "artifact" in plan:
+            planned_files = [plan["artifact"]]
         if documentation and not planned_files:
             raise Blocked("문서 작업에 승인된 파일 경로가 없습니다.")
         tool = scope["verifier"]
@@ -1302,6 +1381,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             session.record("native_inspection_developer_skipped", cycle=count, target=key,
                            source_sha256=session.source(), diff_sha256=digest(diff))
         else:
+            if "graceful_stop" in scope and session.calls >= scope["model_calls_max"]:
+                session.request_stop("MODEL_CALL_LIMIT", "developer")
+                return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP")
             tool_context = (f"Approved offline verification tool: {tool['executable']}. "
                             f"Test arguments for this criterion: {verification_args}. " if "executable" in tool else
                             "The independent Verifier checks replica integrity. Functional evidence is still required. ")
@@ -1314,7 +1396,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                     f"Only modify or create {planned_files}. Preserve requirements, verification and Git. "
                                     f"{tool_context}{visual_feedback}"
                                     "Inspect the project and choose the implementation. Use installed tools only.",
-                                    **({"allowed_paths": planned_files} if documentation else {}))
+                                    **({"allowed_paths": planned_files} if documentation or "artifact" in plan else {}))
             except NoDeveloperChange:
                 diff = ""
             except Blocked as error:
@@ -1397,6 +1479,8 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
         raise Blocked("추가 개발 예산은 보존된 응답을 복구할 때만 사용할 수 있습니다.")
     if rows and rows[-1].get("outcome") == MANUAL_CHECKPOINT:
         return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
+    if rows and can_review_registered_plan(rows[-1]):
+        return _resume_registered_plan_contract(runner, events, head, rows, expires, seconds, tokens, now)
     if (type(expires) is not int or not now < expires <= now + (4800 if graceful else 1800)
             or type(seconds) is not int or not 120 <= seconds <= (1800 if graceful else 1500)
             or (graceful and expires < now + seconds + 2700)
@@ -1586,6 +1670,12 @@ def can_review_postprocess(result):
             or (result.get("outcome"), result.get("reason")) == ("BLOCKED", LEGACY_VERDICT_ERROR))
 
 
+def can_review_registered_plan(result):
+    return ((result.get("outcome"), result.get("reason")) == ("BLOCKED", LEGACY_PLAN_ERROR)
+            and result.get("cycle_count") == 1 and bool(result.get("changed"))
+            and result.get("staging_cleanup", {}).get("status") == "RETAINED_FOR_RECOVERY")
+
+
 def _response_ref(start, intent, role):
     return {"workspace": start["workspace"], "cycle": role["cycle"], "phase": role["phase"],
             "target": role["target"], "message_sha256": role["message_sha256"],
@@ -1596,7 +1686,8 @@ def _response_ref(start, intent, role):
 def _read_settled_response(ledger, ref, scope):
     phase = ref["phase"]
     if (not re.fullmatch(r"native-command-[a-z0-9_]+", ref["workspace"])
-            or phase not in {"reviewer", "manager-final"} or type(ref["cycle"]) is not int or ref["cycle"] < 1):
+            or phase not in {"manager-planning", "reviewer", "manager-final"}
+            or type(ref["cycle"]) is not int or ref["cycle"] < 1):
         raise Blocked("보존된 역할 응답 경로를 확인할 수 없습니다.")
     limit = scope.get("model_output_bytes", 262144)
     path = ledger.local_directory("temp") / ref["workspace"] / "tmp" / f"{ref['cycle']}-{phase}" / "probe.stdout"
@@ -1652,6 +1743,94 @@ def _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, 
         if len(candidates) == 1:
             checkpoint["pending_visual"] = {"receipt": candidates[0], "frames": []}
     return checkpoint, diff
+
+
+def _resume_registered_plan_contract(runner, events, head, rows, expires, seconds, tokens, now):
+    """Recover a settled second plan from releases that only accepted string plans."""
+    start, end = rows[0], rows[-1]
+    prior = start["scope"]
+    approval = start["approval_sha256"]
+    cleanup = end["staging_cleanup"]
+    if (prior.get("resume") or "graceful_stop" not in prior or prior["verifier"].get("mode") == "godot-game"
+            or end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True
+            or approval != digest(prior) or approval != end.get("approval_sha256")
+            or cleanup.get("workspace") != start.get("workspace")
+            or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
+                   for e in events if e["kind"] == "native_inspection_intent")):
+        raise Blocked("계획 재사용에는 확정 사용량, 회수 증거와 미사용 복구 기록이 필요합니다.")
+    remaining_seconds, remaining_tokens, calls = manual_remaining(prior, end)
+    if (type(seconds) is not int or type(tokens) is not int or seconds < 60 or calls < 3
+            or tokens < sum(prior["role_tokens"][role] for role in ("developer", "reviewer", "manager-final"))
+            or (seconds, tokens) != (remaining_seconds, remaining_tokens)
+            or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000
+            or (prior["cycles"] is not None and prior["cycles"] < 2)):
+        raise Blocked("남은 예산으로 2사이클의 개발과 검토를 진행할 수 없습니다.")
+
+    ledger = runner.ledger
+    source, replica, frozen, onboarding = baseline(ledger, prior["project_id"])
+    catalog = Catalog(ledger).read()
+    image = snapshot(replica)
+    identity = digest(image)
+    if (str(source) != prior["original"] or str(replica) != prior["replica"]
+            or digest(onboarding) != prior["onboarding_sha256"] or identity != end["replica_sha256"]
+            or catalog["projects"][prior["project_id"]]["revision"] != prior["project_revision"]
+            or not original_matches(source, frozen)):
+        raise Blocked("계획 이후 원본, 프로젝트 설정 또는 복제본이 변경됐습니다.")
+    read_frozen_requirements(catalog, prior["project_id"], prior["requirements"], ledger.state_boundary)
+    with _git(ledger, source) as (git, _):
+        if _scan(source, git, frozen["local_examples"]) != frozen:
+            raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
+
+    intents = [row for row in rows if row["kind"] == "native_inspection_role_intent" and "role_call" in row]
+    results = [row for row in rows if row["kind"] == "native_inspection_role_result" and "provider_usage" in row]
+    expected = [(1, phase) for phase in ("manager-planning", "developer", "reviewer", "manager-final")]
+    expected.append((2, "manager-planning"))
+    if (len(results) != end["model_turns_dispatched"] or len(intents) != len(results)
+            or [(row["cycle"], row["phase"]) for row in results] != expected
+            or rows[-3:-1] != [intents[-1], results[-1]]
+            or any(any(intent[key] != role[key] for key in ("cycle", "phase", "target"))
+                   or intent["approval_sha256"] != approval or role["approval_sha256"] != approval
+                   or (role.get("outcome"), role.get("process_result"), role.get("exit_code"), role.get("owned_tree"))
+                   != ("COMPLETED", "EXITED", 0, "DRAINED") or not isinstance(role["provider_usage"], dict)
+                   for intent, role in zip(intents, results))
+            or sum(row["provider_usage"]["input_tokens"] + row["provider_usage"]["output_tokens"]
+                   for row in results) != end["known_reported_tokens"]
+            or intents[-1].get("source_sha256") != identity or results[-1].get("target") is not None):
+        raise Blocked("계획 및 이전 역할의 실행·사용량 영수증을 확인할 수 없습니다.")
+
+    def prior_cycle_event(kind):
+        return next((row for row in rows if row["kind"] == kind and row.get("cycle") == 1
+                     and row.get("source_sha256") == identity), {})
+
+    progress = prior_cycle_event("native_inspection_cycle_progress")
+    decision = prior_cycle_event("native_inspection_decision_applied")
+    review = prior_cycle_event("native_inspection_review_decision")
+    verified = prior_cycle_event("native_inspection_role_result")
+    key = review.get("target")
+    if (key not in prior["criteria"] or key != results[2]["target"]
+            or progress.get("criteria") != end.get("criteria_status")
+            or progress["criteria"].keys() != prior["criteria"].keys()
+            or (progress.get("controller_decision"), decision.get("verdict"), review.get("verdict"))
+            != ("REWORK", "REWORK", "REWORK")
+            or verified.get("phase") != "verifier" or verified.get("owned_tree") != "DRAINED"
+            or verified.get("outcome") != "COMPLETED"):
+        raise Blocked("1사이클 재작업 판정과 독립 검증 근거를 확인할 수 없습니다.")
+    reviewer_ref = _response_ref(start, intents[2], results[2])
+    checkpoint, diff = _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, reviewer_ref)
+    verdict, finding, _ = _parse_verdict(_read_settled_response(ledger, reviewer_ref, prior), REVIEW_VERDICTS)
+    if verdict != "REWORK" or not finding or digest(finding) != review.get("finding_sha256"):
+        raise Blocked("보존된 Reviewer 재작업 근거를 확인할 수 없습니다.")
+    plan = _parse_plan(_read_settled_response(ledger, _response_ref(start, intents[-1], results[-1]), prior),
+                       [key], approved_paths=prior["files"])
+    resume = {**checkpoint["continuation"], "mode": "after-registered-planning", "cycle": 1,
+              "criteria_status": progress["criteria"], "changed": checkpoint["changed"], "stagnant": 1,
+              "failures": [cycle_progress.failure_fingerprint("reviewer", [finding], digest(prior["verifier"]))],
+              "feedback": {"target": key, "review": f"REWORK · {_safe_feedback(finding)}",
+                           "verifier": verified["observations"], "change_hash": digest(diff), "next": "REWORK"},
+              "plan_sha256": digest(plan), "criterion": key, "parent_run_id": start["run_id"],
+              "parent_reported_tokens": end["known_reported_tokens"]}
+    return ({**prior, "resume": resume, "replica_sha256": identity, "ledger_head": head, "expires": expires,
+             "seconds": seconds, "tokens": tokens, "model_calls_max": calls}, plan)
 
 
 def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew):
@@ -1722,29 +1901,45 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
                 raise Blocked("최종 Manager에 전달된 독립 검증 근거를 확인할 수 없습니다.")
     else:
         checkpoint, diff = _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, ref)
+    if ref["images"]:
+        if checkpoint.get("pending_visual", {}).get("frames") != ref["images"]:
+            raise Blocked("시각 검토 화면이 응답과 일치하지 않습니다.")
+        visual.read_frames(ledger, ref["images"])
+    rerun = False
     try:
         if ref["images"]:
-            if checkpoint.get("pending_visual", {}).get("frames") != ref["images"]:
-                raise Blocked("시각 검토 화면이 응답과 일치하지 않습니다.")
-            visual.read_frames(ledger, ref["images"])
             visual.parse(message, [frame["id"] for frame in ref["images"]], checkpoint["changed"])
         else:
             verdict, reason, _ = _parse_verdict(message, REVIEW_VERDICTS if role["phase"] == "reviewer" else FINAL_VERDICTS)
-            if role["phase"] == "manager-final" and prior["verifier"].get("mode") == "godot-game" and not reason:
-                raise VerdictError("Final Manager did not provide a decision reason")
-    except Blocked as error:
-        raise Blocked("보존된 응답의 판정을 확정할 수 없습니다. " + str(error)) from error
+            if role["phase"] == "manager-final":
+                if prior["verifier"].get("mode") == "godot-game" and not reason:
+                    raise VerdictError("Final Manager did not provide a decision reason")
+                comparison, review = checkpoint["comparison"], checkpoint["review"]
+                expected = _expected_final(prior, checkpoint["criterion"], comparison, review)
+                if not _decision_compatible(prior, comparison, expected, verdict):
+                    raise VerdictError("Manager decision disagrees with Controller evidence")
+    except Blocked:
+        rerun = True
+    if rerun:
+        pending = ("reviewer", "manager-final") if role["phase"] == "reviewer" else ("manager-final",)
+        if (seconds < 60 or (not renew and calls < len(pending))
+                or tokens < sum(prior["role_tokens"][phase] for phase in pending)):
+            raise Blocked("판정이 유효하지 않습니다. 같은 후보에서 이 검토 역할을 다시 실행하려면 새 예산이 필요합니다.")
     resume = {key: checkpoint[key] for key in ("cycle", "criterion", "criteria_status", "changed", "continuation",
                                                "review", "review_feedback", "comparison", "verification", "documentation",
                                                "visual", "pending_visual")
               if key in checkpoint}
     resume.update(mode="postprocess", parent_run_id=start["run_id"], saved_response=ref,
                   parent_reported_tokens=end["known_reported_tokens"], changed_total=end["changed"])
+    if rerun:
+        resume["rerun_phase"] = role["phase"]
     cycles = prior["cycles"]
     if renew:
         resume["renewed_budget"] = True
         cycles = ref["cycle"] + 1
         calls = 5 if ref["phase"] == "reviewer" else 4
+        if rerun:
+            calls += 1
     return ({**prior, "resume": resume, "replica_sha256": digest(image), "ledger_head": head,
              "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles, "model_calls_max": calls}, diff)
 
@@ -2006,7 +2201,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             session = RegisteredSession(runner, scope, lab, len(events), head, fields, cancelled)
             session.activity = activity
             session.pause = pause
-            if resume and scope["resume"].get("mode") == "postprocess":
+            if (resume and scope["resume"].get("mode") == "postprocess"
+                    and not scope["resume"].get("rerun_phase")):
                 ref = scope["resume"]["saved_response"]
                 session.saved_response = {**ref, "message": _read_settled_response(ledger, ref, scope)}
             session.count, session.fence = ledger.append(
@@ -2019,6 +2215,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 session.prepare()
                 if resume and scope["resume"].get("mode") == "after-manager-planning":
                     outcome = _cycles(session, initial_plan=diff)
+                elif resume and scope["resume"].get("mode") == "after-registered-planning":
+                    outcome = _cycles(session, initial_plan=diff, continuation=scope["resume"])
                 elif resume and scope["resume"].get("mode") == "next-cycle":
                     outcome = _cycles(session, continuation=scope["resume"])
                 else:
@@ -2026,6 +2224,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 session.check_image()
                 if outcome == "NO_PROGRESS":
                     reason = outcome
+                elif outcome == MANUAL_CHECKPOINT:
+                    reason = getattr(session, "plan_format_reason", None)
             except (Blocked, OSError, ValueError, KeyboardInterrupt) as error:
                 reason = "CANCELLED" if isinstance(error, KeyboardInterrupt) or cancelled() else str(error)
                 outcome = reason if reason in {"CANCELLED", "TIME_LIMIT", "TOKEN_LIMIT", "REQUEST_UNKNOWN",
