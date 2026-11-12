@@ -16,6 +16,57 @@ from .supervised import latest_handoff
 from .token_reserve import DEFAULT_RESERVE, reserve_status
 
 
+REGISTERED_PHASES = ("manager-planning", "developer", "reviewer", "verifier", "manager-final")
+
+
+def registered_progress(events, project):
+    from .registered_cycle import KIND
+
+    start = next((row for row in reversed(events) if row["kind"] == "native_inspection_intent"
+                  and row.get("probe_kind") == KIND and row.get("project_id") == project), None)
+    if start is None:
+        return None
+    rows = [row for row in events if row.get("run_id") == start["run_id"]
+            and row.get("probe_kind") == KIND and row.get("project_id") == project]
+    scope = start["scope"]
+    end = stop = None
+    cycle = scope.get("resume", {}).get("cycle", 0)
+    roles, changed = {}, set()
+    criteria = scope.get("resume", {}).get("criteria_status", {})
+    tokens, usage_unknown = 0, False
+    for row in rows:
+        kind = row["kind"]
+        number = row.get("cycle", cycle)
+        if number > cycle:
+            cycle, roles = number, {}
+        if kind in {"native_inspection_role_intent", "native_inspection_role_result"}:
+            roles[row["phase"]] = row
+            if kind == "native_inspection_role_result" and row["phase"] != "verifier":
+                usage = row.get("provider_usage")
+                if isinstance(usage, dict):
+                    tokens += usage["input_tokens"] + usage["output_tokens"]
+                else:
+                    usage_unknown = True
+        elif kind == "native_inspection_manager_plan_reused":
+            roles["manager-planning"] = {**row, "outcome": "REUSED"}
+        elif kind == "native_inspection_developer_skipped":
+            roles["developer"] = {**row, "outcome": "SKIPPED"}
+        elif kind == "native_inspection_developer_diff":
+            changed.update(row["changed"])
+        elif kind == "native_inspection_cycle_progress":
+            criteria = row["criteria"]
+        elif kind == "native_inspection_stop_requested":
+            stop = row["reason"]
+        elif kind == "native_inspection_result":
+            end = row
+    return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
+            "end": end, "cycle": cycle, "roles": roles, "stop": stop,
+            "changed": end.get("changed", []) if end else sorted(changed),
+            "criteria": end.get("criteria_status", {}) if end else criteria,
+            "tokens": end.get("known_reported_tokens", tokens) if end else tokens,
+            "usage_unknown": usage_unknown or bool(end and not end.get("usage_complete", True))}
+
+
 def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None):
     catalog = catalog or {"projects": {}, "global_budget": DEFAULT_BUDGET, "version": 0}
     registration = catalog["projects"].get(project_id)
@@ -168,6 +219,7 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "project_name": names[project_id],
         "project_names": names,
         "registration": registration,
+        "registered_progress": registered_progress(project_events, project_id),
         "requirements": requirements,
         "user_question": selected_question,
         "supervised_handoff": latest_handoff(project_events),

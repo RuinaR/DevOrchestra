@@ -370,33 +370,41 @@ def show(center, project):
             save_budget()
             panel.destroy()
 
-    def submit(args, approval=None, *, resume=False, soft_limits=None, graceful=False, visual_review=False):
+    def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False):
         nonlocal future, active
         future = Future()
         active = True
         button.configure(state="disabled")
         resume_button.configure(state="disabled")
-        state.set("승인 범위 확인 중" if approval is None else "Codex 개발 실행 중")
+        state.set("승인 범위 확인 중")
+        options = ({"graceful": graceful} if resume else
+                   {"soft_limits": soft_limits, "visual_review": visual_review})
+        review_fn = registered_cycle.review_resume if resume else registered_cycle.review
+        run_fn = registered_cycle.run_resume if resume else registered_cycle.run
 
         def work():
             try:
-                if approval is None and not resume:
+                if not resume:
                     archive = codex_setup.archive_path(runner.ledger)
                     if archive.is_file() and Path(args[1]).absolute() == archive:
                         account = codex_setup.run(runner, "status", cancelled=cancelled.is_set)
                         if account["status"] != "CONNECTED":
                             raise RuntimeError("설정의 Codex 환경 및 로그인에서 ChatGPT 연결을 완료하세요.")
-                if resume and approval is None and not graceful:
+                if resume and not graceful:
                     registered_cycle.verify_resume_candidate(runner, project, cancelled=cancelled.is_set)
-                review_fn = registered_cycle.review_resume if resume else registered_cycle.review
-                run_fn = registered_cycle.run_resume if resume else registered_cycle.run
-                options = ({"graceful": graceful} if resume else
-                           {"soft_limits": soft_limits, "visual_review": visual_review})
-                result = (review_fn(runner, *args, **options) if approval is None
-                          else run_fn(runner, *args, approval=approval, cancelled=cancelled.is_set, **options))
-                future.set_result(result)
+                future.set_result(review_fn(runner, *args, **options))
             except Exception as error:
                 future.set_exception(error)
+
+        def launch(scope):
+            def run():
+                return run_fn(runner, *args, approval=digest(scope), cancelled=cancelled.is_set, **options)
+
+            if center.start_registered_run(scope, run, cancelled):
+                save_budget()
+                panel.destroy()
+            else:
+                state.set("이미 자동 개발이 실행 중입니다. 개발 운영실에서 확인하세요.")
 
         def poll():
             nonlocal active
@@ -415,9 +423,6 @@ def show(center, project):
                 state.set(str(error))
                 return
             result = future.result()
-            if approval is not None:
-                state.set(f"{result['outcome']} · {result.get('reason') or '기록 확인'}")
-                return
             if cancelled.is_set():
                 state.set("검토 취소됨")
                 return
@@ -434,7 +439,7 @@ def show(center, project):
                 if result.get("visual_review") and not checkpoint.get("review"):
                     summary += "\n소유 테스트 창 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                 if center.confirm("추가 예산 및 중단 작업 재개 승인", summary, parent=panel):
-                    submit(args, digest(result), resume=True, graceful=graceful)
+                    launch(result)
                 else:
                     state.set("재개 승인 취소됨")
                 return
@@ -471,7 +476,7 @@ def show(center, project):
                     summary += ("\nDeveloper가 세션 임시 폴더에 빌드한 Windows 앱을 오프라인 샌드박스에서 실행해 "
                                 "시작 화면을 캡처합니다. 화면이 준비되기 전에는 코드 검토를 계속합니다.")
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary, parent=panel):
-                submit(args, digest(result), soft_limits=soft_limits, visual_review=visual_review)
+                launch(result)
             else:
                 state.set("실행 승인 취소됨")
 
@@ -629,30 +634,23 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                 graceful = True
                 resume_args = (game_pilot.PROJECT, int(time()) + 4740, 1800, 300000)
 
-        def submit(approval=None):
+        def submit():
             nonlocal future
             future = Future()
             for control in (button, export_button, online_button, resume_button):
                 control.configure(state="disabled")
-            state.set("온라인 실행 범위 검토 중" if online and approval is None else
-                      "온라인 게임 개발 실행 중" if online else "오프라인 MXC 검사 실행 중")
+            state.set("온라인 실행 범위 검토 중" if online else "오프라인 MXC 검사 실행 중")
 
             def worker():
                 try:
                     if not online:
                         result = game_pilot.run(runner, archive, cancelled=cancelled.is_set, capture=True,
                                                 export_windows=export_windows)
-                    elif resume and approval is None:
-                        result = registered_cycle.review_resume(runner, *resume_args, graceful=graceful)
                     elif resume:
-                        result = registered_cycle.run_resume(runner, *resume_args, approval=approval,
-                                                             cancelled=cancelled.is_set, graceful=graceful)
-                    elif approval is None:
-                        result = registered_cycle.review_game(runner, archive, expires, limits,
-                                                              visual_review=visual_review)
+                        result = registered_cycle.review_resume(runner, *resume_args, graceful=graceful)
                     else:
-                        result = registered_cycle.run_game(runner, archive, expires, limits, approval=approval,
-                                                           cancelled=cancelled.is_set, visual_review=visual_review)
+                        result = registered_cycle.review_game(runner, archive, expires, limits,
+                                                             visual_review=visual_review)
                     future.set_result(result)
                 except Exception as error:
                     future.set_exception(error)
@@ -665,7 +663,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                     control.configure(state="normal")
                 try:
                     result = future.result()
-                    if online and approval is None:
+                    if online:
                         if cancelled.is_set():
                             state.set("검토 취소됨")
                             return
@@ -715,14 +713,21 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                         if result.get("visual_review") and (not resume or not result["resume"].get("review")):
                             summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                         if center.confirm(title, summary, parent=panel):
-                            submit(digest(result))
+                            def run():
+                                if resume:
+                                    return registered_cycle.run_resume(
+                                        runner, *resume_args, approval=digest(result),
+                                        cancelled=cancelled.is_set, graceful=graceful)
+                                return registered_cycle.run_game(
+                                    runner, archive, expires, limits, approval=digest(result),
+                                    cancelled=cancelled.is_set, visual_review=visual_review)
+
+                            if center.start_registered_run(result, run, cancelled):
+                                panel.destroy()
+                            else:
+                                state.set("이미 자동 개발이 실행 중입니다. 개발 운영실에서 확인하세요.")
                         else:
                             state.set("온라인 실행 승인 취소됨")
-                    elif online:
-                        statuses = ", ".join(f"{key} {status}" for key, status in result.get("criteria_status", {}).items())
-                        state.set(f"{result['outcome']} · {result.get('cycle_count', 0)}사이클 · "
-                                  f"{result.get('elapsed_seconds', 0):g}초 · "
-                                  f"{result.get('known_reported_tokens', 0):,}토큰 · {statuses}")
                     elif export_windows:
                         detail = result.get("reason") or result.get("artifact_directory", result["export"])
                         state.set(f"Windows EXE 오프라인 검증 {result['outcome']} · {detail}")

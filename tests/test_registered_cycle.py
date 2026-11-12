@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from threading import Event
 from time import monotonic, time
 import unittest
 from unittest.mock import Mock, patch
@@ -143,6 +144,7 @@ class RegisteredCycleTests(unittest.TestCase):
                       300, 270000, 2, ["formatting.py", "closing.py"] if resume else ["greeting.txt", "closing.txt"],
                       list(registered_cycle.PERMISSIONS), tests)
             calls = []
+            developer_observed = Event() if not resume and os.environ.get("DEVORCHESTRA_REGISTERED_GUI_QA") else None
 
             def transport(binary, argv, work, logs, env, **options):
                 (logs / "probe.stderr").write_bytes(b"")
@@ -154,6 +156,8 @@ class RegisteredCycleTests(unittest.TestCase):
                 shell = "true" if phase in {"developer", "reviewer"} else "false"
                 self.assertIn(f"features.shell_tool={shell}", argv)
                 if phase == "developer":
+                    if cycle == 1 and developer_observed is not None:
+                        self.assertTrue(developer_observed.wait(15), "Main window never showed the running Developer")
                     if not resume:
                         filename, value = ("greeting.txt", "hello") if cycle == 1 else ("closing.txt", "goodbye")
                         (work / filename).write_text(value + "\n", encoding="ascii")
@@ -202,7 +206,7 @@ class RegisteredCycleTests(unittest.TestCase):
                     with self.assertRaises(Blocked):
                         registered_cycle.run_resume(runner, *args, approval=digest(approval))
                 elif os.environ.get("DEVORCHESTRA_REGISTERED_GUI_QA"):
-                    result = self._drive_gui(ledger, params)
+                    result = self._drive_gui(ledger, params, developer_observed)
                 else:
                     result = registered_cycle.run(runner, *params, approval=digest(scope))
                 self.assertEqual(result["outcome"], "COMPLETED", result)
@@ -221,7 +225,7 @@ class RegisteredCycleTests(unittest.TestCase):
             self.assertEqual(set(apply["paths"]), set(params[6]))
             self.assertIn('SIGNOFF = "goodbye"' if resume else "+goodbye", patch_text)
 
-    def _drive_gui(self, ledger, params):
+    def _drive_gui(self, ledger, params, developer_observed):
         import tkinter as tk
         from tkinter import ttk
 
@@ -241,6 +245,7 @@ class RegisteredCycleTests(unittest.TestCase):
         root.withdraw()
         try:
             center = CommandCenter(root, ProjectionReader(ledger))
+            root.deiconify()
             center.project.current(center.project_ids.index("registered-test"))
             center.select_project(None)
             center.development_start()
@@ -276,11 +281,17 @@ class RegisteredCycleTests(unittest.TestCase):
                     root.after(30, approve)
 
             def inspect():
-                rows = registered_cycle.history(ledger, "registered-test")
-                if rows and rows[-1]["kind"] == "native_inspection_result":
-                    detail = [widget for widget in children if isinstance(widget, tk.Text)][-1]
-                    if f"{rows[-1]['outcome']} · {rows[-1]['cycle_count']}회" in detail.get("1.0", "end"):
-                        settled.append((rows[-1], detail.get("1.0", "end")))
+                heading = center.registered_status.cget("text")
+                detail = center.registered_detail.cget("text")
+                if (not panel.winfo_exists() and center.page == "operations"
+                        and "1사이클 · Developer" in heading
+                        and "실행 중" in center.phases[1][1].cget("text")
+                        and "확정 사용량 105" in detail and center.registered_cancel.winfo_ismapped()):
+                    developer_observed.set()
+                progress = center.view.get("registered_progress") if center.view else None
+                if progress and progress["end"] and center.registered_job["settled"]:
+                    if "완료 · 2사이클" in heading and "closing.txt" in detail:
+                        settled.append(progress["end"])
                         root.quit()
                         return
                 if monotonic() < deadline:
@@ -294,15 +305,22 @@ class RegisteredCycleTests(unittest.TestCase):
             root.mainloop()
             if settled:
                 self.assertEqual(confirmations, ["등록 프로젝트 Codex 세션 승인"])
-                self.assertIn("greeting.txt", settled[0][1])
-                button(panel, "원본 반영 검토").invoke()
+                self.assertTrue(developer_observed.is_set())
+                self.assertFalse(panel.winfo_exists())
+                center.original_apply_panel("registered-test")
                 apply_window = next(widget for widget in root.winfo_children()
                                     if isinstance(widget, tk.Toplevel) and "검증된 변경 원본 반영" in widget.title())
                 patch_view = next(widget for widget in descendants(apply_window) if isinstance(widget, tk.Text))
                 self.assertIn("+goodbye", patch_view.get("1.0", "end"))
-                return settled[0][0]
-            status = next(widget for widget in children if isinstance(widget, ttk.Label) and widget["textvariable"])
+                return settled[0]
             self.fail(f"Command Center did not render a terminal registered result: "
-                      f"{panel.getvar(status['textvariable'])}; confirmations={confirmations}")
+                      f"{center.registered_status.cget('text')}; confirmations={confirmations}")
         finally:
+            developer_observed.set()
+            if center.registered_job and not center.registered_job["future"].done():
+                center.cancel_registered_run()
+                try:
+                    center.registered_job["future"].result(timeout=15)
+                except (RuntimeError, OSError, ValueError):
+                    pass
             root.destroy()

@@ -17,7 +17,7 @@ from .default_instructions import defaults_text, public_instruction
 from .lease import Blocked
 from .instructions import InstructionStore, selected_source, source_ref
 from .ledger import Ledger, check_path, digest
-from .projection import ProjectionReader
+from .projection import ProjectionReader, REGISTERED_PHASES
 from .questions import AUTHORIZATION_TYPES
 from .runtime import PROJECTS, Runner
 from .setup import create_work_copy, validate_setup
@@ -27,6 +27,18 @@ from .ui_design import BG, PANEL, TILE, EDGE, INK, MUTED, CYAN, TEAL, AMBER, RED
 
 ROLE_MARKS = {"Manager": "01 / CMD", "Developer": "02 / DEV",
               "Reviewer": "03 / REV", "Verifier": "04 / VFY"}
+REGISTERED_LABELS = dict(zip(REGISTERED_PHASES, ("계획 Manager", "Developer", "Reviewer", "Verifier", "최종 Manager")))
+REGISTERED_STATES = {
+    "RUNNING": "실행 중", "WAITING": "대기", "UNSETTLED": "결과 미확정", "COMPLETED": "완료",
+    "PASS": "통과", "FAIL": "실패", "CANCELLED": "중단됨", "BLOCKED": "차단됨",
+    "SIGNOFF_PENDING": "검토 재개 대기", "USER_TEST_REQUIRED": "사용자 검증 필요",
+    "GRACEFUL_STOP": "작업 마무리 후 종료", "NOT_VALIDATED": "검증 미완료",
+    "REUSED": "계획 재사용", "SKIPPED": "건너뜀", "REQUEST_UNKNOWN": "요청 결과 미확정",
+    "STARTING": "실행 준비 중", "STOPPING": "중단 요청됨", "RECOVERY_REQUIRED": "복구 필요",
+    "TIME_LIMIT": "시간 기준 도달", "TOKEN_LIMIT": "토큰 기준 도달", "CYCLE_LIMIT": "사이클 상한 도달",
+    "NO_PROGRESS": "진척 없음", "NOT_VERIFIED": "검증 미확인", "VERIFIED": "검증 완료",
+    "NOT_STARTED": "대기", "REGRESSED": "회귀", "CONTINUE": "다음 작업 진행", "REWORK": "재작업 필요",
+}
 POLL_MS = 1500
 REQUIREMENT_NAMES = dict(zip(REQUIREMENT_ROLES, ("개발 목표", "기능 추가", "설계 변경", "버그 수정", "개선 요청")))
 REQUIREMENT_HELP = {
@@ -151,6 +163,7 @@ class CommandCenter:
         self.controller = Runner(reader.ledger)
         self.shutdown_future = None
         self.gui_verification_cancel = None
+        self.registered_job = None
         self.shutdown_notice = None
         self.question_window = None
         self.page = None
@@ -267,6 +280,10 @@ class CommandCenter:
         operations.grid(row=3, column=0, sticky="ew", padx=18, pady=8)
         timeline = section(operations, "실행 단계")
         timeline.pack(fill="x")
+        self.registered_status = label(timeline, fg=CYAN, bold=True)
+        self.registered_detail = label(timeline, fg=MUTED)
+        self.registered_cancel = ttk.Button(timeline, text="개발 중단", command=self.cancel_registered_run)
+        on_width(timeline, lambda width: self.registered_detail.configure(wraplength=max(230, width - 40)))
         lane = tk.Frame(timeline, bg=PANEL)
         lane.pack(fill="x", pady=(5, 0))
         self.phases = []
@@ -630,6 +647,15 @@ class CommandCenter:
         self.poll_timer = self.root.after_idle(self.poll)
 
     def poll(self):
+        job = self.registered_job
+        if job and job["future"].done() and not job["settled"]:
+            job["settled"] = True
+            try:
+                job["result"] = job["future"].result()
+            except Exception as error:
+                job["error"] = str(error) or type(error).__name__
+            if self.view:
+                self.render()
         if self.poll_future:
             generation, project, future = self.poll_future
             if not future.done():
@@ -699,6 +725,7 @@ class CommandCenter:
             self.render()
         else:
             self.view = view
+            self.render_registered(view)
         seq, tail = view["snapshot_version"]
         if hasattr(self, "shutdown_buttons"):
             self.render_shutdown()
@@ -708,7 +735,7 @@ class CommandCenter:
                     and previous["shutdown"].get("request_id") != shutdown["request_id"]):
                 key = shutdown["request_id"]
                 self.root.after(900, lambda: self.shutdown_command("finalize", expected=key))
-        self.observation.configure(text=f"MOCK LEDGER  /  Seq {seq} · "
+        self.observation.configure(text=f"검증 원장  /  Seq {seq} · "
                                    f"{tail[:12] or 'empty'}  /  Verified {view['as_of_utc']}")
 
     def clear(self, reason, *, first_run=False):
@@ -739,6 +766,8 @@ class CommandCenter:
         for status, detail in self.cards.values():
             status.configure(text="UNKNOWN", fg=MUTED)
             detail.configure(text="")
+        for widget in (self.registered_status, self.registered_detail, self.registered_cancel):
+            widget.pack_forget()
         self.run_filter.configure(values=())
         self.run_filter.set("")
         self.render_audit()
@@ -824,7 +853,7 @@ class CommandCenter:
             goal += "\n감독형 작업 · " + stage_title
             if handoff.get("artifacts"):
                 goal += "\n결과물 · " + ", ".join(handoff["artifacts"])[:250]
-        if getattr(self, "details_visible", False):
+        if getattr(self, "details_visible", False) and not view.get("registered_progress"):
             goal += f"\n자동 Manager · {manager_status}{cycle_label}"
             if subscription := workflow.get("subscription_cycle"):
                 goal += f"\n구독 개발 검증 · {subscription['phase']} · {subscription['status']}"
@@ -894,6 +923,7 @@ class CommandCenter:
             duration = f"{finish['elapsed_seconds']:.3f}s" if finish else "duration unknown"
             detail.configure(text=f"{start['model']} · {duration}\n"
                                   f"Receipt #{latest['sequence']} · {start['run_id'][:8]}" + planned, wraplength=185)
+        self.render_registered(view)
 
         self.run_options = {"All runs": None}
         for event in reversed(view["events"]):
@@ -905,6 +935,142 @@ class CommandCenter:
             self.run_filter.current(0)
         if getattr(self, "page", "records") == "records":
             self.render_audit()
+
+    def start_registered_run(self, scope, run, cancelled):
+        if self.registered_job and not self.registered_job["future"].done():
+            return False
+        future = Future()
+        self.registered_job = {"scope": scope, "approval": digest(scope), "future": future,
+                               "sequence": self.view["snapshot_version"][0] if self.view else 0,
+                               "started": monotonic(), "cancelled": cancelled, "settled": False}
+        self.navigate("operations")
+        if self.view:
+            self.render_registered(self.view)
+
+        def work():
+            try:
+                future.set_result(run())
+            except Exception as error:
+                future.set_exception(error)
+
+        Thread(target=work, daemon=False).start()
+        self.request_refresh()
+        return True
+
+    def cancel_registered_run(self):
+        job = self.registered_job
+        if job and not job["future"].done():
+            job["cancelled"].set()
+            if self.view:
+                self.render_registered(self.view)
+
+    def render_registered(self, view):
+        job = self.registered_job
+        running = bool(job and not job["settled"])
+        local = job if job and job["scope"]["project_id"] == view["project_id"] else None
+        progress = view.get("registered_progress")
+        if local and (not progress or progress["approval"] != local["approval"]):
+            if progress and local["settled"] and progress["sequence"] > local["sequence"]:
+                local = None
+            else:
+                progress = None
+        if running:
+            project = job["scope"]["project_id"]
+            title = "중단 요청됨" if job["cancelled"].is_set() else "자동 개발 중"
+            self.global_badge.configure(text=f"{title} · {view['project_names'].get(project, project)}", fg=CYAN)
+            self.development_button.configure(state="disabled")
+            self.development_options.configure(state="disabled")
+        if not (progress or local):
+            for widget in (self.registered_status, self.registered_detail, self.registered_cancel):
+                widget.pack_forget()
+            return
+        scope = progress["scope"] if progress else local["scope"]
+        end = ((local or {}).get("result") or (progress or {}).get("end"))
+        roles = progress["roles"] if progress else {}
+        recent = max(roles.values(), key=lambda row: row.get("sequence", 0), default={})
+        reason = (local or {}).get("error") or (end or {}).get("reason")
+        state = ("STOPPING" if local and running and local["cancelled"].is_set()
+                 else "BLOCKED" if (local or {}).get("error")
+                 else end["outcome"] if end else "RUNNING" if progress and local and running
+                 else "STARTING" if local and running else "UNSETTLED")
+        label_text = REGISTERED_STATES.get(state, state)
+        cycle = progress["cycle"] if progress else 0
+        role = REGISTERED_LABELS.get(recent.get("phase"))
+        heading = f"자동 개발 · {label_text}"
+        if cycle:
+            heading += f" · {cycle}사이클"
+        if role and not end:
+            heading += f" · {role}"
+        self.mission.configure(text=f"{view['project_name']}  /  {heading.removeprefix('자동 개발 · ')}", fg=color(state))
+        self.registered_status.configure(text=heading, fg=color(state))
+        lane = self.phases[0][1].master
+        if not self.registered_status.winfo_manager():
+            self.registered_status.pack(fill="x", before=lane, pady=(4, 0))
+        used = (end or {}).get("known_reported_tokens", (progress or {}).get("tokens", 0))
+        elapsed = (end or {}).get("elapsed_seconds", monotonic() - local["started"] if local else None)
+        budget = f"확정 사용량 {used:,} / {scope['tokens']:,} 토큰"
+        if elapsed is not None:
+            budget += f" · 경과 {int(elapsed):,} / {scope['seconds']:,}초"
+        if (progress or {}).get("usage_unknown"):
+            budget += " · 일부 사용량 미확정"
+        detail = [budget]
+        target = recent.get("target")
+        if target in scope["criteria"]:
+            detail.append(f"현재 기준 · {scope['criteria'][target]['text'][:180]}")
+        if stop := (progress or {}).get("stop"):
+            detail.append(f"종료 예약 · {REGISTERED_STATES.get(stop, stop)}")
+        if reason:
+            detail.append(str(reason)[:300])
+        if changed := (progress or {}).get("changed"):
+            detail.append(f"변경 파일 {len(changed)}개 · {', '.join(changed[:5])[:250]}")
+        if criteria := (progress or {}).get("criteria"):
+            detail.append("완료 기준 · " + " · ".join(
+                f"{key} {REGISTERED_STATES.get(value, value)}" for key, value in criteria.items()))
+        self.registered_detail.configure(text="\n".join(detail))
+        if not self.registered_detail.winfo_manager():
+            self.registered_detail.pack(fill="x", before=lane, pady=(3, 5))
+        if local and running:
+            self.registered_cancel.configure(state="disabled" if local["cancelled"].is_set() else "normal")
+            if not self.registered_cancel.winfo_manager():
+                self.registered_cancel.pack(anchor="w", before=lane, pady=(0, 4))
+        else:
+            self.registered_cancel.pack_forget()
+        owned = (end or {}).get("owned_tree")
+        ownership = {"DRAINED": "회수 확인", "UNRESOLVED": "회수 확인 필요"}.get(owned, "최종 회수 기록 대기")
+        self.safety.configure(text=f"등록 프로젝트 Codex 실행 · {label_text}\n"
+                                   f"소유 프로세스 · {ownership}")
+        self.resources.configure(text=budget)
+        for phase, (_, badge) in zip(REGISTERED_PHASES, self.phases):
+            row = roles.get(phase)
+            outcome = self.registered_role_state(row, end, bool(local and running))
+            badge.configure(text=f"{REGISTERED_LABELS[phase]}\n{REGISTERED_STATES.get(outcome, outcome)}",
+                            fg=MUTED if not row else color(outcome))
+        for name, (status, evidence) in self.cards.items():
+            phase = {"Manager": "manager-final" if "manager-final" in roles else "manager-planning",
+                     "Developer": "developer", "Reviewer": "reviewer", "Verifier": "verifier"}[name]
+            row = roles.get(phase, {})
+            outcome = self.registered_role_state(row, end, bool(local and running))
+            status.configure(text=REGISTERED_STATES.get(outcome, outcome), fg=MUTED if not row else color(outcome))
+            parts = [REGISTERED_LABELS[phase]]
+            if row and phase != "verifier" and scope.get("model"):
+                parts.append(scope["model"])
+            if isinstance(usage := row.get("provider_usage"), dict):
+                parts.append(f"입력 {usage['input_tokens']:,} / 출력 {usage['output_tokens']:,} 토큰")
+            elif row.get("provider_usage") == "UNKNOWN":
+                parts.append("사용량 미확정")
+            if commands := row.get("command_events"):
+                parts.append(f"도구 명령 {len(commands)}회")
+            if row.get("owned_tree") == "DRAINED":
+                parts.append("소유 프로세스 회수")
+            evidence.configure(text="\n".join(parts), wraplength=185)
+
+    @staticmethod
+    def registered_role_state(row, end, running):
+        if not row:
+            return "WAITING"
+        if row["kind"] == "native_inspection_role_intent":
+            return "RUNNING" if running and not end else "UNSETTLED"
+        return row.get("verdict", row.get("manager_decision", row.get("outcome", "UNSETTLED")))
 
     def answer_question(self):
         pending = self.view.get("user_question") if self.view else None
@@ -1040,6 +1206,12 @@ class CommandCenter:
                                  f"Cost · {resources['cost']} / cap {resources['cost_limit']}")
 
     def render_shutdown(self):
+        if (self.view and self.view.get("registered_progress") and not self.view.get("global_run")
+                or self.registered_job and not self.registered_job["settled"]):
+            self.shutdown_label.configure(text="")
+            for button in self.shutdown_buttons.values():
+                button.configure(state="disabled")
+            return
         state = self.view["shutdown"]["state"] if self.view else "UNAVAILABLE"
         titles = {"RUNNING": "실행 입장 가능 · 합성 전용", "SCHEDULED": "종료 예약됨 · 신규 입장 차단",
                   "READY": "종료 가능 · 체크포인트 저장됨", "RECOVERY_REQUIRED": "복구 확인 필요",
@@ -1073,6 +1245,9 @@ class CommandCenter:
             button.configure(state="normal" if enabled else "disabled")
 
     def close_requested(self):
+        if self.registered_job and not self.registered_job["future"].done():
+            self.cancel_registered_run()
+            return
         if self.gui_verification_cancel is not None:
             self.gui_verification_cancel.set()
             return
