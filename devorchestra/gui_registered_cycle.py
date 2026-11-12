@@ -33,41 +33,82 @@ def show(center, project):
     panel.title("등록 프로젝트 · Codex 개발 세션")
     state = tk.StringVar(value="등록된 복제본과 검증 조건을 확인하세요.")
     ttk.Label(panel, textvariable=state, wraplength=580).pack(fill="x", pady=4)
-    data = Catalog(runner.ledger).read()["projects"][project]["data"]
-    ttk.Label(panel, text=f"{data['name']} · {data['goal']}", wraplength=580).pack(fill="x")
+    try:
+        data = Catalog(runner.ledger).read()["projects"][project]["data"]
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, KeyError):
+        state.set("프로젝트 등록 정보를 읽지 못했습니다. 프로젝트 목록을 새로고침하세요.")
+        return
+    criteria = cycle_progress.freeze(data["acceptance"], None)
+    ttk.Label(panel, text=f"{data['name']} · 완료 기준 {len(criteria)}개").pack(anchor="w")
+    ttk.Label(panel, text="등록 목표와 완료 기준으로 계획을 세웁니다. 요구사항 문서는 선택 사항입니다.",
+              wraplength=580).pack(anchor="w")
+
+    def show_criteria():
+        viewer = center.panel()
+        viewer.title("개발 목표와 완료 기준")
+        content = center.editor_box(viewer, height=18)
+        content.insert("1.0", data["goal"] + "\n\n" + "\n\n".join(
+            f"{key} · {item['text']}" for key, item in criteria.items()))
+        content.configure(state="disabled")
+
+    ttk.Button(panel, text="목표와 완료 기준 보기", command=show_criteria).pack(anchor="w", pady=(0, 4))
+    baseline = None
     try:
         original, replica, baseline, _ = replica_readiness.baseline(runner.ledger, project)
         ttk.Label(panel, text=f"원본 {original}\n복제본 {replica}\n"
                   f"원본 Git {baseline['head'][:12]} · 스테이징 {len(baseline['staged'])} · "
                   f"작업 트리 변경 {len(baseline['raw_worktree_changed'])}", wraplength=580).pack(fill="x")
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
-        state.set(str(error))
-        ttk.Button(panel, text="Git 온보딩", command=lambda: center.onboarding_panel(project)).pack(anchor="w")
-        return
-
-    criteria = cycle_progress.freeze(data["acceptance"], None)
-    for key, item in criteria.items():
-        ttk.Label(panel, text=f"{key} · {item['text']}", wraplength=580).pack(anchor="w")
-    if any(name.casefold() == "project.godot" for name in baseline["files"]):
+        state.set("작업 복제본이 없습니다. Git 온보딩에서 복제본을 먼저 준비하세요."
+                  if str(error) == "An established Git onboarding baseline is required" else
+                  f"작업 복제본을 확인할 수 없습니다. Git 온보딩에서 상태를 확인하세요.\n{error}")
+    is_godot = baseline is not None and any(name.casefold() == "project.godot" for name in baseline["files"])
+    if is_godot and project == game_pilot.PROJECT:
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
-        if project == game_pilot.PROJECT:
-            _game_preflight(center, panel, runner, state)
+        _game_preflight(center, panel, runner, state)
         return
     ttk.Button(panel, text="등록 목표·기준 편집",
                command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
     inputs = ttk.Frame(panel)
     inputs.pack(fill="x")
     entries = {}
+    budget_keys = ("seconds", "tokens", "cycles", "manager_tokens")
+    draft = center.development_budget_drafts.setdefault(project, {})
     for index, (key, label, default) in enumerate((
             ("archive", "공식 Codex ZIP", ""), ("files", "수정 파일 경로 (쉼표 구분)", ""),
-            ("seconds", "세션 초", str(game_pilot.SESSION_SECONDS)),
-            ("tokens", "세션 토큰", str(game_pilot.SESSION_TOKENS)), ("cycles", "사이클 상한 (선택)", ""),
-            ("manager_tokens", "Manager 토큰 / 호출", str(game_pilot.ROLE_TOKENS["manager-planning"])))):
+            ("seconds", "전체 시간 기준 (초)", str(game_pilot.SESSION_SECONDS)),
+            ("tokens", "전체 토큰 기준", str(game_pilot.SESSION_TOKENS)), ("cycles", "사이클 상한 (선택)", ""),
+            ("manager_tokens", "Manager 호출당 토큰 기준", str(game_pilot.ROLE_TOKENS["manager-planning"])))):
         ttk.Label(inputs, text=label).grid(row=index, column=0, sticky="w")
         entry = entries[key] = ttk.Entry(inputs)
-        entry.insert(0, default)
+        entry.insert(0, draft.get(key, default))
         entry.grid(row=index, column=1, sticky="ew")
     inputs.columnconfigure(1, weight=1)
+    ttk.Label(panel, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
+              wraplength=580).pack(anchor="w", pady=4)
+
+    def save_budget():
+        draft.update((key, entries[key].get()) for key in budget_keys)
+
+    if baseline is None or is_godot:
+        def close_preflight():
+            save_budget()
+            panel.destroy()
+
+        def reopen():
+            close_preflight()
+            show(center, project)
+
+        if is_godot:
+            state.set("이 Godot 프로젝트에는 독립 Windows 빌드·플레이 검증이 아직 연결되지 않았습니다.")
+        else:
+            ttk.Button(panel, text="Git 온보딩 · 작업 복제본 준비",
+                       command=lambda: center.onboarding_panel(project=project)).pack(anchor="w")
+            ttk.Button(panel, text="복제본 준비 상태 다시 확인", command=reopen).pack(anchor="w")
+        ttk.Button(panel, text="닫기", command=close_preflight).pack(anchor="e")
+        panel.protocol("WM_DELETE_WINDOW", close_preflight)
+        panel.bind("<Escape>", lambda _event: (close_preflight(), "break")[1])
+        return
     saved_archive = codex_setup.archive_path(runner.ledger)
     if saved_archive.is_file():
         entries["archive"].insert(0, str(saved_archive))
@@ -139,6 +180,7 @@ def show(center, project):
             cancelled.set()
             state.set("중단 요청됨 · 소유 자원 회수 대기")
         else:
+            save_budget()
             panel.destroy()
 
     def submit(args, approval=None, *, resume=False, soft_limits=None, graceful=False):

@@ -13,16 +13,19 @@ from .ledger import digest
 from .runtime import Runner
 
 
-def show_panel(center, initial):
-    index = center.project.current()
-    if index < 0:
-        return
-    project = center.project_ids[index]
+def show_panel(center, initial, *, project=None):
+    if project is None:
+        index = center.project.current()
+        if index < 0:
+            return
+        project = center.project_ids[index]
     runner = Runner(center.reader.ledger)
     panel = center.panel()
     panel.title("기존 Git 프로젝트 문맥")
     panel.geometry("810x690")
     ttk.Label(panel, text=f"{project} · 원본 읽기 전용 / 개발 권한 별도 승인").pack(anchor="w")
+    ttk.Label(panel, text="복제본 경로 · 상위 폴더를 선택하면 그 안에 새 복제본을 만듭니다.",
+              wraplength=700).pack(anchor="w", pady=(6, 0))
     destination = ttk.Entry(panel)
     destination.insert(0, initial)
     destination.pack(fill="x", pady=(7, 4))

@@ -134,7 +134,7 @@ class ProjectionTests(unittest.TestCase):
         center.observation = Mock()
         center.render = Mock(wraps=center.render)
         center.clear = Mock(wraps=center.clear)
-        for attr in ("global_badge", "mission", "goal", "project_states", "development_button", "gates",
+        for attr in ("global_badge", "mission", "goal", "project_states", "development_button", "development_options", "gates",
                      "safety", "resources", "run_filter", "role_filter", "render_audit",
                      "overview", "verify_overview", "approval_button"):
             setattr(center, attr, Mock())

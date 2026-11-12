@@ -147,6 +147,7 @@ class CommandCenter:
         self.event_lookup = {}
         self.project_ids = list(PROJECTS)
         self.run_options = {}
+        self.development_budget_drafts = {}
         self.controller = Runner(reader.ledger)
         self.shutdown_future = None
         self.gui_verification_cancel = None
@@ -213,9 +214,13 @@ class CommandCenter:
         self.goal = label(mission, fg=MUTED)
         self.goal.pack(fill="x")
         on_width(mission, lambda width: self.goal.configure(wraplength=max(240, width - 40)))
-        self.development_button = ttk.Button(mission, text="개발 시작", command=self.development_start,
+        self.development_button = ttk.Button(mission, text="자동 개발 · 시간/토큰 설정",
+                                             command=self.registered_development,
                                              style="Primary.TButton", state="disabled")
         self.development_button.pack(fill="x", pady=(8, 2))
+        self.development_options = ttk.Button(mission, text="다른 개발 옵션", command=self.development_start,
+                                              state="disabled")
+        self.development_options.pack(fill="x", pady=(2, 0))
         self.question_button = ttk.Button(mission, text="사용자 응답 대기 없음", state="disabled",
                                           command=self.answer_question)
         self.question_button.pack(fill="x", pady=(4, 0))
@@ -611,6 +616,7 @@ class CommandCenter:
             self.refresh()
             return
         self.development_button.configure(state="disabled")
+        self.development_options.configure(state="disabled")
         self.request_refresh()
 
     def request_refresh(self):
@@ -715,7 +721,8 @@ class CommandCenter:
         self.verify_overview.configure(text="검증 근거 없음 · NOT_VALIDATED")
         self.approval_button.configure(text="사용자 응답 대기 없음", state="disabled")
         self.project_states.configure(text="UNKNOWN")
-        self.development_button.configure(text="개발 시작", state="disabled")
+        self.development_button.configure(state="disabled")
+        self.development_options.configure(state="disabled")
         if hasattr(self, "next_brief"):
             self.next_brief.configure(text=reason)
         if hasattr(self, "question_button"):
@@ -756,9 +763,9 @@ class CommandCenter:
                                     fg=color(state))
         workflow = view["workflow"]
         handoff = view.get("supervised_handoff")
-        self.development_button.configure(text="개발 작업 열기" if handoff else "개발 시작",
-                                          state="normal" if view["registration"] and workflow["requirements_count"]
-                                          else "disabled")
+        development_state = "normal" if view["registration"] else "disabled"
+        self.development_button.configure(state=development_state)
+        self.development_options.configure(state=development_state)
         next_action = {
             "ANSWER_QUESTION": "사용자 질문에 답변",
             "REGISTER_PROJECT": "프로젝트 폴더 등록",
@@ -1302,10 +1309,10 @@ class CommandCenter:
 
         ttk.Button(panel, text="저장" if edit else "프로젝트 등록", command=save).pack(anchor="e")
 
-    def onboarding_panel(self, initial=""):
+    def onboarding_panel(self, initial="", *, project=None):
         from .gui_onboarding import show_panel
 
-        show_panel(self, initial)
+        show_panel(self, initial, project=project)
 
     def original_apply_panel(self, project=None):
         from . import original_apply
@@ -1801,10 +1808,16 @@ class CommandCenter:
         except (Blocked, OSError, sqlite3.Error, ValueError):
             status.set("원장이 준비되지 않았습니다.")
 
+    def registered_development(self):
+        if self.view and self.view["registration"]:
+            from .gui_registered_cycle import show
+
+            show(self, self.view["project_id"])
+
     def development_start(self):
         if not self.view or not self.view["registration"]:
             return
-        project_id = self.view["project_id"]
+        project = self.view["project_id"]
         panel = self.panel()
         panel.title("DevOrchestra · 개발 시작")
         label(panel, "등록 프로젝트의 개발 범위를 검토하고 실행을 승인하세요.",
@@ -1814,10 +1827,10 @@ class CommandCenter:
             from .gui_registered_cycle import show
 
             panel.destroy()
-            show(self, project_id)
+            show(self, project)
 
         for title, action in (("등록 프로젝트 Codex 자동 개발", native),
-                              ("Git 온보딩", self.onboarding_panel),
+                              ("Git 온보딩", lambda: self.onboarding_panel(project=project)),
                               ("Codex 환경 및 로그인", self.codex_setup_panel),
                               ("고급 실행 및 진단", self._advanced_development_start)):
             ttk.Button(panel, text=title, command=action).pack(fill="x", pady=2)
