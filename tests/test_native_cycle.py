@@ -10,9 +10,41 @@ from uuid import uuid4
 from devorchestra import native_cycle
 from devorchestra.ledger import Ledger
 from devorchestra.lease import Blocked
+from devorchestra.native_developer_trial import CliToolEvidenceError, _cli_evidence
 
 
 class NativeCycleTests(unittest.TestCase):
+    def test_internal_discovery_keeps_settled_plan_but_other_tool_evidence_blocks_handoff(self):
+        item = {"id": "discovery-1", "type": "mcp_tool_call", "server": "codex", "tool": "list_mcp_resources",
+                "arguments": {}, "error": None}
+        empty = {"content": [{"type": "text", "text": '{"resources":[]}'}], "structured_content": None}
+        complete = {**item, "status": "completed", "result": empty}
+        usage = {"input_tokens": 500, "output_tokens": 100}
+        prefix = [{"type": "thread.started", "thread_id": "fixture"}, {"type": "turn.started"},
+                  {"type": "item.started", "item": {**item, "status": "in_progress", "result": None}}]
+        suffix = [{"type": "item.completed", "item": {"type": "agent_message", "text": "PLAN B"}},
+                  {"type": "turn.completed", "usage": usage}]
+
+        def transcript(item):
+            return "\n".join(map(json.dumps, [*prefix, {"type": "item.completed", "item": item}, *suffix]))
+
+        evidence = _cli_evidence(transcript(complete), retain_message=True)
+        self.assertEqual(("PLAN B", usage, 1, []), (evidence["message"], evidence["provider_usage"],
+                         evidence["empty_discovery_count"], evidence["command_events"]))
+        for changed in ({"server": "external"}, {"tool": "read_mcp_resource"}, {"id": "unmatched"},
+                        {"result": {**empty, "content": [{"type": "text", "text": '{"resources":["data"]}'}]}}):
+            with self.subTest(changed=changed):
+                stream = transcript({**complete, **changed})
+                with self.assertRaises(CliToolEvidenceError):
+                    _cli_evidence(stream, retain_message=True)
+                settled = _cli_evidence(stream, retain_message=True, retain_settled=True)
+                self.assertEqual(usage, settled["provider_usage"])
+                self.assertIn("tool_evidence_error", settled)
+        missing = "\n".join(map(json.dumps, [*prefix[:2], suffix[-1]]))
+        settled = _cli_evidence(missing, retain_message=True, retain_settled=True)
+        self.assertIsNone(settled["message"])
+        self.assertEqual(usage, settled["provider_usage"])
+
     def test_early_manager_completion_cannot_override_observed_missing_feature(self):
         calls = []
 
@@ -60,6 +92,15 @@ class NativeCycleTests(unittest.TestCase):
                 raise native_cycle.OwnedMxcStopped("fixture timeout after dispatch")
             task = native_cycle.TASKS[target]
             rows = [{"type": "thread.started", "thread_id": "fixture"}, {"type": "turn.started"}]
+            if phase == "manager-planning" and target == "B":
+                discovery = {"id": "fixture-discovery", "type": "mcp_tool_call", "server": "codex",
+                             "tool": "list_mcp_resource_templates", "arguments": {}, "error": None}
+                rows.extend((
+                    {"type": "item.started", "item": {**discovery, "status": "in_progress", "result": None}},
+                    {"type": "item.completed", "item": {**discovery, "status": "completed", "result": {
+                        "content": [{"type": "text", "text": '{"resourceTemplates":[]}'}],
+                        "structured_content": None}}},
+                ))
             if phase == "developer":
                 (work / task["file"]).write_text(task["new"], encoding="ascii")
                 rows.append({"type": "item.completed", "item": {"type": "command_execution",

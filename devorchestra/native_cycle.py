@@ -604,9 +604,10 @@ class _FixtureSession:
         details = _failure_evidence(result["stdout"], _read_observation(stderr, 65536) if stderr.is_file() else b"")
         try:
             response = _cli_evidence(result["stdout"], command_pattern=test_pattern or r"(?!)",
-                                     expected=expected, retain_message=True)
+                                     expected=expected, retain_message=True, retain_settled=True)
         except (ValueError, TypeError, KeyError):
             response = {"provider_usage": "UNKNOWN"}
+        evidence_error = response.get("tool_evidence_error")
         usage = response["provider_usage"]
         self.usage_complete = type(usage) is dict
         tokens = usage["input_tokens"] + usage["output_tokens"] if self.usage_complete else None
@@ -618,7 +619,9 @@ class _FixtureSession:
         recovered_developer = writable and process_result == "TERMINATED_AND_DRAINED"
         if recovered_developer and test_pattern and not response.get("successful_fixture_command_sha256"):
             settled_process = False
-        outcome = ("REQUEST_UNKNOWN" if not settled_process or "message" not in response else
+        outcome = ("REQUEST_UNKNOWN" if not settled_process or response.get("provider_response") != "COMPLETED" else
+                   "TOOL_EVIDENCE_REJECTED" if evidence_error else
+                   "RESPONSE_MISSING" if not response.get("message") else
                    "USAGE_UNKNOWN" if tokens is None else "TOKEN_LIMIT" if tokens > limit and not graceful else "COMPLETED")
         message = response.get("message")
         receipt = {"outcome": outcome, "exit_code": result["exitCode"], "owned_tree": "DRAINED",
@@ -626,6 +629,10 @@ class _FixtureSession:
                    "provider_usage": usage, "message_sha256": digest(message),
                    "test_commands": response.get("successful_fixture_command_sha256", []),
                    "command_events": response.get("command_events", []), **details}
+        if evidence_error:
+            receipt["cli_evidence_error"] = evidence_error
+        if response.get("empty_discovery_count"):
+            receipt["empty_discovery_count"] = response["empty_discovery_count"]
         if tokens is not None and tokens > limit:
             receipt["role_token_limit"] = limit
             receipt["role_reported_tokens"] = tokens

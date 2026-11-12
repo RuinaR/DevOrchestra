@@ -85,10 +85,55 @@ def _scope(archive, home, request, expires, ledger_head, model, role_tokens, ses
     }
 
 
-def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expected="11", retain_message=False):
+class CliToolEvidenceError(ValueError):
+    """A tool event could not be attributed to an approved operation."""
+
+
+_EMPTY_DISCOVERY = {"list_mcp_resources": "resources", "list_mcp_resource_templates": "resourceTemplates"}
+
+
+def _empty_discovery(item, kind, pending):
+    tool = item.get("tool")
+    item_id = item.get("id")
+    if (item.get("server") != "codex" or type(tool) is not str or tool not in _EMPTY_DISCOVERY
+            or type(item_id) is not str or not item_id or item.get("arguments") != {} or item.get("error") is not None):
+        raise CliToolEvidenceError("Unexpected Codex resource discovery event")
+    if kind == "item.started" and item.get("status") == "in_progress" and item.get("result") is None and item_id not in pending:
+        pending[item_id] = tool
+        return
+    result = item.get("result")
+    content = result.get("content") if type(result) is dict else None
+    if (kind == "item.completed" and pending.get(item_id) == tool and item.get("status") == "completed"
+            and type(result) is dict and result.keys() == {"content", "structured_content"}
+            and result["structured_content"] is None and type(content) is list and len(content) == 1
+            and type(content[0]) is dict and content[0].keys() == {"type", "text"} and content[0]["type"] == "text"
+            and type(content[0]["text"]) is str and len(content[0]["text"]) <= 128):
+        try:
+            empty = json.loads(content[0]["text"], object_pairs_hook=list) == [(_EMPTY_DISCOVERY[tool], [])]
+        except ValueError:
+            empty = False
+        if empty:
+            del pending[item_id]
+            return
+    raise CliToolEvidenceError("Codex resource discovery did not return a matched empty inventory")
+
+
+def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expected="11", retain_message=False,
+                  retain_settled=False):
     """Retain only bounded event classes, command hashes and reported counts."""
     thread = started = terminal = message = False
     usage, tests, commands, final_message = None, [], [], None
+    discoveries = {}
+    empty_discovery_count = 0
+    tool_error = None
+
+    def reject_tool(reason):
+        nonlocal tool_error
+        if not retain_settled:
+            raise CliToolEvidenceError(reason)
+        if tool_error is None:
+            tool_error = reason
+
     for line in output.splitlines():
         row = json.loads(line)
         if type(row) is not dict or terminal:
@@ -102,12 +147,23 @@ def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expec
             if not thread or started:
                 raise ValueError("Unexpected turn")
             started = True
+        elif kind in ("item.started", "item.updated", "item.completed") and isinstance(row.get("item"), dict) and row["item"].get("type") == "mcp_tool_call":
+            if not started:
+                reject_tool("Resource discovery outside a started turn")
+                continue
+            try:
+                _empty_discovery(row["item"], kind, discoveries)
+            except CliToolEvidenceError as error:
+                reject_tool(str(error))
+            else:
+                empty_discovery_count += int(kind == "item.completed")
         elif kind == "item.completed" and started:
             item = row["item"]
             if type(item) is not dict or item.get("type") not in (
                 "agent_message", "reasoning", "command_execution", "file_change", "todo_list",
             ):
-                raise ValueError("Unexpected completed tool item")
+                reject_tool("Unexpected completed tool item")
+                continue
             if item.get("type") == "agent_message" and isinstance(item.get("text"), str) and item["text"]:
                 message = True
                 final_message = item["text"]
@@ -131,13 +187,19 @@ def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expec
                 usage = {key: value for key, value in reported.items()
                          if key in ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_output_tokens")
                          and type(value) is int and value >= 0}
-    if not terminal or not message:
+    if discoveries:
+        reject_tool("Unsettled Codex resource discovery")
+    if not terminal or (not message and not retain_settled):
         raise ValueError("Missing completed model response")
     result = {"provider_response": "COMPLETED", "provider_usage": usage or "UNKNOWN",
               "successful_fixture_command_sha256": tests}
     if retain_message:
         result["message"] = final_message
         result["command_events"] = commands
+        if empty_discovery_count:
+            result["empty_discovery_count"] = empty_discovery_count
+    if tool_error:
+        result["tool_evidence_error"] = tool_error
     return result
 
 

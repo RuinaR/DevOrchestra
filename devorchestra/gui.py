@@ -35,6 +35,8 @@ REGISTERED_STATES = {
     "SIGNOFF_PENDING": "검토 재개 대기", "USER_TEST_REQUIRED": "사용자 검증 필요",
     "GRACEFUL_STOP": "작업 마무리 후 종료", "NOT_VALIDATED": "검증 미완료",
     "REUSED": "계획 재사용", "SKIPPED": "건너뜀", "REQUEST_UNKNOWN": "요청 결과 미확정",
+    "TOOL_EVIDENCE_REJECTED": "도구 실행 기록을 검증할 수 없어 차단됨",
+    "RESPONSE_MISSING": "모델 호출 완료 · 사용할 응답 없음",
     "STARTING": "실행 준비 중", "STOPPING": "중단 요청됨", "RECOVERY_REQUIRED": "복구 필요",
     "TIME_LIMIT": "시간 기준 도달", "TOKEN_LIMIT": "토큰 기준 도달", "CYCLE_LIMIT": "사이클 상한 도달",
     "NO_PROGRESS": "진척 없음", "NOT_VERIFIED": "검증 미확인", "VERIFIED": "검증 완료",
@@ -1388,12 +1390,15 @@ class CommandCenter:
         from . import registered_cycle
 
         end = (progress or {}).get("end") or {}
-        if end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True:
+        if end.get("owned_tree") != "DRAINED":
+            return False
+        if registered_cycle.can_review_registered_plan(end):
+            return True
+        if end.get("usage_complete") is not True:
             return False
         if CommandCenter.can_continue_progress_stop(progress):
             return True
-        if (registered_cycle.can_review_postprocess(end) or registered_cycle.can_review_registered_plan(end)
-                or registered_cycle.can_review_size_stop(end)):
+        if registered_cycle.can_review_postprocess(end) or registered_cycle.can_review_size_stop(end):
             return end.get("staging_cleanup", {}).get("status") == "RETAINED_FOR_RECOVERY"
         if end["outcome"] == registered_cycle.MANUAL_CHECKPOINT:
             scope = progress["scope"]

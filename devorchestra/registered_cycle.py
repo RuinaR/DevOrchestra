@@ -1776,9 +1776,50 @@ def can_review_postprocess(result):
 
 
 def can_review_registered_plan(result):
-    return ((result.get("outcome"), result.get("reason")) == ("BLOCKED", LEGACY_PLAN_ERROR)
-            and result.get("cycle_count") == 1 and bool(result.get("changed"))
-            and result.get("staging_cleanup", {}).get("status") == "RETAINED_FOR_RECOVERY")
+    return (result.get("cycle_count") == 1 and bool(result.get("changed"))
+            and result.get("staging_cleanup", {}).get("status") == "RETAINED_FOR_RECOVERY"
+            and ((result.get("outcome"), result.get("reason"), result.get("usage_complete"))
+                 == ("BLOCKED", LEGACY_PLAN_ERROR, True)
+                 or _planner_terminal_misclassified(result)))
+
+
+def _planner_terminal_misclassified(result):
+    roles = result.get("roles", [])
+    role = roles[-1] if roles else {}
+    return (result.get("outcome") == result.get("reason") == "REQUEST_UNKNOWN"
+            and result.get("usage_complete") is False and result.get("owned_tree") == "DRAINED"
+            and (role.get("phase"), role.get("outcome"), role.get("process_result"), role.get("exit_code"),
+                 role.get("owned_tree"), role.get("provider_usage"), role.get("message_sha256"))
+            == ("manager-planning", "REQUEST_UNKNOWN", "EXITED", 0, "DRAINED", "UNKNOWN", digest(None))
+            and set(role.get("cli_events", ())) == {"thread.started", "turn.started", "turn.completed"}
+            and not role.get("cli_failure_signals") and not role.get("command_events"))
+
+
+def _recovered_planner_evidence(ledger, rows):
+    start, end = rows[0], rows[-1]
+    if not _planner_terminal_misclassified(end):
+        return None
+    intent, role = rows[-3:-1]
+    if (intent.get("kind") != "native_inspection_role_intent" or role.get("kind") != "native_inspection_role_result"
+            or (role.get("phase"), role.get("cycle")) != ("manager-planning", end["cycle_count"] + 1)
+            or any(role.get(key) != value for key, value in end["roles"][-1].items())
+            or any(intent.get(key) != role.get(key) for key in ("phase", "cycle", "target", "approval_sha256"))
+            or role.get("approval_sha256") != start["approval_sha256"] or digest(start["scope"]) != start["approval_sha256"]
+            or end["staging_cleanup"].get("workspace") != start["workspace"]):
+        raise Blocked("완료된 계획 호출의 기록을 대조할 수 없습니다.")
+    response = _read_cli_role_evidence(ledger, _response_ref(start, intent, role), start["scope"])
+    if (not response.get("empty_discovery_count") or response["command_events"]
+            or not isinstance(response["provider_usage"], dict)):
+        raise Blocked("내부 조회와 확정 사용량이 입증된 계획만 복구할 수 있습니다.")
+    return response
+
+
+def registered_plan_remaining(ledger, rows):
+    seconds, tokens, calls = manual_remaining(rows[0]["scope"], rows[-1])
+    if response := _recovered_planner_evidence(ledger, rows):
+        usage = response["provider_usage"]
+        tokens -= usage["input_tokens"] + usage["output_tokens"]
+    return seconds, tokens, calls
 
 
 def can_review_size_stop(result):
@@ -1865,7 +1906,7 @@ def _response_ref(start, intent, role):
             "images": intent.get("image_evidence", []), "commands_sha256": digest(role.get("command_events", []))}
 
 
-def _read_settled_response(ledger, ref, scope):
+def _read_cli_role_evidence(ledger, ref, scope):
     phase = ref["phase"]
     if (not re.fullmatch(r"native-command-[a-z0-9_]+", ref["workspace"])
             or phase not in {"manager-planning", "reviewer", "manager-final"}
@@ -1877,9 +1918,13 @@ def _read_settled_response(ledger, ref, scope):
         raw = _read_observation(path, limit + 1)
         if len(raw) > limit:
             raise ValueError("Output limit exceeded")
-        response = _cli_evidence(raw.decode("utf-8"), command_pattern=r"(?!)", retain_message=True)
+        return _cli_evidence(raw.decode("utf-8"), command_pattern=r"(?!)", retain_message=True)
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
         raise Blocked("보존된 모델 응답을 읽거나 완료 이벤트를 확인할 수 없습니다.") from error
+
+
+def _read_settled_response(ledger, ref, scope):
+    response = _read_cli_role_evidence(ledger, ref, scope)
     if (digest(response["message"]) != ref["message_sha256"]
             or response["provider_usage"] != ref["provider_usage"]
             or digest(response["command_events"]) != ref["commands_sha256"]
@@ -1928,19 +1973,25 @@ def _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, 
 
 
 def _resume_registered_plan_contract(runner, events, head, rows, expires, seconds, tokens, now):
-    """Recover a settled second plan from releases that only accepted string plans."""
+    """Reuse a settled plan rejected by an older parser at the second cycle boundary."""
     start, end = rows[0], rows[-1]
     prior = start["scope"]
     approval = start["approval_sha256"]
     cleanup = end["staging_cleanup"]
+    recovered = _recovered_planner_evidence(runner.ledger, rows)
     if (prior.get("resume") or "graceful_stop" not in prior or prior["verifier"].get("mode") == "godot-game"
-            or end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True
+            or end.get("owned_tree") != "DRAINED" or (end.get("usage_complete") is not True and not recovered)
             or approval != digest(prior) or approval != end.get("approval_sha256")
             or cleanup.get("workspace") != start.get("workspace")
             or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
                    for e in events if e["kind"] == "native_inspection_intent")):
         raise Blocked("계획 재사용에는 확정 사용량, 회수 증거와 미사용 복구 기록이 필요합니다.")
     remaining_seconds, remaining_tokens, calls = manual_remaining(prior, end)
+    recovered_tokens = 0
+    if recovered:
+        usage = recovered["provider_usage"]
+        recovered_tokens = usage["input_tokens"] + usage["output_tokens"]
+        remaining_tokens -= recovered_tokens
     if (type(seconds) is not int or type(tokens) is not int or seconds < 60 or calls < 3
             or tokens < sum(prior["role_tokens"][role] for role in ("developer", "reviewer", "manager-final"))
             or (seconds, tokens) != (remaining_seconds, remaining_tokens)
@@ -1974,9 +2025,9 @@ def _resume_registered_plan_contract(runner, events, head, rows, expires, second
                    or intent["approval_sha256"] != approval or role["approval_sha256"] != approval
                    or (role.get("outcome"), role.get("process_result"), role.get("exit_code"), role.get("owned_tree"))
                    != ("COMPLETED", "EXITED", 0, "DRAINED") or not isinstance(role["provider_usage"], dict)
-                   for intent, role in zip(intents, results))
+                   for intent, role in zip(intents, results[:-1] if recovered else results))
             or sum(row["provider_usage"]["input_tokens"] + row["provider_usage"]["output_tokens"]
-                   for row in results) != end["known_reported_tokens"]
+                   for row in (results[:-1] if recovered else results)) != end["known_reported_tokens"]
             or intents[-1].get("source_sha256") != identity or results[-1].get("target") is not None):
         raise Blocked("계획 및 이전 역할의 실행·사용량 영수증을 확인할 수 없습니다.")
 
@@ -2002,15 +2053,18 @@ def _resume_registered_plan_contract(runner, events, head, rows, expires, second
     verdict, finding, _ = _parse_verdict(_read_settled_response(ledger, reviewer_ref, prior), REVIEW_VERDICTS)
     if verdict != "REWORK" or not finding or digest(finding) != review.get("finding_sha256"):
         raise Blocked("보존된 Reviewer 재작업 근거를 확인할 수 없습니다.")
-    plan = _parse_plan(_read_settled_response(ledger, _response_ref(start, intents[-1], results[-1]), prior),
-                       [key], approved_paths=prior["files"])
+    message = (recovered["message"] if recovered else
+               _read_settled_response(ledger, _response_ref(start, intents[-1], results[-1]), prior))
+    plan = _parse_plan(message, [key], approved_paths=prior["files"])
     resume = {**checkpoint["continuation"], "mode": "after-registered-planning", "cycle": 1,
               "criteria_status": progress["criteria"], "changed": checkpoint["changed"], "stagnant": 1,
               "failures": [cycle_progress.failure_fingerprint("reviewer", [finding], digest(prior["verifier"]))],
               "feedback": {"target": key, "review": f"REWORK · {_safe_feedback(finding)}",
                            "verifier": verified["observations"], "change_hash": digest(diff), "next": "REWORK"},
               "plan_sha256": digest(plan), "criterion": key, "parent_run_id": start["run_id"],
-              "parent_reported_tokens": end["known_reported_tokens"]}
+              "parent_reported_tokens": end["known_reported_tokens"] + recovered_tokens,
+              **({"recovered_planner_usage": recovered["provider_usage"],
+                  "recovered_planner_message_sha256": digest(message)} if recovered else {})}
     return ({**prior, "resume": resume, "replica_sha256": identity, "ledger_head": head, "expires": expires,
              "seconds": seconds, "tokens": tokens, "model_calls_max": calls}, plan)
 
@@ -2423,7 +2477,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             except (Blocked, OSError, ValueError, KeyboardInterrupt) as error:
                 reason = "CANCELLED" if isinstance(error, KeyboardInterrupt) or cancelled() else str(error)
                 outcome = reason if reason in {"CANCELLED", "TIME_LIMIT", "TOKEN_LIMIT", "REQUEST_UNKNOWN",
-                                               "USAGE_UNKNOWN", "NO_PROGRESS", "GRACEFUL_STOP", "SIGNOFF_PENDING"} else "BLOCKED"
+                                               "USAGE_UNKNOWN", "RESPONSE_MISSING", "TOOL_EVIDENCE_REJECTED", "NO_PROGRESS",
+                                               "GRACEFUL_STOP", "SIGNOFF_PENDING"} else "BLOCKED"
                 if outcome == "SIGNOFF_PENDING" and session.owned_verified:
                     try:
                         session.check_image()
@@ -2438,7 +2493,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                         reason = f"{reason} · 응답 복구 기록 확인 실패: {checkpoint_error}"
             if not session.owned_verified:
                 return {**fields, "outcome": "RECOVERY_REQUIRED", "owned_tree": "UNRESOLVED", "reason": reason}
-            preserve = outcome in {"REQUEST_UNKNOWN", "USAGE_UNKNOWN", "TIME_LIMIT", "CANCELLED", "BLOCKED",
+            preserve = outcome in {"REQUEST_UNKNOWN", "USAGE_UNKNOWN", "RESPONSE_MISSING", "TOOL_EVIDENCE_REJECTED",
+                                   "TIME_LIMIT", "CANCELLED", "BLOCKED",
                                    POSTPROCESS_PENDING}
             cleanup["preserve"] = preserve
         if preserve:

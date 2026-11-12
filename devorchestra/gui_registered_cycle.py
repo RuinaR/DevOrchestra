@@ -686,7 +686,13 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             return
         if rows and (rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT
                      or registered_cycle.can_review_registered_plan(rows[-1])):
-            seconds, tokens, _ = registered_cycle.manual_remaining(rows[0]["scope"], rows[-1])
+            try:
+                seconds, tokens, _ = (registered_cycle.registered_plan_remaining(runner.ledger, rows)
+                                      if registered_cycle.can_review_registered_plan(rows[-1]) else
+                                      registered_cycle.manual_remaining(rows[0]["scope"], rows[-1]))
+            except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+                state.set(str(error))
+                return
             cancelled.clear()
             submit((project, int(time()) + seconds + 2940, seconds, tokens), resume=True, graceful=True)
             return
