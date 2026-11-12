@@ -49,6 +49,15 @@ class PlayTests(unittest.TestCase):
             adaptive_play.apply(window, proposal(), client)
         window.key.assert_not_called()
 
+    def test_releases_held_key_if_game_takes_foreground(self):
+        window = Mock()
+        client = (8, 30, 500, 250)
+        window.client_in_image.return_value = client
+        window.is_foreground.side_effect = [False, True]
+        with self.assertRaisesRegex(Blocked, "foreground"):
+            adaptive_play.apply(window, proposal(), client)
+        self.assertEqual([(0x0D, True), (0x0D, False)], [call.args for call in window.key.call_args_list])
+
     def test_independent_checks_cannot_substitute_for_opted_in_play(self):
         state = {"criteria": {"C1": "VERIFIED"}, "regressed": []}
         scope = {"adaptive_play": True}

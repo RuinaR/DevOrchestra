@@ -18,6 +18,8 @@ STEPS = 3
 SECONDS = 360
 MAX_HOLD_MS = 600
 MAX_KEYS = 3
+GAME_EXECUTABLE_LIMIT = 256 * 1024**2
+GODOT_PLAY_OVERRIDE = b"[display]\nwindow/size/no_focus=true\n"
 KEYS = {**{name: ord(name) for name in "WASDQEZXRFCV"},
         "UP": 0x26, "DOWN": 0x28, "LEFT": 0x25, "RIGHT": 0x27,
         "SPACE": 0x20, "ENTER": 0x0D, "ESC": 0x1B}
@@ -82,6 +84,8 @@ def _wait(window, milliseconds):
     until = monotonic() + milliseconds / 1000
     while monotonic() < until:
         window.check()
+        if window.is_foreground():
+            raise Blocked("Owned game became the foreground window")
         sleep(min(0.03, max(0, until - monotonic())))
 
 
@@ -146,13 +150,19 @@ def run(session, cycle, key, verification, context):
     directory, name, expected, args = target
     binary = directory / name
     check_path(binary)
+    bundle_options = {}
     if name == "GamePilot.exe":
-        if fingerprint(binary, 256 * 1024**2)["sha256"] != expected:
+        if fingerprint(binary, GAME_EXECUTABLE_LIMIT)["sha256"] != expected:
             raise Blocked("Approved game executable changed")
         directory = session.logs(f"{cycle}-play-game")
         copyfile(binary, directory / name)
         binary = directory / name
-    bundle = snapshot(directory)
+        # Godot otherwise requests foreground focus while showing the exported game.
+        # The override belongs to this play bundle only, never to the retained export.
+        with (directory / "override.cfg").open("xb") as config:
+            config.write(GODOT_PLAY_OVERRIDE)
+        bundle_options = {"max_file_bytes": GAME_EXECUTABLE_LIMIT}
+    bundle = snapshot(directory, **bundle_options)
     if bundle["files"].get(name, {}).get("sha256") != expected:
         raise Blocked("Approved play executable changed")
     if name == "app.exe" and digest(bundle) != verification["visual_preview"]["bundle_sha256"]:
@@ -292,6 +302,6 @@ def run(session, cycle, key, verification, context):
         raise Blocked("Owned play resources are unresolved")
     session.check()
     session.check_image()
-    if snapshot(directory) != bundle:
+    if snapshot(directory, **bundle_options) != bundle:
         raise Blocked("Owned play executable bundle changed")
     return frames, actions, outcome
