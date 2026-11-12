@@ -298,7 +298,7 @@ def _recoverable_pre_developer_stop(rows):
             and run[-2] == cleanup[0])
 
 
-def _settled_integrity_candidate(events, project, replica, onboarding, image):
+def _settled_integrity_candidate(events, project, replica, onboarding, image, *, frozen=None):
     rows = [row for row in events if row.get("project_id") == project and row.get("probe_kind") == KIND]
     start = next((row for row in reversed(rows) if row["kind"] == "native_inspection_intent"), {})
     end = rows[-1] if rows else {}
@@ -309,6 +309,44 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
     saved_progress = rows[-2] if len(rows) >= 2 else {}
     recovered_preflight = _recoverable_pre_developer_stop(
         [row for row in rows if row.get("run_id") == start.get("run_id")])
+    if frozen is not None and end.get("outcome") == "REQUEST_UNKNOWN" and prior.get("project_edit"):
+        run = [row for row in rows if row.get("run_id") == start.get("run_id")]
+        intent = next((row for row in reversed(run) if row["kind"] == "native_inspection_role_intent"), {})
+        result = next((row for row in reversed(run) if row["kind"] == "native_inspection_role_result"), {})
+        tools = [row.get("directory") for row in run if row["kind"] == "native_inspection_project_tools_intent"]
+        removed = [row.get("directory") for row in run if row["kind"] == "native_inspection_project_tools_cleanup"
+                   and row.get("result") == "REMOVED"]
+        protected = {name.casefold() for name in prior.get("protected_edit_paths", ())}
+        changed = sorted(name for name in frozen["files"].keys() | image["files"].keys()
+                         if frozen["files"].get(name) != image["files"].get(name))
+        # Reconstruct the previously approved image from onboarding and the
+        # unchanged inherited files. This also binds directory and Git identity.
+        inherited = prior.get("prior_replica_candidate", {}).get("changed", ())
+        previous_files = dict(frozen["files"])
+        for name in inherited:
+            if name in image["files"]:
+                previous_files[name] = image["files"][name]
+            else:
+                previous_files.pop(name, None)
+        if (end.get("kind") == "native_inspection_result" and end.get("run_id") == start.get("run_id")
+                and end.get("owned_tree") == result.get("owned_tree") == "DRAINED"
+                and end.get("usage_complete") is False
+                and end.get("staging_cleanup") == {"status": "RETAINED_FOR_RECOVERY", "workspace": start.get("workspace")}
+                and digest(prior) == start.get("approval_sha256") == end.get("approval_sha256")
+                == intent.get("approval_sha256") == result.get("approval_sha256")
+                and prior.get("replica") == str(replica) and prior.get("onboarding_sha256") == digest(onboarding)
+                and prior.get("original_head") == frozen["head"]
+                and intent.get("phase") == result.get("phase") == "developer"
+                and intent.get("cycle") == result.get("cycle") and intent.get("target") == result.get("target")
+                and result.get("outcome") == "REQUEST_UNKNOWN"
+                and intent.get("source_sha256") == end.get("replica_sha256")
+                and digest({**image, "files": previous_files}) == prior.get("replica_sha256")
+                and intent.get("source_sha256") == prior.get("replica_sha256")
+                and tools == removed and changed and all(
+                    name.casefold() not in protected and not _protected(name)
+                    and _relative(name).name.casefold() not in {"agents.md", "agents.override.md"} for name in changed)):
+            return {"run_id": end["run_id"], "receipt_sha256": digest(end), "changed": changed,
+                    "unsettled_candidate": True, "source_sha256": image_hash}
     manual = (end.get("outcome") == MANUAL_CHECKPOINT
               and saved_progress.get("kind") == "native_inspection_manual_checkpoint")
     allowed_changes = set(prior.get("files", ())) | set(prior.get("prior_replica_candidate", {}).get("changed", ()))
@@ -435,7 +473,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         from_progress_checkpoint = (len(prior_rows) >= 2
                                     and prior_rows[-2]["kind"] == "native_inspection_progress_checkpoint")
         if not game or (game_limits is not None and from_progress_checkpoint):
-            prior_replica_candidate = _settled_integrity_candidate(events, project, replica, onboarding, image)
+            prior_replica_candidate = _settled_integrity_candidate(events, project, replica, onboarding, image,
+                                                                   frozen=frozen if project_edit else None)
         elif game_limits is None:
             raise Blocked("Replica no longer matches onboarding")
         else:
@@ -489,6 +528,10 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         raise Blocked("Registered requirements cannot be changed by the Developer")
     protected = sorted(set(data["documents"].values()) | {ref["path"] for ref in refs}
                        | {path for check in verifier.get("checks", {}).values() for path in check["inputs"]})
+    if prior_replica_candidate and prior_replica_candidate.get("unsettled_candidate"):
+        if {name.casefold() for name in protected} & {
+                name.casefold() for name in prior_replica_candidate["changed"]}:
+            raise Blocked("미확정 후보에 현재 보호된 요구사항 또는 검증 파일의 변경이 있습니다.")
     if not project_edit:
         _editable_paths(files, protected)
     archive = Path(archive).absolute()
@@ -511,7 +554,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             candidate_base["player_report"] = {"origin": "USER_REPORTED", "ratings": player["ratings"],
                                                "finished": player["finished"]}
     play_policy = adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI)) if play else None
-    return {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
+    scope = {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),
             **({"visual_review": True, "replica_head": onboarding["replica_head"]} if visual_review else {}),
             **({"adaptive_play": play_policy} if play_policy else {}),
@@ -532,7 +575,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles,
             "role_seconds": 120, "role_tokens": role_tokens,
             "model_calls_max": cycles * (4 + (play_policy["steps"] if play_policy else 0)) if cycles else tokens,
-            **({"developer_memory": 1536 * 1024**2} if game else {}),
+            **({"developer_memory": 1536 * 1024**2} if game or (project_edit and (is_godot or install)) else {}),
             **({"developer_seconds": 300} if game and game_limits is None else {}),
             **({"role_deadlines": dict(game_limits["role_seconds"]), "model_output_bytes": MAX_MODEL_OUTPUT_BYTES,
                 "graceful_stop": game_pilot.graceful_policy()}
@@ -542,6 +585,10 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             **({"research": "CODEX_LIVE"} if "web-research" in permissions else {}),
             **({"portable_source_policy": project_tools.GITHUB_POLICY} if auto_tools else {}),
             **({"tool_packages": packages} if packages else {})}
+    if prior_replica_candidate and prior_replica_candidate.get("unsettled_candidate"):
+        if saved := _candidate_plan(ledger, events, scope):
+            scope["candidate_plan"] = {"run_id": saved[0], "sha256": digest(saved[1])}
+    return scope
 
 
 def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None):
@@ -922,6 +969,7 @@ class RegisteredSession(_FixtureSession):
                                                     (not game or phase == "developer") else None,
                                                     extra_read_roots=extra_roots,
                                                     scratch_root=scratch_root,
+                                                    tool_environment_root=scratch_root if phase == "developer" else None,
                                                     shell_tools=phase in self.scope["shell_roles"] and not images,
                                                     images=images, image_evidence=image_evidence,
                                                     response_schema=response_schema,
@@ -1779,7 +1827,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         if initial_plan is not None:
             plan, initial_plan = initial_plan, None
             session.record("native_inspection_manager_plan_reused", cycle=count, phase="manager-planning",
-                           plan_sha256=digest(plan), parent_run_id=scope["resume"]["parent_run_id"])
+                           plan_sha256=digest(plan),
+                           parent_run_id=(scope["candidate_plan"]["run_id"] if "candidate_plan" in scope
+                                          else scope["resume"]["parent_run_id"]))
         else:
             previous = feedback.get("next") if feedback else None
             retry = feedback.get("retry_reason") if feedback else None
@@ -1902,6 +1952,10 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             same_rework = feedback and feedback.get("next") == "REWORK" and feedback.get("target") == key
             visual_feedback = (f"Prior Reviewer findings (untrusted evidence): {feedback['review']}\n"
                                if same_rework and "review" in feedback else "")
+            if "candidate_plan" in scope and count == 1:
+                visual_feedback += ("This is a newly authorized task on the preserved candidate. Inspect what already "
+                                    "exists, preserve working behavior, and finish or verify the remaining parts of "
+                                    "the saved plan. The earlier Developer request has no confirmed result.\n")
             _handoff(session, count, "developer", "Manager가 전달한 계획 · " + plan["plan"])
             write_scope = ("Implement the plan using source, configuration and asset paths within the approved replica. "
                            if whole else f"Only modify or create {planned_files}. ")
@@ -2369,6 +2423,55 @@ def _read_settled_response(ledger, ref, scope):
             or (response["command_events"] and (ref["images"] or ref["phase"] not in scope["shell_roles"]))):
         raise Blocked("보존된 모델 응답·사용량·도구 기록이 영수증과 일치하지 않습니다.")
     return response["message"].strip()
+
+
+def _candidate_plan(ledger, events, scope):
+    candidate = scope["prior_replica_candidate"]
+    rows = [row for row in events if row.get("project_id") == scope["project_id"]
+            and row.get("probe_kind") == KIND]
+    failed = [row for row in rows if row.get("run_id") == candidate["run_id"]]
+    start = failed[0]
+    prior = start["scope"]
+    resume = prior.get("resume", {})
+    reused = next((row for row in reversed(failed) if row["kind"] == "native_inspection_manager_plan_reused"), {})
+    parent_id = reused.get("parent_run_id", start["run_id"])
+    parent = [row for row in rows if row.get("run_id") == parent_id]
+    intent = next((row for row in reversed(parent) if row["kind"] == "native_inspection_role_intent"
+                   and row.get("phase") == "manager-planning"), {})
+    result = next((row for row in reversed(parent) if row["kind"] == "native_inspection_role_result"
+                   and row.get("phase") == "manager-planning"), {})
+    accepted = next((row for row in reversed(parent) if row["kind"] == "native_inspection_plan_accepted"), {})
+    developer = next((row for row in reversed(failed) if row["kind"] == "native_inspection_role_intent"
+                      and row.get("phase") == "developer"), {})
+    if (not parent or not intent or not result or not accepted or not developer
+            or accepted.get("cycle") != intent.get("cycle") or intent.get("cycle") != result.get("cycle")
+            or accepted.get("target") != developer.get("target")
+            or accepted.get("target") not in scope["criteria"]
+            or result.get("exit_code") != 0 or result.get("process_result") != "EXITED"
+            or result.get("owned_tree") != "DRAINED" or not result.get("provider_usage")
+            or result.get("message_sha256") is None
+            or any(prior.get(key) != scope.get(key) for key in (
+                "project_revision", "goal", "criteria", "requirements", "permissions",
+                "planning_protocol", "onboarding_sha256", "protected_edit_paths", "verifier"))
+            or (reused and (reused.get("cycle") != developer.get("cycle")
+                            or reused.get("plan_sha256") != resume.get("plan_sha256")
+                            or reused.get("plan_sha256") != accepted.get("plan_sha256")))):
+        return None
+    try:
+        original_scope = parent[0]["scope"]
+        message = _read_settled_response(ledger, _response_ref(parent[0], intent, result), original_scope)
+        role_capabilities = original_scope.get("planning_protocol") == PLANNING_PROTOCOL
+        plan = _parse_plan(message, [accepted["target"]], approved_paths=original_scope["files"],
+                           github_tools=_allows_github_tools(original_scope),
+                           project_edit=bool(original_scope.get("project_edit")), role_capabilities=role_capabilities)
+        if role_capabilities:
+            plan = _repair_planning_handoff(plan, _developer_capabilities(original_scope))
+    except (Blocked, KeyError, TypeError, ValueError):
+        return None
+    if (plan.get("mode") != "edit" or digest(plan) != accepted.get("plan_sha256")
+            or (plan.get("tools") and not _allows_github_tools(scope))):
+        return None
+    return parent_id, plan
 
 
 def _resume_tool_preparation(runner, events, head, rows, expires, seconds, tokens, now):
@@ -2925,6 +3028,12 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
         if any(event.get("approval_sha256") == approval for event in events):
             raise Blocked("Registered development approval was already consumed")
         ledger = runner.ledger
+        initial_plan = None
+        if not resume and "candidate_plan" in scope:
+            saved = _candidate_plan(ledger, events, scope)
+            if not saved or scope["candidate_plan"] != {"run_id": saved[0], "sha256": digest(saved[1])}:
+                raise Blocked("승인한 기존 Manager 계획의 증거가 변경됐습니다.")
+            initial_plan = saved[1]
         auth = Path(scope["auth_home"])
         check_path(auth / "auth.json")
         approved_replicas = {Path(scope["replica"])}
@@ -2967,7 +3076,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 elif resume and scope["resume"].get("mode") == "next-cycle":
                     outcome = _cycles(session, continuation=scope["resume"])
                 else:
-                    outcome = _resume_remaining(session, diff) if resume else _cycles(session)
+                    outcome = _resume_remaining(session, diff) if resume else _cycles(session, initial_plan=initial_plan)
                 session.check_image()
                 if outcome == "NO_PROGRESS":
                     reason = outcome

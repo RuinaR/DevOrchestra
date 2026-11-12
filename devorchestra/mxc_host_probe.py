@@ -18,6 +18,7 @@ from .job_probe import (
     _require, _wait_empty,
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 )
+from .job_probe import job_commit, system_commit
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_launcher import _known_folder
@@ -74,7 +75,8 @@ def _args(child, *arguments, profile=PROFILE):
 
 
 def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=512 * 1024 * 1024,
-             check=None, output_limit=256, encoding="ascii", interact=None, process_limit=8, stdin_bytes=None):
+             check=None, output_limit=256, encoding="ascii", interact=None, process_limit=8, stdin_bytes=None,
+             memory_evidence=None):
     import msvcrt
 
     if type(process_limit) is not int or not 1 <= process_limit <= CODEX_DEVELOPER_PROCESS_LIMIT:
@@ -87,6 +89,8 @@ def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=5
     stdout, stderr = scratch / "probe.stdout", scratch / "probe.stderr"
     stopped = None
     try:
+        if memory_evidence is not None:
+            memory_evidence["system_before"] = system_commit()
         limits = ExtendedLimits()
         limits.basic.flags = (JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_JOB_MEMORY
                               | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
@@ -122,7 +126,12 @@ def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=5
             raise
         stopped = str(error)
     finally:
-        _cleanup(api, job, info, drained)
+        try:
+            if memory_evidence is not None:
+                memory_evidence["owned_job"] = job_commit(api, job)
+                memory_evidence["system_after"] = system_commit()
+        finally:
+            _cleanup(api, job, info, drained)
     if stopped is not None:
         raise OwnedMxcStopped(stopped)
     for path in (stdout, stderr):

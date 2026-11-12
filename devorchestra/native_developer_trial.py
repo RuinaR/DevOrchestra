@@ -232,6 +232,7 @@ def _failure_evidence(stdout, stderr):
             event_types.add(row["type"])
     output = (stdout + "\n" + stderr.decode("utf-8", errors="replace")).casefold()
     signals = {
+        "WINDOWS_COMMITMENT_LIMIT_1455": r"os error 1455|0x800705af",
         "MXC_PROCESS_QUOTA_1816": r"createprocessw failed with error code 1816",
         "CODE_MODE_HOST_DISABLED": r"code mode is unavailable because code-mode host is disabled",
         "MODEL_UNAVAILABLE": r"model_not_found|model.{0,120}(?:not supported|not available|does not exist)",

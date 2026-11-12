@@ -585,6 +585,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             if result.get("research"):
                 summary += ("\n계획 Manager와 Developer가 공식 Codex 검색으로 공개 자료를 조사합니다. "
                             "검색어는 Codex 제공자에게 전달됩니다.")
+            if "developer_memory" in result:
+                summary += f"\nDeveloper Windows Job 커밋 한도 {result['developer_memory'] // 1024**2:,} MiB"
             if result.get("portable_source_policy"):
                 summary += ("\n필요할 때 공개 GitHub 릴리스 ZIP 또는 커밋이 고정된 소스 ZIP을 "
                             "복제본에 설치합니다. 명령 네트워크와 시스템 전체 설치는 꺼져 있습니다.")
@@ -603,7 +605,12 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     summary += ("\nDeveloper가 세션 임시 폴더에 빌드한 Windows 앱을 오프라인 샌드박스에서 실행해 "
                                 "시작 화면을 캡처합니다. 화면이 준비되기 전에는 코드 검토를 계속합니다.")
             if candidate := result.get("prior_replica_candidate"):
-                summary += "\n검증된 기존 복제본 변경 유지 · " + ", ".join(candidate["changed"])
+                summary += "\n보존할 기존 복제본 변경 · " + ", ".join(candidate["changed"])
+                if candidate.get("unsettled_candidate"):
+                    summary += ("\n이전 Developer 응답 및 사용량은 미확정입니다. 현재 파일 해시를 새 개발 기준으로 "
+                                "승인합니다. 기존 요청은 재전송하지 않으며 이전 기능 검증 결과를 승계하지 않습니다.")
+                    if "candidate_plan" in result:
+                        summary += "\n저장된 Manager 계획으로 새 Developer 작업을 시작합니다."
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary + _play_approval(result), parent=panel):
                 launch(result)
             else:

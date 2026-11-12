@@ -21,6 +21,44 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_unsettled_candidate_requires_same_git_protected_files_and_cleanup(self):
+        project, run = "fixture", "run"
+        replica = Path("fixture-replica")
+        onboarding = {"revision": 1}
+        frozen = {"head": "original", "files": {"checks.py": {"sha256": "check"}}}
+        before = {"directory_id": [1, 2], "git": {"head": "head", "index": "index"}, "files": frozen["files"]}
+        after = {**before, "files": {**before["files"], "game.gd": {"sha256": "game"}}}
+        scope = {"project_edit": True, "replica": str(replica), "onboarding_sha256": digest(onboarding),
+                 "replica_sha256": digest(before), "original_head": frozen["head"],
+                 "protected_edit_paths": ["checks.py"]}
+        fields = {"project_id": project, "run_id": run, "probe_kind": registered_cycle.KIND,
+                  "approval_sha256": digest(scope)}
+        role = {**fields, "phase": "developer", "cycle": 1, "target": "C1"}
+        rows = [
+            {**fields, "kind": "native_inspection_intent", "scope": scope, "workspace": "temp"},
+            {**role, "kind": "native_inspection_role_intent", "source_sha256": digest(before)},
+            {**role, "kind": "native_inspection_role_result", "outcome": "REQUEST_UNKNOWN", "owned_tree": "DRAINED"},
+            {**fields, "kind": "native_inspection_result", "outcome": "REQUEST_UNKNOWN", "owned_tree": "DRAINED",
+             "usage_complete": False, "replica_sha256": digest(before),
+             "staging_cleanup": {"status": "RETAINED_FOR_RECOVERY", "workspace": "temp"}},
+        ]
+
+        def recover(image):
+            return registered_cycle._settled_integrity_candidate(rows, project, replica, onboarding, image,
+                                                                 frozen=frozen)
+
+        receipt = recover(after)
+        self.assertTrue(receipt["unsettled_candidate"])
+        self.assertEqual(receipt["source_sha256"], digest(after))
+        self.assertEqual(receipt["changed"], ["game.gd"])
+        with self.assertRaises(Blocked):
+            recover({**after, "git": {**after["git"], "index": "altered"}})
+        with self.assertRaises(Blocked):
+            recover({**after, "files": {**after["files"], "checks.py": {"sha256": "altered"}}})
+        rows.insert(-1, {**fields, "kind": "native_inspection_project_tools_intent", "directory": "tool"})
+        with self.assertRaises(Blocked):
+            recover(after)
+
     def test_progress_stop_preserves_rework_without_granting_new_scope(self):
         fixture = SimpleNamespace(scope={"criteria": {"C1": {}}}, owned_verified=True, usage_complete=True,
                                   check=Mock(), check_image=Mock(), source=lambda: "source",

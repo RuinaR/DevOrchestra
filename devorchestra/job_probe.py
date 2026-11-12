@@ -22,6 +22,7 @@ KILL_EXIT = 119
 
 # Windows SDK constants.
 JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x0008
+JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100
 JOB_OBJECT_LIMIT_JOB_MEMORY = 0x0200
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000D
@@ -65,6 +66,36 @@ class ExtendedLimits(c.Structure):
 class Accounting(c.Structure):
     _fields_ = [("times", c.c_longlong * 4), ("faults", w.DWORD),
                 ("total", w.DWORD), ("active", w.DWORD), ("terminated", w.DWORD)]
+
+
+class PerformanceInformation(c.Structure):
+    _fields_ = [("cb", w.DWORD), ("commit_total", SIZE), ("commit_limit", SIZE),
+                ("commit_peak", SIZE), ("physical_total", SIZE), ("physical_available", SIZE),
+                ("system_cache", SIZE), ("kernel_total", SIZE), ("kernel_paged", SIZE),
+                ("kernel_nonpaged", SIZE), ("page_size", SIZE), ("handles", w.DWORD),
+                ("processes", w.DWORD), ("threads", w.DWORD)]
+
+
+def system_commit():
+    info = PerformanceInformation()
+    size = c.sizeof(info)
+    info.cb = size
+    query = c.WinDLL("psapi", use_last_error=True).GetPerformanceInfo
+    query.argtypes = (c.POINTER(PerformanceInformation), w.DWORD)
+    query.restype = w.BOOL
+    if not query(c.byref(info), size):
+        return None
+    return {key: getattr(info, key) * info.page_size
+            for key in ("commit_total", "commit_limit", "commit_peak", "physical_available")}
+
+
+def job_commit(api, job):
+    info = ExtendedLimits()
+    if not api.QueryInformationJobObject(job, 9, c.byref(info), c.sizeof(info), None):
+        return None
+    return {"job_limit": info.job_memory if info.basic.flags & JOB_OBJECT_LIMIT_JOB_MEMORY else None,
+            "process_limit": info.process_memory if info.basic.flags & JOB_OBJECT_LIMIT_PROCESS_MEMORY else None,
+            "peak_job": info.peak_job, "peak_process": info.peak_process}
 
 
 class StartupInfo(c.Structure):

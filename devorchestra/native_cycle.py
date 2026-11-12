@@ -489,7 +489,8 @@ class _FixtureSession:
     def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None, shell_tools=True,
                  decision_parser=None, raw_decision=False,
                  context="This is an isolated arithmetic fixture.", extra_read_roots=(), scratch_root=None,
-                 images=(), image_evidence=(), response_schema=None, play_step=None, operation_check=None):
+                 images=(), image_evidence=(), response_schema=None, play_step=None, operation_check=None,
+                 tool_environment_root=None):
         self.check()
         self.check_image()
         research = self.scope.get("research") == "CODEX_LIVE" and phase in {"manager-planning", "developer"}
@@ -578,12 +579,17 @@ class _FixtureSession:
             argv[-1] = "-"
             stdin["stdin_bytes"] = prompt.encode("utf-8")
         stop_cause = None
+        memory_evidence = {}
+        environment = self.env
+        if tool_environment_root is not None:
+            environment = {**environment, **dict.fromkeys(
+                ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "HOME", "TEMP", "TMP"), str(tool_environment_root))}
         try:
             result = _observe(self.binary, argv,
-                              self.work, role_log, self.env, seconds=timeout, check=observed_check,
+                              self.work, role_log, environment, seconds=timeout, check=observed_check,
                               output_limit=output_limit, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
                               memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2,
-                              **stdin)
+                              **stdin, **({"memory_evidence": memory_evidence} if writable else {}))
         except OwnedMxcStopped as stopped:
             stop_cause = str(stopped)
             self.owned_verified = True
@@ -638,6 +644,8 @@ class _FixtureSession:
                    "command_events": response.get("command_events", []), **details}
         if evidence_error:
             receipt["cli_evidence_error"] = evidence_error
+        if memory_evidence:
+            receipt["memory"] = memory_evidence
         if response.get("web_search_events"):
             receipt["web_search_events"] = response["web_search_events"]
         if response.get("empty_discovery_count"):
