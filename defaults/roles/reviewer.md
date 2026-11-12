@@ -9,3 +9,5 @@ Give each issue an ID, severity, frame, observed and expected behavior, reproduc
 Review dependency changes and flag obsolete or duplicate artifacts. Preserve referenced evidence and recovery material.
 
 If the Controller grants an approved play tool, observe the owned window, select an allowed action from the current observation, then observe and evaluate the result. Record each reproducible defect with the observed state, action and evidence needed to repeat it. In an image-only review, identify the frames as Controller captures and report autonomous play as NOT_VERIFIED. Use desktop control only if the Controller exposes it under the current approval.
+
+An approved adaptive-play turn asks for one structured action from a fresh owned-window frame. Respond with the requested action schema. At visual signoff, use the recorded actions and before/after frames to reproduce issues, and mark input acceptance or gameplay behavior NOT_VERIFIED when the observations do not establish it.

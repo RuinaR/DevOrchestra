@@ -472,12 +472,18 @@ class _FixtureSession:
     def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None, shell_tools=True,
                  decision_parser=None, raw_decision=False,
                  context="This is an isolated arithmetic fixture.", extra_read_roots=(), scratch_root=None,
-                 images=(), image_evidence=(), response_schema=None):
+                 images=(), image_evidence=(), response_schema=None, play_step=None, operation_check=None):
         self.check()
         self.check_image()
         if images and (phase != "reviewer" or shell_tools or not self.scope.get("visual_review")
                        or len(images) != len(image_evidence)):
             raise Blocked("Image attachments require the approved read-only Reviewer")
+        if play_step is not None and (not images or not self.scope.get("adaptive_play")
+                                      or type(play_step) is not int
+                                      or not 1 <= play_step <= self.scope["adaptive_play"]["steps"]
+                                      or response_schema is None or operation_check is None):
+            raise Blocked("Play action selection requires an approved owned-window observation")
+        label = f"{cycle}-{phase}" + (f"-play-{play_step}" if play_step is not None else "")
         limit = self.scope["role_tokens"][phase]
         graceful = "graceful_stop" in self.scope
         if self.calls >= self.scope["model_calls_max"]:
@@ -491,13 +497,13 @@ class _FixtureSession:
         if instructions["sha256"] != self.scope["instructions"][phase]:
             raise Blocked("Approved role instructions changed")
         output_schema = None
-        if images:
+        if images and play_step is None:
             from .visual_review import write_schema
 
             output_schema = write_schema(self.logs(f"{cycle}-visual-schema") / "review.json",
                                          [frame["id"] for frame in image_evidence])
         elif response_schema is not None:
-            output_schema = self.logs(f"{cycle}-{phase}-schema") / "response.json"
+            output_schema = self.logs(f"{label}-schema") / "response.json"
             check_path(output_schema)
             with output_schema.open("x", encoding="utf-8") as stream:
                 json.dump(response_schema, stream)
@@ -506,8 +512,9 @@ class _FixtureSession:
         self.calls += 1
         self.record("native_inspection_role_intent", cycle=cycle, phase=phase, target=target,
                     role_call=self.calls, source_sha256=self.source(), prompt_sha256=digest(prompt),
+                    **({"play_step": play_step} if play_step is not None else {}),
                     **({"image_evidence": list(image_evidence)} if images else {}))
-        role_log = self.logs(f"{cycle}-{phase}")
+        role_log = self.logs(label)
         self.check()
         self.owned_verified = False
         self.usage_complete = False
@@ -527,6 +534,12 @@ class _FixtureSession:
         report = (lambda label: activity(cycle, phase, label)) if activity else None
         observed_check = (self.progress_check(phase, role_started, role_log, output_limit, report=report)
                           if graceful or report else self.check)
+        if operation_check is not None:
+            normal_check = observed_check
+
+            def observed_check():
+                operation_check()
+                normal_check()
         argv = _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
                           tool_root=tool_root, shell_tools=shell_tools, extra_read_roots=extra_read_roots,
                           scratch_root=scratch_root, images=images, output_schema=output_schema)
@@ -593,6 +606,8 @@ class _FixtureSession:
             receipt["role_token_overage"] = tokens - limit
         if stop_cause:
             receipt["process_stop_reason"] = stop_cause
+        if play_step is not None:
+            receipt["play_step"] = play_step
         if phase == "manager-final" and isinstance(message, str):
             decision = message.strip()
             if decision_parser:

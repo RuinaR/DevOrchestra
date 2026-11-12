@@ -133,3 +133,31 @@ class VisualReviewTests(unittest.TestCase):
                          (review_record["observation_source"], review_record["autonomous_play"]))
         self.assertEqual(comparison["criteria"], {"C1": "USER_TEST_REQUIRED"})
         session.verify_registered.assert_called_once_with(1)
+
+    def test_saved_play_evidence_is_reused_and_actions_reach_rework(self):
+        criteria = {"C1": {"text": "Show complete labels", "checks": []}}
+        evidence = [{"id": "F1", "step": "play-observation", "scenario": "C1", "source_sha256": "source"}]
+        receipt = {"verdict": "NOT_VALIDATED", "phase": "verifier", "outcome": "COMPLETED",
+                   "observations": [], "user_test_required": ["C1"], "source_sha256": "source"}
+        actions = [{"step": 1, "action": {"action": "click", "x": 10, "y": 12}, "result": "SCREEN_CHANGED"}]
+        ledger = SimpleNamespace(state_boundary=Path.cwd())
+        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True, "adaptive_play": True,
+                                         "project_id": "fixture", "requirements": []},
+                                  check=Mock(), check_image=Mock(), record=Mock(), phases=[],
+                                  verify_registered=Mock(), call=Mock(return_value=self.report()),
+                                  fields={"run_id": "a" * 32}, source=lambda: "source",
+                                  runner=SimpleNamespace(ledger=ledger), logs=lambda _: Path.cwd(),
+                                  signoff_state={"pending_visual": {"receipt": receipt, "frames": evidence,
+                                     "play_report": {"actions": actions, "outcome": "STEP_LIMIT", "has_frames": True}}})
+        with (patch.object(registered_cycle, "Catalog"),
+              patch.object(visual_review, "stage", return_value=(Path.cwd() / "F1.png",)),
+              patch.object(visual_review, "read_frames"),
+              patch.object(registered_cycle.adaptive_play, "run") as replay):
+            decision, review, _, _, comparison = registered_cycle._review_and_verify(
+                session, 1, "C1", "bounded diff", {"C1": "NOT_STARTED"})
+        replay.assert_not_called()
+        session.verify_registered.assert_not_called()
+        self.assertEqual("REWORK", review)
+        self.assertIn('"reproduce_actions"', decision)
+        self.assertEqual(1, comparison["adaptive_play_actions"])
+        self.assertEqual("USER_TEST_REQUIRED", comparison["criteria"]["C1"])

@@ -157,7 +157,8 @@ def _capture(window, path, workers):
     return verified_image(path)[1]
 
 
-def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None):
+def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None,
+                         play=None):
     process = _require(signature(api, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)(0x101000, False, pid))
     member = signature(api, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
     try:
@@ -168,6 +169,8 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
 
         window = _Window({"root": hwnd}, {"root"}, pid, check, alive)
         try:
+            if play is not None:
+                return play(window, lambda path: _capture(window, path, workers))
             if input_probe:
                 initial = window.dimensions()
                 requested = (initial[0] + 32, initial[1] + 24)
@@ -199,7 +202,8 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
         _require(api.CloseHandle(process))
 
 
-def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None, input_probe=True):
+def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None, input_probe=True,
+                         play=None):
     user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
     callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
     enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
@@ -231,7 +235,7 @@ def inspect_owned_window(api, job, deadline, check, image_path, workers, *, befo
             pid, hwnd = windows[0]
             sleep(0.4)
             return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=input_probe,
-                                   before_input=before_input)
+                                   before_input=before_input, play=play)
         sleep(0.05)
 
 

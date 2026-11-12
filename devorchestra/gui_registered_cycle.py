@@ -61,7 +61,26 @@ def _open_visual_report(center, runner, project):
     panel.geometry("740x600")
     display = center.editor_box(panel, height=20)
     try:
-        report = next((row for row in reversed(registered_cycle.history(runner.ledger, project, current_replica=True))
+        rows = registered_cycle.history(runner.ledger, project, current_replica=True)
+        last_play = next((row for row in reversed(rows) if row["kind"] == "native_inspection_play_started"), None)
+        if last_play:
+            play = [row for row in rows if row.get("cycle") == last_play["cycle"]]
+            display.insert("end", f"AI 플레이 · {last_play['cycle']}사이클 · 기준 {last_play['target']}\n")
+            for row in play:
+                if row["kind"] == "native_inspection_play_action_result":
+                    display.insert("end", f"{row['step']} · {row['action']} · {row['result']}\n")
+                elif row["kind"] == "native_inspection_play_finished":
+                    display.insert("end", f"플레이 종료 · {row['outcome']} · {row['elapsed_seconds']}초\n")
+            frames = [row["frame"] for row in play if row["kind"] == "native_inspection_play_observation"]
+            if frames:
+                frame = frames[-1]
+                data, = visual.read_frames(runner.ledger, [frame])
+                picture = tk.PhotoImage(master=panel, data=b64encode(data))
+                factor = max(1, (picture.width() + 639) // 640)
+                panel.play_image = picture.subsample(factor) if factor > 1 else picture
+                display.image_create("end", image=panel.play_image)
+                display.insert("end", "\n")
+        report = next((row for row in reversed(rows)
                        if row["kind"] == "native_inspection_visual_review"), None)
         if report is None:
             display.insert("end", "시각 검토 응답이 아직 없습니다.")
@@ -95,6 +114,14 @@ def _open_visual_report(center, runner, project):
     except (OSError, RuntimeError, ValueError, sqlite3.Error, tk.TclError) as error:
         display.insert("end", f"캡처 기록을 열 수 없습니다. {error}")
     display.configure(state="disabled")
+
+
+def _play_approval(scope):
+    if play := scope.get("adaptive_play"):
+        return (f"\nAI 플레이 · 사이클당 추가 모델 최대 {play['steps']}회, 소유 창 실행 최대 {play['seconds']}초. "
+                "창 내부 클릭·이동과 600ms 이내 최대 3키 동시 입력을 허용합니다. "
+                f"허용 키: {', '.join(play['keys'])}. 각 화면을 Codex에 전송합니다.")
+    return ""
 
 
 def _session_layout(panel, state):
@@ -190,13 +217,20 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     draft = center.development_budget_drafts.setdefault(project, {})
     grants = _permission_checkboxes(body, draft)
     use_images = tk.BooleanVar(panel, value=False)
+    use_play = tk.BooleanVar(panel, value=False)
+
+    def play_option():
+        ttk.Checkbutton(body, text="AI 플레이 · 모델이 소유 게임 창의 다음 행동을 선택",
+                        variable=use_play,
+                        command=lambda: use_images.set(True) if use_play.get() else None).pack(anchor="w")
     ttk.Button(body, text="시각 검토 결과와 캡처 보기",
                command=lambda: _open_visual_report(center, runner, project)).pack(anchor="w")
     if is_godot and project == game_pilot.PROJECT and not resume_only:
         ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
                         variable=use_images).pack(anchor="w", pady=(0, 6))
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
-        _game_preflight(center, panel, body, footer, runner, state, grants, use_images, restart_button)
+        play_option()
+        _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button)
         return
     ttk.Button(body, text="등록 목표·기준 편집",
                command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
@@ -267,6 +301,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
               wraplength=580).pack(anchor="w")
     ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
                     variable=use_images).pack(anchor="w", pady=(0, 6))
+    play_option()
     visual_hint = ttk.Label(body, wraplength=580)
     visual_hint.pack(fill="x")
     verifier_actions = ttk.Frame(body)
@@ -392,7 +427,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             save_budget()
             panel.destroy()
 
-    def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False):
+    def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False):
         nonlocal future, active
         future = Future()
         active = True
@@ -401,7 +436,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         restart_button.configure(state="disabled")
         state.set("승인 범위 확인 중")
         options = ({"graceful": graceful} if resume else
-                   {"soft_limits": soft_limits, "visual_review": visual_review})
+                   {"soft_limits": soft_limits, "visual_review": visual_review, "play": play})
         review_fn = registered_cycle.review_resume if resume else registered_cycle.review
         run_fn = registered_cycle.run_resume if resume else registered_cycle.run
 
@@ -457,6 +492,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 instruction_note = ("\n새 승인부터 최신 역할 지침을 적용합니다 · "
                                     + ", ".join(ROLE_LABELS[role] for role in updated_roles)
                                     if updated_roles else "")
+                instruction_note += _play_approval(result)
                 if checkpoint.get("mode") == "postprocess":
                     role = ROLE_LABELS[checkpoint["saved_response"]["phase"]]
                     action = (f"저장된 {role} 응답의 판정을 확정할 수 없어 같은 후보로 {role}만 다시 호출합니다. "
@@ -541,7 +577,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                 "시작 화면을 캡처합니다. 화면이 준비되기 전에는 코드 검토를 계속합니다.")
             if candidate := result.get("prior_replica_candidate"):
                 summary += "\n검증된 기존 복제본 변경 유지 · " + ", ".join(candidate["changed"])
-            if center.confirm("등록 프로젝트 Codex 세션 승인", summary, parent=panel):
+            if center.confirm("등록 프로젝트 Codex 세션 승인", summary + _play_approval(result), parent=panel):
                 launch(result)
             else:
                 state.set("실행 승인 취소됨")
@@ -592,7 +628,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             state.set(str(error))
             return
         cancelled.clear()
-        submit(args, soft_limits=limits, visual_review=use_images.get())
+        submit(args, soft_limits=limits, visual_review=use_images.get(), play=use_play.get())
 
     def resume():
         try:
@@ -706,7 +742,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         panel.after_idle(resume)
 
 
-def _game_preflight(center, panel, body, footer, runner, state, grants, use_images, restart_button):
+def _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button):
     cancelled = Event()
     future = None
 
@@ -720,6 +756,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
     def start(export_windows=False, *, online=False, resume=False):
         nonlocal future
         visual_review = online and not resume and use_images.get()
+        play = online and not resume and use_play.get()
         limits = None
         if online and not resume:
             if _checked_permissions(grants, state) is None:
@@ -774,7 +811,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                         result = registered_cycle.review_resume(runner, *resume_args, graceful=graceful)
                     else:
                         result = registered_cycle.review_game(runner, archive, expires, limits,
-                                                             visual_review=visual_review)
+                                                             visual_review=visual_review, play=play)
                     future.set_result(result)
                 except Exception as error:
                     future.set_exception(error)
@@ -839,7 +876,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                                 ROLE_LABELS[role] for role in updated_roles)
                         if result.get("visual_review") and (not resume or not result["resume"].get("review")):
                             summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
-                        if center.confirm(title, summary, parent=panel):
+                        if center.confirm(title, summary + _play_approval(result), parent=panel):
                             def run(activity, pause):
                                 if resume:
                                     return registered_cycle.run_resume(
@@ -847,7 +884,8 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                                         cancelled=cancelled.is_set, graceful=graceful, activity=activity, pause=pause)
                                 return registered_cycle.run_game(
                                     runner, archive, expires, limits, approval=digest(result),
-                                    cancelled=cancelled.is_set, visual_review=visual_review, activity=activity, pause=pause)
+                                    cancelled=cancelled.is_set, visual_review=visual_review, activity=activity,
+                                    pause=pause, play=play)
 
                             if center.start_registered_run(result, run, cancelled):
                                 panel.destroy()

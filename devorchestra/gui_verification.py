@@ -104,6 +104,10 @@ class _Window:
                               w.WPARAM, w.LPARAM, w.UINT, w.UINT, c.POINTER(c.c_size_t))
         self.post = signature(user, "PostMessageW", w.BOOL, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
         self.size = signature(user, "GetWindowRect", w.BOOL, w.HWND, c.POINTER(w.RECT))
+        self.client_rect = signature(user, "GetClientRect", w.BOOL, w.HWND, c.POINTER(w.RECT))
+        self.client_to_screen = signature(user, "ClientToScreen", w.BOOL, w.HWND, c.POINTER(w.POINT))
+        self.scan_code = signature(user, "MapVirtualKeyW", w.UINT, w.UINT, w.UINT)
+        self.foreground = signature(user, "GetForegroundWindow", w.HWND)
         self.place = signature(user, "SetWindowPos", w.BOOL, w.HWND, w.HWND, c.c_int, c.c_int,
                                c.c_int, c.c_int, w.UINT)
         self.menu = signature(user, "GetMenu", w.HMENU, w.HWND)
@@ -130,16 +134,34 @@ class _Window:
             raise Blocked("GUI window ownership changed")
         return target
 
-    def message(self, name, message, first=0, second=0):
-        self.check()
+    def message(self, name, message, first=0, second=0, *, release=False):
+        if not release or message != 0x0101:
+            self.check()
         result = c.c_size_t()
         _require(self.send(self.owned(name), message, first, second, 0x23, 1000, c.byref(result)))
         return result.value
 
+    def key(self, code, down):
+        scan = self.scan_code(code, 0)
+        extended = 0x01000000 if code in {0x25, 0x26, 0x27, 0x28} else 0
+        flags = 1 | (scan << 16) | extended | (0 if down else 0xC0000000)
+        self.message("root", 0x0100 if down else 0x0101, code, flags, release=not down)
+
+    def client_in_image(self):
+        root = self.owned("root")
+        client, window, origin = w.RECT(), w.RECT(), w.POINT()
+        _require(self.client_rect(root, c.byref(client)))
+        _require(self.size(root, c.byref(window)))
+        _require(self.client_to_screen(root, c.byref(origin)))
+        return (origin.x - window.left, origin.y - window.top, client.right, client.bottom)
+
+    def is_foreground(self):
+        return self.owned("root") == self.foreground()
+
     def click(self, name):
         self.message(name, 0x00F5)  # BM_CLICK, no desktop input
 
-    def click_client(self, x, y):
+    def click_client(self, x, y, *, move_only=False):
         self.check()
         root = self.owned("root")
         target = root
@@ -155,12 +177,20 @@ class _Window:
         else:
             raise Blocked("Owned GUI control nesting exceeds the verification limit")
         packed = (point.x & 0xFFFF) | ((point.y & 0xFFFF) << 16)
-        for message, buttons in ((0x0201, 1), (0x0202, 0)):
-            self.check()
+        def send_mouse(message, buttons):
             if self._owner_thread(target) != self.thread or self.ancestor(target, 2) != root:
                 raise Blocked("GUI click target changed")
             result = c.c_size_t()
             _require(self.send(target, message, buttons, packed, 0x23, 1000, c.byref(result)))
+
+        self.check()
+        if move_only:
+            send_mouse(0x0200, 0)
+        else:
+            try:
+                send_mouse(0x0201, 1)
+            finally:
+                send_mouse(0x0202, 0)
 
     def click_menu(self, captions):
         self.check()
