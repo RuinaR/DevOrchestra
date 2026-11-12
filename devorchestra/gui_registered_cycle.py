@@ -397,8 +397,9 @@ def show(center, project):
                 future.set_exception(error)
 
         def launch(scope):
-            def run():
-                return run_fn(runner, *args, approval=digest(scope), cancelled=cancelled.is_set, **options)
+            def run(activity):
+                return run_fn(runner, *args, approval=digest(scope), cancelled=cancelled.is_set,
+                              activity=activity, **options)
 
             if center.start_registered_run(scope, run, cancelled):
                 save_budget()
@@ -713,14 +714,14 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                         if result.get("visual_review") and (not resume or not result["resume"].get("review")):
                             summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                         if center.confirm(title, summary, parent=panel):
-                            def run():
+                            def run(activity):
                                 if resume:
                                     return registered_cycle.run_resume(
                                         runner, *resume_args, approval=digest(result),
-                                        cancelled=cancelled.is_set, graceful=graceful)
+                                        cancelled=cancelled.is_set, graceful=graceful, activity=activity)
                                 return registered_cycle.run_game(
                                     runner, archive, expires, limits, approval=digest(result),
-                                    cancelled=cancelled.is_set, visual_review=visual_review)
+                                    cancelled=cancelled.is_set, visual_review=visual_review, activity=activity)
 
                             if center.start_registered_run(result, run, cancelled):
                                 panel.destroy()

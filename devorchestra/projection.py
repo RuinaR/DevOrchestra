@@ -61,6 +61,10 @@ def registered_progress(events, project):
             end = row
     return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
             "end": end, "cycle": cycle, "roles": roles, "stop": stop,
+            "history": [row for row in rows if row["kind"] in {
+                "native_inspection_role_intent", "native_inspection_role_result", "native_inspection_developer_diff",
+                "native_inspection_review_decision", "native_inspection_visual_review",
+                "native_inspection_manager_plan_reused", "native_inspection_developer_skipped"}],
             "changed": end.get("changed", []) if end else sorted(changed),
             "criteria": end.get("criteria_status", {}) if end else criteria,
             "tokens": end.get("known_reported_tokens", tokens) if end else tokens,

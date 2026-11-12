@@ -1354,24 +1354,25 @@ def _resume_remaining(session, diff):
     return "GRACEFUL_STOP" if final == "CONTINUE" and getattr(session, "stop_reason", None) else final
 
 
-def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False):
-    return _run(runner, args, approval, cancelled, resume=True, graceful=graceful)
+def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False, activity=None):
+    return _run(runner, args, approval, cancelled, resume=True, graceful=graceful, activity=activity)
 
 
-def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False):
+def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None):
     return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits,
-                visual_review=visual_review)
+                visual_review=visual_review, activity=activity)
 
 
-def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False):
+def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False,
+             activity=None):
     limits = game_pilot.recommended_limits() if limits is None else limits
     game_pilot.validate_limits(limits)
     return _run(runner, _game_args(archive, expires, limits), approval, cancelled, resume=False, game=True,
-                game_limits=limits, visual_review=visual_review)
+                game_limits=limits, visual_review=visual_review, activity=activity)
 
 
 def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False,
-         visual_review=False):
+         visual_review=False, activity=None):
     from .runtime import require_admission
 
     with execution_slot() as abandoned:
@@ -1405,6 +1406,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                   "project_id": scope["project_id"], "probe_kind": KIND, "approval_sha256": approval}
         with _staging(ledger) as (lab, cleanup):
             session = RegisteredSession(runner, scope, lab, len(events), head, fields, cancelled)
+            session.activity = activity
             session.count, session.fence = ledger.append(
                 len(events), head, {**fields, "kind": "native_inspection_intent", "scope": scope,
                                     "workspace": lab.name}, admission=require_admission)

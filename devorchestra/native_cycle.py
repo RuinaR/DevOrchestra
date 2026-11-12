@@ -26,6 +26,35 @@ from .replica_evidence import changes, snapshot
 from .shutdown import HELD, shutdown_state
 
 
+def _live_activity(kind, item):
+    """Project public event types into fixed UI text without retaining model content."""
+    if kind == "turn.started":
+        return "모델 응답 처리 중"
+    if kind in {"turn.completed", "turn.failed"}:
+        return "모델 응답 종료 · 결과 확인 중"
+    if kind not in {"item.started", "item.completed"} or not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type == "command_execution":
+        command = item.get("command")
+        tool = re.match(r"(?i)^\s*[\x22']?(pytest|python|dotnet|git|rg|npm|cargo|go|godot|cmake|msbuild)"
+                        r"(?:\.exe)?(?=\s|[\x22']|$)", command) if isinstance(command, str) else None
+        suffix = f" · {tool[1].lower()}" if tool else ""
+        if kind == "item.started":
+            return "도구 명령 실행 중" + suffix
+        code = item.get("exit_code")
+        status = ("도구 명령 완료" if code == 0 else "도구 명령 종료 · 오류"
+                  if type(code) is int else "도구 명령 종료")
+        return status + suffix
+    if item_type == "file_change":
+        return "파일 변경 적용 중" if kind == "item.started" else "파일 변경 적용 결과 수신"
+    if item_type == "todo_list":
+        return "작업 목록 갱신"
+    if item_type == "agent_message":
+        return "응답 작성 중" if kind == "item.started" else "응답 수신"
+    return None
+
+
 ROLES = ("manager-planning", "developer", "reviewer", "verifier", "manager-final")
 ROLE_TOKENS = {"manager-planning": 30000, "developer": 60000, "reviewer": 55000,
                "manager-final": 30000}
@@ -266,9 +295,9 @@ class _FixtureSession:
             raise Blocked("SIGNOFF_PENDING")
         return True
 
-    def progress_check(self, phase, started, role_log, output_limit):
-        policy = self.scope["graceful_stop"]
-        role_soft = self.scope["role_deadlines"][phase]
+    def progress_check(self, phase, started, role_log, output_limit, *, report=None):
+        policy = self.scope.get("graceful_stop")
+        role_soft = self.scope["role_deadlines"][phase] if policy else None
         last_size, last_progress = 0, started
         complete_lines = 0
         active = set()
@@ -278,9 +307,10 @@ class _FixtureSession:
             nonlocal last_size, last_progress, complete_lines
             self.check()
             now = monotonic()
-            self.soft_boundary(phase)
-            if now - started >= role_soft:
-                self.request_stop("ROLE_TIME", phase)
+            if policy:
+                self.soft_boundary(phase)
+                if now - started >= role_soft:
+                    self.request_stop("ROLE_TIME", phase)
             size = path.stat().st_size if path.is_file() else 0
             if size > output_limit:
                 raise Blocked("MODEL_EVENT_LIMIT")
@@ -304,8 +334,12 @@ class _FixtureSession:
                             active.add(item.get("id"))
                         elif kind == "item.completed":
                             active.discard(item.get("id"))
+                    if report:
+                        activity = _live_activity(kind, item)
+                        if activity:
+                            report(activity)
                 complete_lines = len(lines) - 1
-            if now - last_progress >= policy["tool_idle_seconds" if active else "idle_seconds"]:
+            if policy and now - last_progress >= policy["tool_idle_seconds" if active else "idle_seconds"]:
                 raise Blocked("MODEL_IDLE_TIMEOUT")
         return check
 
@@ -481,9 +515,12 @@ class _FixtureSession:
             if finishing:
                 timeout = min(timeout, policy["signoff_seconds"] - (role_started - self.signoff_started)
                               + policy["role_grace_seconds"])
-            observed_check = self.progress_check(phase, role_started, role_log, output_limit)
         else:
-            timeout, observed_check = self.seconds(phase), self.check
+            timeout = self.seconds(phase)
+        activity = getattr(self, "activity", None)
+        report = (lambda label: activity(cycle, phase, label)) if activity else None
+        observed_check = (self.progress_check(phase, role_started, role_log, output_limit, report=report)
+                          if graceful or report else self.check)
         stop_cause = None
         try:
             result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,

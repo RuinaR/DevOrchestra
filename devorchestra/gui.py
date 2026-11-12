@@ -1,6 +1,7 @@
 """DevOrchestra Command Center. Read-only desktop viewer for Windows."""
 from datetime import datetime, timezone
 from base64 import b64encode
+from collections import deque
 from concurrent.futures import Future
 import json
 from pathlib import Path
@@ -40,6 +41,11 @@ REGISTERED_STATES = {
     "NOT_STARTED": "대기", "REGRESSED": "회귀", "CONTINUE": "다음 작업 진행", "REWORK": "재작업 필요",
 }
 POLL_MS = 1500
+ACTIVE_AGENT_BORDER = "#65e391"
+REGISTERED_ACTIONS = dict(zip(REGISTERED_PHASES, (
+    "목표와 완료 기준을 검토해 작업 계획 수립 중", "선택한 작업 구현 중", "변경 내용과 검증 근거 검토 중",
+    "독립 검사 실행 중", "검토와 검증 결과를 바탕으로 최종 판정 중",
+)))
 REQUIREMENT_NAMES = dict(zip(REQUIREMENT_ROLES, ("개발 목표", "기능 추가", "설계 변경", "버그 수정", "개선 요청")))
 REQUIREMENT_HELP = {
     "GOAL": "차수의 방향을 기록합니다. 예: 이번 차수에는 신규 사용자 등록을 완성합니다.",
@@ -164,6 +170,7 @@ class CommandCenter:
         self.shutdown_future = None
         self.gui_verification_cancel = None
         self.registered_job = None
+        self.registered_history = None
         self.shutdown_notice = None
         self.question_window = None
         self.page = None
@@ -294,12 +301,18 @@ class CommandCenter:
 
         operators = section(operations, "역할별 실행 근거")
         operators.pack(fill="x", pady=(8, 0))
+        self.registered_history_button = ttk.Button(operators, text="전체 진행 작업 보기", state="disabled",
+                                                    command=self.show_registered_history)
+        self.registered_history_button.pack(anchor="e")
         roster = tk.Frame(operators, bg=PANEL)
         roster.pack(fill="x", pady=(5, 0))
         self.cards = {}
+        self.card_frames = {}
         role_frames = []
         for role, mark in ROLE_MARKS.items():
-            card = tk.Frame(roster, bg=TILE, padx=8, pady=4)
+            card = tk.Frame(roster, bg=TILE, padx=8, pady=4, highlightthickness=2,
+                            highlightbackground=TILE, highlightcolor=TILE)
+            self.card_frames[role] = card
             role_frames.append(card)
             button = ttk.Button(card, text=f"{mark}   {role}", command=lambda r=role: self.show_role(r))
             button.pack(fill="x")
@@ -766,6 +779,8 @@ class CommandCenter:
         for status, detail in self.cards.values():
             status.configure(text="UNKNOWN", fg=MUTED)
             detail.configure(text="")
+        self.update_active_card()
+        self.registered_history_button.configure(state="disabled")
         for widget in (self.registered_status, self.registered_detail, self.registered_cancel):
             widget.pack_forget()
         self.run_filter.configure(values=())
@@ -940,16 +955,23 @@ class CommandCenter:
         if self.registered_job and not self.registered_job["future"].done():
             return False
         future = Future()
+        activities = deque(maxlen=400)
+        activity_lock = Lock()
         self.registered_job = {"scope": scope, "approval": digest(scope), "future": future,
                                "sequence": self.view["snapshot_version"][0] if self.view else 0,
-                               "started": monotonic(), "cancelled": cancelled, "settled": False}
+                               "started": monotonic(), "cancelled": cancelled, "settled": False,
+                               "activities": activities, "activity_lock": activity_lock}
         self.navigate("operations")
         if self.view:
             self.render_registered(self.view)
 
+        def report(cycle, phase, message):
+            with activity_lock:
+                activities.append((cycle, phase, message))
+
         def work():
             try:
-                future.set_result(run())
+                future.set_result(run(report))
             except Exception as error:
                 future.set_exception(error)
 
@@ -981,6 +1003,9 @@ class CommandCenter:
             self.development_button.configure(state="disabled")
             self.development_options.configure(state="disabled")
         if not (progress or local):
+            self.update_active_card()
+            self.registered_history_button.configure(state="disabled")
+            self.render_registered_history(view, None, ())
             for widget in (self.registered_status, self.registered_detail, self.registered_cancel):
                 widget.pack_forget()
             return
@@ -988,6 +1013,12 @@ class CommandCenter:
         end = ((local or {}).get("result") or (progress or {}).get("end"))
         roles = progress["roles"] if progress else {}
         recent = max(roles.values(), key=lambda row: row.get("sequence", 0), default={})
+        activities = ()
+        if local:
+            with local["activity_lock"]:
+                activities = tuple(local["activities"])
+        active_phase = (recent.get("phase") if recent.get("kind") == "native_inspection_role_intent"
+                        and local and running and not end else None)
         reason = (local or {}).get("error") or (end or {}).get("reason")
         state = ("STOPPING" if local and running and local["cancelled"].is_set()
                  else "BLOCKED" if (local or {}).get("error")
@@ -1001,6 +1032,8 @@ class CommandCenter:
             heading += f" · {cycle}사이클"
         if role and not end:
             heading += f" · {role}"
+        self.registered_history_button.configure(state="normal")
+        self.render_registered_history(view, progress, activities)
         self.mission.configure(text=f"{view['project_name']}  /  {heading.removeprefix('자동 개발 · ')}", fg=color(state))
         self.registered_status.configure(text=heading, fg=color(state))
         lane = self.phases[0][1].master
@@ -1052,6 +1085,14 @@ class CommandCenter:
             outcome = self.registered_role_state(row, end, bool(local and running))
             status.configure(text=REGISTERED_STATES.get(outcome, outcome), fg=MUTED if not row else color(outcome))
             parts = [REGISTERED_LABELS[phase]]
+            if phase == active_phase:
+                parts.append(REGISTERED_ACTIONS[phase])
+                if target in scope["criteria"]:
+                    parts.append("현재 작업 · " + scope["criteria"][target]["text"][:150])
+                message = next((msg for number, role_phase, msg in reversed(activities)
+                                if number == cycle and role_phase == phase), None)
+                if message:
+                    parts.append(message)
             if row and phase != "verifier" and scope.get("model"):
                 parts.append(scope["model"])
             if isinstance(usage := row.get("provider_usage"), dict):
@@ -1063,6 +1104,78 @@ class CommandCenter:
             if row.get("owned_tree") == "DRAINED":
                 parts.append("소유 프로세스 회수")
             evidence.configure(text="\n".join(parts), wraplength=185)
+        self.update_active_card(active_phase)
+
+    def update_active_card(self, phase=None):
+        role = ("Manager" if phase and phase.startswith("manager-") else (phase or "").capitalize())
+        for name, frame in self.card_frames.items():
+            border = ACTIVE_AGENT_BORDER if name == role else TILE
+            if frame.cget("highlightbackground") != border:
+                frame.configure(highlightbackground=border, highlightcolor=border)
+
+    def show_registered_history(self):
+        if self.registered_history and self.registered_history[0].winfo_exists():
+            self.registered_history[0].lift()
+            return
+        panel = self.panel()
+        panel.title("자동 개발 · 전체 진행 작업")
+        panel.geometry("720x500")
+        title = label(panel, bold=True, bg=BG)
+        title.pack(fill="x", pady=(0, 8))
+        detail = self.editor_box(panel, height=24, state="disabled")
+        self.registered_history = (panel, title, detail)
+        if self.view:
+            self.render_registered(self.view)
+
+    def render_registered_history(self, view, progress, activities):
+        if not self.registered_history or not self.registered_history[0].winfo_exists():
+            return
+        _, title, detail = self.registered_history
+        history = (progress or {}).get("history", ())
+        recorded = sum(row["kind"] == "native_inspection_role_result" for row in history)
+        title.configure(text=f"{view['project_name']} · 최근 자동 개발 세션 · 역할 결과 {recorded}건")
+        tools = {}
+        for cycle, phase, message in activities:
+            tools.setdefault((cycle, phase), []).append(message)
+        lines, pending = [], set()
+        for row in history:
+            cycle, phase, kind = row["cycle"], row.get("phase"), row["kind"]
+            key = (cycle, phase)
+            role = REGISTERED_LABELS.get(phase, "")
+            if kind == "native_inspection_role_intent":
+                target = (progress or {})["scope"]["criteria"].get(row.get("target"), {}).get("text", "")
+                lines.append(f"{cycle}사이클 · {role} 시작" + (f" · {target[:180]}" if target else ""))
+                pending.add(key)
+            elif kind == "native_inspection_role_result":
+                lines.extend(f"    {message}" for message in tools.pop(key, ()))
+                pending.discard(key)
+                outcome = self.registered_role_state(row, None, False)
+                count = len(row.get("command_events", ()))
+                lines.append(f"{cycle}사이클 · {role} · {REGISTERED_STATES.get(outcome, outcome)}"
+                             + (f" · 명령 {count}회" if count else ""))
+            elif kind == "native_inspection_developer_diff":
+                lines.append(f"{cycle}사이클 · 변경 파일 · " + ", ".join(row["changed"]))
+            elif kind == "native_inspection_review_decision":
+                lines.append(f"{cycle}사이클 · Reviewer 판정 · {row['verdict']}")
+            elif kind == "native_inspection_visual_review":
+                lines.append(f"{cycle}사이클 · 시각 검토 · {row['verdict']}")
+            else:
+                title_text = "계획 재사용" if kind == "native_inspection_manager_plan_reused" else "Developer 건너뜀"
+                lines.append(f"{cycle}사이클 · {title_text}")
+        for key in sorted(pending):
+            lines.extend(f"    {message}" for message in tools.get(key, ()))
+        if end := (progress or {}).get("end"):
+            outcome = end["outcome"]
+            lines.append(f"세션 종료 · {REGISTERED_STATES.get(outcome, outcome)}")
+        text = "\n".join(lines) or "작업 기록을 기다리는 중입니다."
+        if detail.get("1.0", "end-1c") != text:
+            at_end = detail.yview()[1] >= 0.99
+            detail.configure(state="normal")
+            detail.delete("1.0", "end")
+            detail.insert("1.0", text)
+            detail.configure(state="disabled")
+            if at_end:
+                detail.see("end")
 
     @staticmethod
     def registered_role_state(row, end, running):

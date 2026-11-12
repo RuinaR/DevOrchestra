@@ -130,6 +130,8 @@ class ProjectionTests(unittest.TestCase):
         center.project.current.return_value = 0
         center.view = None
         center.registered_job = None
+        center.registered_history = None
+        center.card_frames = {}
         center.projection_lock = Lock()
         center.refresh_generation = 0
         center.observation = Mock()
@@ -138,7 +140,7 @@ class ProjectionTests(unittest.TestCase):
         for attr in ("global_badge", "mission", "goal", "project_states", "development_button", "development_options", "gates",
                      "safety", "resources", "run_filter", "role_filter", "render_audit",
                      "overview", "verify_overview", "approval_button",
-                     "registered_status", "registered_detail", "registered_cancel"):
+                     "registered_status", "registered_detail", "registered_cancel", "registered_history_button"):
             setattr(center, attr, Mock())
         center.phases = [(name, Mock()) for name in ("PLAN", "DEV", "REV", "VFY", "DEC")]
         center.cards = {"Manager": (Mock(), Mock())}

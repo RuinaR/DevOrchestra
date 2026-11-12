@@ -155,9 +155,18 @@ class RegisteredCycleTests(unittest.TestCase):
                 calls.append((cycle, phase))
                 shell = "true" if phase in {"developer", "reviewer"} else "false"
                 self.assertIn(f"features.shell_tool={shell}", argv)
+                command_events = []
                 if phase == "developer":
                     if cycle == 1 and developer_observed is not None:
-                        self.assertTrue(developer_observed.wait(15), "Main window never showed the running Developer")
+                        command = {"id": "fixture-command", "type": "command_execution",
+                                   "command": "python -m fixture PRIVATE_FIXTURE_ARGUMENT"}
+                        command_events.append({"type": "item.started", "item": command})
+                        partial = [{"type": "thread.started", "thread_id": "offline"},
+                                   {"type": "turn.started"}, *command_events]
+                        (logs / "probe.stdout").write_text("\n".join(map(json.dumps, partial)) + "\n", encoding="utf-8")
+                        options["check"]()
+                        self.assertTrue(developer_observed.wait(15), "Main window never showed the running command")
+                        command_events.append({"type": "item.completed", "item": {**command, "exit_code": 0}})
                     if not resume:
                         filename, value = ("greeting.txt", "hello") if cycle == 1 else ("closing.txt", "goodbye")
                         (work / filename).write_text(value + "\n", encoding="ascii")
@@ -171,6 +180,7 @@ class RegisteredCycleTests(unittest.TestCase):
                            "developer": "Edited", "reviewer": "ACCEPT — the diff meets the criterion.",
                            "manager-final": "CONTINUE — one check remains." if cycle == 1 else "COMPLETED"}[phase]
                 events = [{"type": "thread.started", "thread_id": "offline"}, {"type": "turn.started"},
+                          *command_events,
                           {"type": "item.completed", "item": {"type": "agent_message", "text": message}},
                           {"type": "turn.completed", "usage": {
                               "input_tokens": 60000 if resume and (cycle, phase) == (2, "developer") else 100,
@@ -229,7 +239,7 @@ class RegisteredCycleTests(unittest.TestCase):
         import tkinter as tk
         from tkinter import ttk
 
-        from devorchestra.gui import CommandCenter
+        from devorchestra.gui import ACTIVE_AGENT_BORDER, TILE, CommandCenter
         from devorchestra.projection import ProjectionReader
 
         def descendants(widget):
@@ -286,8 +296,13 @@ class RegisteredCycleTests(unittest.TestCase):
                 if (not panel.winfo_exists() and center.page == "operations"
                         and "1사이클 · Developer" in heading
                         and "실행 중" in center.phases[1][1].cget("text")
+                        and center.card_frames["Developer"].cget("highlightbackground") == ACTIVE_AGENT_BORDER
+                        and "도구 명령 실행 중 · python" in center.cards["Developer"][1].cget("text")
                         and "확정 사용량 105" in detail and center.registered_cancel.winfo_ismapped()):
-                    developer_observed.set()
+                    center.registered_history_button.invoke()
+                    history = center.registered_history[2].get("1.0", "end")
+                    if "도구 명령 실행 중 · python" in history and "PRIVATE_FIXTURE_ARGUMENT" not in history:
+                        developer_observed.set()
                 progress = center.view.get("registered_progress") if center.view else None
                 if progress and progress["end"] and center.registered_job["settled"]:
                     if "완료 · 2사이클" in heading and "closing.txt" in detail:
@@ -307,6 +322,10 @@ class RegisteredCycleTests(unittest.TestCase):
                 self.assertEqual(confirmations, ["등록 프로젝트 Codex 세션 승인"])
                 self.assertTrue(developer_observed.is_set())
                 self.assertFalse(panel.winfo_exists())
+                self.assertTrue(all(frame.cget("highlightbackground") == TILE for frame in center.card_frames.values()))
+                history = center.registered_history[2].get("1.0", "end")
+                self.assertIn("변경 파일 · closing.txt", history)
+                self.assertIn("세션 종료 · 완료", history)
                 center.original_apply_panel("registered-test")
                 apply_window = next(widget for widget in root.winfo_children()
                                     if isinstance(widget, tk.Toplevel) and "검증된 변경 원본 반영" in widget.title())
