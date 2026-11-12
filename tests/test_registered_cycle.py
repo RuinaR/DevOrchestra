@@ -19,6 +19,17 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_shutdown_reservation_can_be_cancelled_until_checkpoint_is_claimed(self):
+        pause = registered_cycle.PauseControl()
+        pause.change("request")
+        self.assertEqual(pause.state, "SCHEDULED")
+        pause.change("cancel")
+        self.assertFalse(pause.claim())
+        pause.change("request")
+        self.assertTrue(pause.claim())
+        pause.change("cancel")
+        self.assertEqual(pause.state, "SAVING")
+
     def test_feedback_is_linked_and_credential_like_findings_are_omitted(self):
         session = Mock()
         session.source.return_value = "source"
@@ -280,31 +291,46 @@ class RegisteredCycleTests(unittest.TestCase):
                     checkbox.invoke()
             confirmations = []
             settled = []
-            deadline = monotonic() + 75
+            deadline = monotonic() + 120
+            paused = []
 
             def approve():
-                dialog = next((widget for widget in panel.winfo_children() if isinstance(widget, tk.Toplevel)), None)
+                dialog = next((widget for widget in descendants(root) if isinstance(widget, tk.Toplevel)
+                               and widget.title() in {"등록 프로젝트 Codex 세션 승인", "체크포인트에서 이어서 개발"}), None)
                 if dialog is not None:
                     confirmations.append(dialog.title())
                     button(dialog, "확인").invoke()
-                elif monotonic() < deadline:
+                if len(confirmations) < 2 and monotonic() < deadline:
                     root.after(30, approve)
 
             def inspect():
                 heading = center.registered_status.cget("text")
                 detail = center.registered_detail.cget("text")
-                if (not panel.winfo_exists() and center.page == "operations"
+                if (not developer_observed.is_set() and not panel.winfo_exists() and center.page == "operations"
                         and "1사이클 · Developer" in heading
                         and "실행 중" in center.phases[1][1].cget("text")
                         and center.card_frames["Developer"].cget("highlightbackground") == ACTIVE_AGENT_BORDER
                         and "도구 명령 실행 중 · python" in center.cards["Developer"][1].cget("text")
+                        and "Manager가 전달한 계획 · Update the text" in center.cards["Developer"][1].cget("text")
                         and "확정 사용량 105" in detail and center.registered_cancel.winfo_ismapped()):
                     center.registered_history_button.invoke()
                     history = center.registered_history[2].get("1.0", "end")
                     if "도구 명령 실행 중 · python" in history and "PRIVATE_FIXTURE_ARGUMENT" not in history:
-                        developer_observed.set()
+                        controls = center.shutdown_buttons
+                        controls["request"].invoke()
+                        if controls["cancel"].instate(["!disabled"]):
+                            controls["cancel"].invoke()
+                            if controls["request"].instate(["!disabled"]):
+                                controls["request"].invoke()
+                                controls["finalize"].invoke()
+                                if "체크포인트를 저장합니다" in center.shutdown_label.cget("text"):
+                                    developer_observed.set()
                 progress = center.view.get("registered_progress") if center.view else None
                 if progress and progress["end"] and center.registered_job["settled"]:
+                    if (not paused and progress["end"]["outcome"] == registered_cycle.MANUAL_CHECKPOINT
+                            and center.shutdown_buttons["resume"].instate(["!disabled"])):
+                        paused.append(progress["end"])
+                        center.shutdown_buttons["resume"].invoke()
                     if "완료 · 2사이클" in heading and "closing.txt" in detail:
                         settled.append(progress["end"])
                         root.quit()
@@ -319,7 +345,9 @@ class RegisteredCycleTests(unittest.TestCase):
             root.after(60, inspect)
             root.mainloop()
             if settled:
-                self.assertEqual(confirmations, ["등록 프로젝트 Codex 세션 승인"])
+                self.assertEqual(confirmations, ["등록 프로젝트 Codex 세션 승인", "체크포인트에서 이어서 개발"])
+                self.assertEqual(paused[0]["cycle_count"], 1)
+                self.assertEqual(paused[0]["owned_tree"], "DRAINED")
                 self.assertTrue(developer_observed.is_set())
                 self.assertFalse(panel.winfo_exists())
                 self.assertTrue(all(frame.cget("highlightbackground") == TILE for frame in center.card_frames.values()))

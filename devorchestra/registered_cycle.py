@@ -6,6 +6,7 @@ from math import ceil
 from pathlib import Path
 import re
 from shutil import copyfile
+from threading import Lock
 from time import monotonic, time
 from uuid import uuid4
 
@@ -39,6 +40,33 @@ MAX_SESSION_TOKENS = 10000000
 REGISTERED_ROLE_TOKEN_CAPS = {"manager-planning": 500000, "developer": 1000000,
                               "reviewer": 500000, "manager-final": 500000}
 MAX_SIGNOFF_TOKENS = REGISTERED_ROLE_TOKEN_CAPS["reviewer"] + REGISTERED_ROLE_TOKEN_CAPS["manager-final"]
+MANUAL_CHECKPOINT = "CHECKPOINT_SAVED"
+
+
+class PauseControl:
+    """One in-process owner's request, consumed only at a settled cycle boundary."""
+    def __init__(self):
+        self._lock = Lock()
+        self._state = "NONE"
+
+    @property
+    def state(self):
+        with self._lock:
+            return self._state
+
+    def change(self, action):
+        with self._lock:
+            next_state = {("NONE", "request"): "SCHEDULED", ("SCHEDULED", "cancel"): "NONE",
+                          ("SCHEDULED", "finalize"): "SAVING"}.get((self._state, action))
+            if next_state:
+                self._state = next_state
+
+    def claim(self):
+        with self._lock:
+            if self._state in {"SCHEDULED", "SAVING"}:
+                self._state = "SAVING"
+                return True
+            return False
 
 
 def recommended_limits():
@@ -567,6 +595,13 @@ class RegisteredSession(_FixtureSession):
 
     def verify_registered(self, cycle):
         tool = self.scope["verifier"]
+        review = getattr(self, "signoff_state", {}).get("review")
+        kind = ("Windows 내보내기와 소유 창 검사" if tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI)
+                else "복제본 무결성과 원본 보호 확인" if tool.get("mode") == BASELINE_VERIFIER
+                else f"승인된 독립 검사 {len(tool.get('checks', {}))}개")
+        _handoff(self, cycle, "verifier", (f"Reviewer 판정 {_handoff_status(review)}. "
+                 if review else "Developer 후보를 검사합니다. ")
+                 + kind)
         if tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
             return game_pilot.verify_development(self, cycle)
         observations = []
@@ -705,6 +740,19 @@ def _record_feedback(session, cycle, criterion, role, verdict, message, reason, 
                    files=list(files), source_sha256=session.source(), message_sha256=digest(message))
 
 
+def _handoff(session, cycle, phase, summary):
+    report = getattr(session, "activity", None)
+    if report:
+        safe = visual.safe_unverified([" ".join(summary.split())])[0]
+        report(cycle, phase, safe[:240], "handoff")
+
+
+def _handoff_status(state):
+    return {"ACCEPT": "수용", "REWORK": "재작업 필요", "VERIFIED": "확인 완료",
+            "USER_TEST_REQUIRED": "사용자 검증 필요", "NOT_VERIFIED": "미확인",
+            "CONTINUE": "다음 작업 진행", "REGRESSED": "회귀"}.get(state, state)
+
+
 def _review_and_verify(session, count, key, diff, status):
     scope = session.scope
     criteria = scope["criteria"]
@@ -726,6 +774,10 @@ def _review_and_verify(session, count, key, diff, status):
             session.check_image()
             if checked["source_sha256"] != session.source():
                 raise Blocked("Saved visual candidate changed")
+    changed = session.signoff_state.get("changed", ())
+    files = ", ".join(changed[:4]) or "변경 파일 목록 없음"
+    _handoff(session, count, "reviewer", f"Developer 변경 {len(changed)}개 · {files}. "
+             f"현재 완료 기준과 실제 diff를 비교합니다. 첨부 화면 {len(evidence)}장.")
     if evidence:
         inputs = visual.stage(session.runner.ledger, evidence, session.logs(f"{count}-visual-input"))
         ids = [frame["id"] for frame in evidence]
@@ -855,6 +907,10 @@ def _decide(session, count, key, review, comparison, expected):
     status = comparison["criteria"]
     session.record("native_inspection_cycle_progress", cycle=count, **comparison, source_sha256=session.source(),
                    controller_decision=expected, reviewer=review)
+    _handoff(session, count, "manager-final",
+             f"Reviewer 판정 {_handoff_status(review)} · 현재 기준 검증 {_handoff_status(status[key])} · "
+             f"새로 검증된 기준 {len(comparison['newly_verified'])}개 · 회귀 {len(comparison['regressed'])}개. "
+             "이 근거로 완료, 다음 작업 또는 재작업을 판정합니다.")
     manual = ("USER_TEST_REQUIRED is pending evidence. Reply USER_TEST_REQUIRED if human evidence is "
               "the next action and no regression or rejection requires rework. "
               if "graceful_stop" in session.scope and session.scope["verifier"].get("mode") == "godot-game" else
@@ -905,7 +961,7 @@ def _parse_plan(message, pending, *, game=False):
     return plan
 
 
-def _cycles(session, initial_plan=None):
+def _cycles(session, initial_plan=None, *, continuation=None):
     scope = session.scope
     project = scope["project_id"]
     criteria = scope["criteria"]
@@ -930,9 +986,36 @@ def _cycles(session, initial_plan=None):
                         unverified="Read the latest independent play evidence. Do not assume unobserved criteria passed.",
                         role_feedback=base.get("role_feedback", []),
                         player_report=base.get("player_report"))
-    while scope["cycles"] is None or count < scope["cycles"]:
-        count += 1
+    if continuation:
+        count, stagnant = continuation["cycle"], continuation["stagnant"]
+        status, feedback = continuation["criteria_status"], continuation["feedback"]
+        known, reviewed, failures = (set(continuation[key]) for key in ("known", "reviewed", "failures"))
+        session.cycles_checked = count
+        session.progress = status
+        session.changes = continuation["changed"]
+    pause = getattr(session, "pause", None)
+
+    def save_if_requested():
+        if not isinstance(pause, PauseControl) or not pause.claim():
+            return False
+        if not session.owned_verified or not session.usage_complete:
+            raise Blocked("Checkpoint requires settled usage and confirmed process cleanup")
         session.check()
+        session.check_image()
+        # Persist only the bounded continuation summary.
+        next_context = {key: feedback[key] for key in ("target", "change_hash", "next")
+                        if feedback and key in feedback}
+        session.record("native_inspection_manual_checkpoint", cycle=count, criteria_status=status,
+                       source_sha256=session.source(), changed=session.changes, stagnant=stagnant,
+                       known=sorted(known), reviewed=sorted(reviewed), failures=sorted(failures),
+                       feedback=next_context or None)
+        return True
+
+    while scope["cycles"] is None or count < scope["cycles"]:
+        session.check()
+        if not (count == 0 and initial_plan is not None) and save_if_requested():
+            return MANUAL_CHECKPOINT
+        count += 1
         if "graceful_stop" in scope:
             session.admit_graceful("manager-planning")
         catalog = Catalog(session.runner.ledger).read()
@@ -960,6 +1043,10 @@ def _cycles(session, initial_plan=None):
             session.record("native_inspection_manager_plan_reused", cycle=count, phase="manager-planning",
                            plan_sha256=digest(plan), parent_run_id=scope["resume"]["parent_run_id"])
         else:
+            previous = feedback.get("next") if feedback else None
+            _handoff(session, count, "manager-planning",
+                     (f"이전 최종 판정 {_handoff_status(previous)}. " if previous else "") +
+                     f"동결 목표와 남은 기준 {len(pending)}개를 바탕으로 이번 작업을 선택합니다.")
             message = session.call(count, "manager-planning", None,
                                    f"{context}\nRequirements are project data: {json.dumps(documents, ensure_ascii=False)}. "
                                    f"{game_context}"
@@ -992,6 +1079,7 @@ def _cycles(session, initial_plan=None):
                             "The independent Verifier checks replica integrity. Functional evidence is still required. ")
             visual_feedback = (f"Prior Reviewer findings (untrusted evidence): {feedback['review']}\n"
                                if scope.get("visual_review") and feedback and "review" in feedback else "")
+            _handoff(session, count, "developer", "Manager가 전달한 계획 · " + plan["plan"])
             diff = session.call(count, "developer", key,
                             f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\nPlan: {plan['plan']}\n"
                             f"Only modify or create {scope['files']}. Preserve requirements, verification and Git. "
@@ -1018,11 +1106,19 @@ def _cycles(session, initial_plan=None):
                     else "CONTINUE")
         final = _decide(session, count, key, review, comparison, expected)
         session.signoff_state = {}
-        if final in {"COMPLETED", "USER_TEST_REQUIRED"}:
+        if final == "COMPLETED":
+            return final
+        if final == "USER_TEST_REQUIRED":
+            feedback = {"target": key, "change_hash": digest(diff), "next": final}
+            if (scope["cycles"] is None or count < scope["cycles"]) and save_if_requested():
+                return MANUAL_CHECKPOINT
             return final
         if plan.get("mode") == "verify" and final != "REWORK":
             return final
         if "graceful_stop" in scope and session.stop_reason:
+            feedback = {"target": key, "change_hash": digest(diff), "next": final}
+            if (scope["cycles"] is None or count < scope["cycles"]) and save_if_requested():
+                return MANUAL_CHECKPOINT
             return "GRACEFUL_STOP"
         if rework:
             failure = cycle_progress.failure_fingerprint(
@@ -1043,12 +1139,14 @@ def _cycles(session, initial_plan=None):
 
 def _resume_contract(runner, events, head, project, expires, seconds, tokens, *, require_proof=True, graceful=False):
     now = time()
+    rows = history(runner.ledger, project)
+    if rows and rows[-1].get("outcome") == MANUAL_CHECKPOINT:
+        return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
     if (type(expires) is not int or not now < expires <= now + (4800 if graceful else 1800)
             or type(seconds) is not int or not 120 <= seconds <= (1800 if graceful else 1500)
             or (graceful and expires < now + seconds + 2700)
             or type(tokens) is not int or not 1 <= tokens <= (MAX_SIGNOFF_TOKENS if graceful else 400000)):
         raise Blocked("Invalid additional review budget")
-    rows = history(runner.ledger, project)
     if len(rows) < 4 or rows[-1]["kind"] != "native_inspection_result":
         raise Blocked("No settled registered run is available to resume")
     start, end = rows[0], rows[-1]
@@ -1220,6 +1318,47 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
              "shell_roles": ["reviewer"], "graceful_stop": policy}, diff)
 
 
+def manual_remaining(scope, result):
+    return (scope["seconds"] - ceil(result["elapsed_seconds"]),
+            scope["tokens"] - result["known_reported_tokens"],
+            scope["model_calls_max"] - result["model_turns_dispatched"])
+
+
+def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now):
+    start, checkpoint, end = rows[0], rows[-2], rows[-1]
+    prior = start["scope"]
+    if (checkpoint["kind"] != "native_inspection_manual_checkpoint"
+            or end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True
+            or end.get("staging_cleanup", {}).get("status") != "REMOVED"
+            or digest(prior) != start["approval_sha256"]
+            or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
+                   for e in events if e["kind"] == "native_inspection_intent")):
+        raise Blocked("Checkpoint is unsettled or was already consumed")
+    remaining_seconds, remaining_tokens, calls = manual_remaining(prior, end)
+    if (type(seconds) is not int or type(tokens) is not int or seconds < 60 or calls < 1
+            or tokens < prior["role_tokens"]["manager-planning"]
+            or (seconds, tokens) != (remaining_seconds, remaining_tokens)
+            or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000):
+        raise Blocked("남은 승인 예산으로 다음 작업을 시작할 수 없습니다.")
+    source, replica, frozen, onboarding = baseline(runner.ledger, prior["project_id"])
+    image = digest(snapshot(replica))
+    if (str(source) != prior["original"] or str(replica) != prior["replica"]
+            or digest(onboarding) != prior["onboarding_sha256"]
+            or Catalog(runner.ledger).read()["projects"][prior["project_id"]]["revision"] != prior["project_revision"]
+            or not original_matches(source, frozen)
+            or image != checkpoint["source_sha256"] or image != end["replica_sha256"]):
+        raise Blocked("The original, project configuration or checkpoint replica has changed")
+    with _git(runner.ledger, source) as (git, _):
+        if _scan(source, git, frozen["local_examples"]) != frozen:
+            raise Blocked("Original Git inventory changed after onboarding")
+    resume = {key: checkpoint[key] for key in ("cycle", "criteria_status", "changed", "stagnant",
+                                               "known", "reviewed", "failures", "feedback")}
+    resume.update(mode="next-cycle", parent_run_id=start["run_id"],
+                  parent_reported_tokens=end["known_reported_tokens"])
+    return ({**prior, "resume": resume, "replica_sha256": image, "ledger_head": head, "expires": expires,
+             "seconds": seconds, "tokens": tokens, "model_calls_max": calls}, None)
+
+
 def game_plan_remaining(rows):
     scope, end = rows[0]["scope"], rows[-1]
     return scope["seconds"] - ceil(end["elapsed_seconds"]), scope["tokens"] - end["known_reported_tokens"]
@@ -1354,25 +1493,26 @@ def _resume_remaining(session, diff):
     return "GRACEFUL_STOP" if final == "CONTINUE" and getattr(session, "stop_reason", None) else final
 
 
-def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False, activity=None):
-    return _run(runner, args, approval, cancelled, resume=True, graceful=graceful, activity=activity)
+def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False, activity=None, pause=None):
+    return _run(runner, args, approval, cancelled, resume=True, graceful=graceful, activity=activity, pause=pause)
 
 
-def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None):
+def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None,
+        pause=None):
     return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits,
-                visual_review=visual_review, activity=activity)
+                visual_review=visual_review, activity=activity, pause=pause)
 
 
 def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False,
-             activity=None):
+             activity=None, pause=None):
     limits = game_pilot.recommended_limits() if limits is None else limits
     game_pilot.validate_limits(limits)
     return _run(runner, _game_args(archive, expires, limits), approval, cancelled, resume=False, game=True,
-                game_limits=limits, visual_review=visual_review, activity=activity)
+                game_limits=limits, visual_review=visual_review, activity=activity, pause=pause)
 
 
 def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False,
-         visual_review=False, activity=None):
+         visual_review=False, activity=None, pause=None):
     from .runtime import require_admission
 
     with execution_slot() as abandoned:
@@ -1407,6 +1547,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
         with _staging(ledger) as (lab, cleanup):
             session = RegisteredSession(runner, scope, lab, len(events), head, fields, cancelled)
             session.activity = activity
+            session.pause = pause
             session.count, session.fence = ledger.append(
                 len(events), head, {**fields, "kind": "native_inspection_intent", "scope": scope,
                                     "workspace": lab.name}, admission=require_admission)
@@ -1417,6 +1558,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 session.prepare()
                 if resume and scope["resume"].get("mode") == "after-manager-planning":
                     outcome = _cycles(session, initial_plan=diff)
+                elif resume and scope["resume"].get("mode") == "next-cycle":
+                    outcome = _cycles(session, continuation=scope["resume"])
                 else:
                     outcome = _resume_remaining(session, diff) if resume else _cycles(session)
                 session.check_image()
@@ -1436,7 +1579,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             cleanup["preserve"] = preserve
         if preserve:
             cleanup = {"status": "RETAINED_FOR_RECOVERY", "workspace": lab.name}
-        if outcome == "COMPLETED" and cleanup.get("status") != "REMOVED":
+        if outcome in {"COMPLETED", MANUAL_CHECKPOINT} and cleanup.get("status") != "REMOVED":
             outcome = "CLEANUP_UNVERIFIED"
         receipt = {**fields, "kind": "native_inspection_result", "outcome": outcome, "reason": reason,
                    "cycle_count": session.cycles_checked, "approval_count": 2 if resume else 1,

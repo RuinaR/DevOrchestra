@@ -38,6 +38,7 @@ REGISTERED_STATES = {
     "STARTING": "실행 준비 중", "STOPPING": "중단 요청됨", "RECOVERY_REQUIRED": "복구 필요",
     "TIME_LIMIT": "시간 기준 도달", "TOKEN_LIMIT": "토큰 기준 도달", "CYCLE_LIMIT": "사이클 상한 도달",
     "NO_PROGRESS": "진척 없음", "NOT_VERIFIED": "검증 미확인", "VERIFIED": "검증 완료",
+    "CHECKPOINT_SAVED": "체크포인트 저장됨",
     "NOT_STARTED": "대기", "REGRESSED": "회귀", "CONTINUE": "다음 작업 진행", "REWORK": "재작업 필요",
 }
 POLL_MS = 1500
@@ -952,26 +953,29 @@ class CommandCenter:
             self.render_audit()
 
     def start_registered_run(self, scope, run, cancelled):
+        from .registered_cycle import PauseControl
+
         if self.registered_job and not self.registered_job["future"].done():
             return False
         future = Future()
         activities = deque(maxlen=400)
         activity_lock = Lock()
+        pause = PauseControl()
         self.registered_job = {"scope": scope, "approval": digest(scope), "future": future,
                                "sequence": self.view["snapshot_version"][0] if self.view else 0,
                                "started": monotonic(), "cancelled": cancelled, "settled": False,
-                               "activities": activities, "activity_lock": activity_lock}
+                               "activities": activities, "activity_lock": activity_lock, "pause": pause}
         self.navigate("operations")
         if self.view:
             self.render_registered(self.view)
 
-        def report(cycle, phase, message):
+        def report(cycle, phase, message, kind="activity"):
             with activity_lock:
-                activities.append((cycle, phase, message))
+                activities.append((cycle, phase, message, kind))
 
         def work():
             try:
-                future.set_result(run(report))
+                future.set_result(run(report, pause))
             except Exception as error:
                 future.set_exception(error)
 
@@ -1089,10 +1093,14 @@ class CommandCenter:
                 parts.append(REGISTERED_ACTIONS[phase])
                 if target in scope["criteria"]:
                     parts.append("현재 작업 · " + scope["criteria"][target]["text"][:150])
-                message = next((msg for number, role_phase, msg in reversed(activities)
-                                if number == cycle and role_phase == phase), None)
+                message = next((msg for number, role_phase, msg, kind in reversed(activities)
+                                if number == cycle and role_phase == phase and kind == "activity"), None)
                 if message:
                     parts.append(message)
+                handoff = next((msg for number, role_phase, msg, kind in reversed(activities)
+                                if number == cycle and role_phase == phase and kind == "handoff"), None)
+                if handoff:
+                    parts.append("\n인계 요약\n" + handoff)
             if row and phase != "verifier" and scope.get("model"):
                 parts.append(scope["model"])
             if isinstance(usage := row.get("provider_usage"), dict):
@@ -1135,8 +1143,8 @@ class CommandCenter:
         recorded = sum(row["kind"] == "native_inspection_role_result" for row in history)
         title.configure(text=f"{view['project_name']} · 최근 자동 개발 세션 · 역할 결과 {recorded}건")
         tools = {}
-        for cycle, phase, message in activities:
-            tools.setdefault((cycle, phase), []).append(message)
+        for cycle, phase, message, kind in activities:
+            tools.setdefault((cycle, phase), []).append("인계 · " + message if kind == "handoff" else message)
         lines, pending = [], set()
         for row in history:
             cycle, phase, kind = row["cycle"], row.get("phase"), row["kind"]
@@ -1159,6 +1167,8 @@ class CommandCenter:
                 lines.append(f"{cycle}사이클 · Reviewer 판정 · {row['verdict']}")
             elif kind == "native_inspection_visual_review":
                 lines.append(f"{cycle}사이클 · 시각 검토 · {row['verdict']}")
+            elif kind == "native_inspection_manual_checkpoint":
+                lines.append(f"{cycle}사이클 · 체크포인트 기록")
             else:
                 title_text = "계획 재사용" if kind == "native_inspection_manager_plan_reused" else "Developer 건너뜀"
                 lines.append(f"{cycle}사이클 · {title_text}")
@@ -1318,12 +1328,68 @@ class CommandCenter:
                                  f"Model tokens · {resources['measured_tokens']}\n"
                                  f"Cost · {resources['cost']} / cap {resources['cost_limit']}")
 
+    def registered_shutdown_context(self):
+        return (bool(self.view and self.view.get("registered_progress") and not self.view.get("global_run"))
+                or bool(self.registered_job and not self.registered_job["settled"]))
+
+    @staticmethod
+    def can_resume_registered(progress):
+        from . import registered_cycle
+
+        end = (progress or {}).get("end") or {}
+        if end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True:
+            return False
+        if end["outcome"] == registered_cycle.MANUAL_CHECKPOINT:
+            scope = progress["scope"]
+            seconds, tokens, calls = registered_cycle.manual_remaining(scope, end)
+            return (progress["checkpoint_kind"] == "native_inspection_manual_checkpoint"
+                    and seconds >= 60 and tokens >= scope["role_tokens"]["manager-planning"] and calls > 0)
+        if end["outcome"] == "SIGNOFF_PENDING":
+            return progress["checkpoint_kind"] == "native_inspection_signoff_checkpoint"
+        developer = progress["roles"].get("developer", {})
+        return (end["outcome"] == "TOKEN_LIMIT" and developer.get("outcome") == "TOKEN_LIMIT"
+                and developer.get("process_result") == "EXITED" and developer.get("exit_code") == 0)
+
+    def registered_shutdown_command(self, action):
+        if not self.view or self.shutdown_buttons[action].instate(["disabled"]):
+            return
+        if action == "resume":
+            from .gui_registered_cycle import show
+
+            show(self, self.view["project_id"], resume_only=True)
+        else:
+            self.registered_job["pause"].change(action)
+            self.render_shutdown()
+
     def render_shutdown(self):
-        if (self.view and self.view.get("registered_progress") and not self.view.get("global_run")
-                or self.registered_job and not self.registered_job["settled"]):
-            self.shutdown_label.configure(text="")
-            for button in self.shutdown_buttons.values():
-                button.configure(state="disabled")
+        if self.registered_shutdown_context():
+            job = self.registered_job
+            progress = self.view.get("registered_progress") if self.view else None
+            active = bool(job and not job["future"].done() and self.view
+                          and job["scope"]["project_id"] == self.view["project_id"])
+            pause = job["pause"].state if active else "NONE"
+            available = (active and not job["cancelled"].is_set()
+                         and (not job["scope"].get("resume")
+                              or job["scope"]["resume"].get("mode") in {"next-cycle", "after-manager-planning"}))
+            end = (progress or {}).get("end") or {}
+            resumable = not active and self.can_resume_registered(progress)
+            allowed = {"request": available and pause == "NONE", "cancel": available and pause == "SCHEDULED",
+                       "finalize": available and pause == "SCHEDULED", "resume": resumable}
+            if pause == "SAVING":
+                message = "현재 사이클을 마친 뒤 체크포인트를 저장합니다."
+            elif pause == "SCHEDULED":
+                message = "종료 예약됨 · 현재 사이클을 마친 뒤 자동 저장합니다."
+            elif available:
+                message = "종료 예약 시 현재 사이클을 마친 뒤 체크포인트를 저장합니다."
+            elif resumable:
+                message = "저장된 작업에서 이어서 개발할 수 있습니다."
+            elif end.get("outcome") == "CHECKPOINT_SAVED":
+                message = "체크포인트 저장됨 · 남은 승인 예산 부족"
+            else:
+                message = "재개할 수 있는 체크포인트 없음"
+            self.shutdown_label.configure(text=message)
+            for action, button in self.shutdown_buttons.items():
+                button.configure(state="normal" if allowed[action] else "disabled")
             return
         state = self.view["shutdown"]["state"] if self.view else "UNAVAILABLE"
         titles = {"RUNNING": "실행 입장 가능 · 합성 전용", "SCHEDULED": "종료 예약됨 · 신규 입장 차단",
@@ -1359,7 +1425,8 @@ class CommandCenter:
 
     def close_requested(self):
         if self.registered_job and not self.registered_job["future"].done():
-            self.cancel_registered_run()
+            if self.registered_job["pause"].state == "NONE":
+                self.cancel_registered_run()
             return
         if self.gui_verification_cancel is not None:
             self.gui_verification_cancel.set()
@@ -1378,6 +1445,10 @@ class CommandCenter:
         self.shutdown_command("finalize" if state in ("SCHEDULED", "READY") else "request")
 
     def shutdown_command(self, action, *, expected=None, until=None):
+        if self.registered_shutdown_context():
+            if expected is None:
+                self.registered_shutdown_command(action)
+            return
         if self.view is None or self.shutdown_future is not None:
             return
         state = self.view["shutdown"]

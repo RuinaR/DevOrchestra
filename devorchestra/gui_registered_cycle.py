@@ -134,7 +134,7 @@ def _session_layout(panel, state):
     return body, footer
 
 
-def show(center, project):
+def show(center, project, *, resume_only=False):
     runner = center.controller
     panel = center.panel()
     panel.title("등록 프로젝트 · Codex 개발 세션")
@@ -176,7 +176,7 @@ def show(center, project):
     use_images = tk.BooleanVar(panel, value=False)
     ttk.Button(body, text="시각 검토 결과와 캡처 보기",
                command=lambda: _open_visual_report(center, runner, project)).pack(anchor="w")
-    if is_godot and project == game_pilot.PROJECT:
+    if is_godot and project == game_pilot.PROJECT and not resume_only:
         ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
                         variable=use_images).pack(anchor="w", pady=(0, 6))
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
@@ -397,9 +397,9 @@ def show(center, project):
                 future.set_exception(error)
 
         def launch(scope):
-            def run(activity):
+            def run(activity, pause):
                 return run_fn(runner, *args, approval=digest(scope), cancelled=cancelled.is_set,
-                              activity=activity, **options)
+                              activity=activity, pause=pause, **options)
 
             if center.start_registered_run(scope, run, cancelled):
                 save_budget()
@@ -429,6 +429,17 @@ def show(center, project):
                 return
             if resume:
                 checkpoint = result["resume"]
+                if checkpoint.get("mode") == "next-cycle":
+                    summary = (f"{project}\n복제본 {result['replica']}\n"
+                               f"다음 사이클 {checkpoint['cycle'] + 1}부터 이어갑니다.\n"
+                               f"남은 승인 예산 {result['seconds']:,}초 · {result['tokens']:,}토큰 · "
+                               f"모델 최대 {result['model_calls_max']}회\n"
+                               "기존 완료 기준, 파일 범위와 실행 권한을 사용합니다.")
+                    if center.confirm("체크포인트에서 이어서 개발", summary, parent=panel):
+                        launch(result)
+                    else:
+                        state.set("재개 승인 취소됨")
+                    return
                 summary = (f"{project}\n복제본 {result['replica']}\n"
                            f"재검토 대상: {', '.join(checkpoint['changed'])}\n"
                            f"기존 사용량 {checkpoint['parent_reported_tokens']:,}토큰\n"
@@ -535,6 +546,11 @@ def show(center, project):
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             state.set("저장된 개발 기록을 읽지 못했습니다. 기록·복구 화면에서 상태를 확인하세요.")
             return
+        if rows and rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT:
+            seconds, tokens, _ = registered_cycle.manual_remaining(rows[0]["scope"], rows[-1])
+            cancelled.clear()
+            submit((project, int(time()) + seconds + 2940, seconds, tokens), resume=True, graceful=True)
+            return
         if not rows or rows[-1].get("outcome") not in {"SIGNOFF_PENDING", "TOKEN_LIMIT"}:
             state.set("재개할 검토 단계가 없습니다. 중단 원인은 기록·복구 화면에서 확인하세요.")
             return
@@ -586,6 +602,8 @@ def show(center, project):
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: (close(), "break")[1])
     render()
+    if resume_only:
+        panel.after_idle(resume)
 
 
 def _game_preflight(center, panel, body, footer, runner, state, grants, use_images):
@@ -629,6 +647,10 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
         graceful = False
         if resume:
             rows = registered_cycle.history(runner.ledger, game_pilot.PROJECT)
+            if rows and rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT:
+                panel.destroy()
+                show(center, game_pilot.PROJECT, resume_only=True)
+                return
             if rows and rows[-1].get("reason") == "Manager plan exceeds the approved criteria":
                 resume_args = (game_pilot.PROJECT, expires, *registered_cycle.game_plan_remaining(rows))
             elif rows and rows[0]["scope"].get("role_deadlines"):
@@ -714,14 +736,14 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                         if result.get("visual_review") and (not resume or not result["resume"].get("review")):
                             summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                         if center.confirm(title, summary, parent=panel):
-                            def run(activity):
+                            def run(activity, pause):
                                 if resume:
                                     return registered_cycle.run_resume(
                                         runner, *resume_args, approval=digest(result),
-                                        cancelled=cancelled.is_set, graceful=graceful, activity=activity)
+                                        cancelled=cancelled.is_set, graceful=graceful, activity=activity, pause=pause)
                                 return registered_cycle.run_game(
                                     runner, archive, expires, limits, approval=digest(result),
-                                    cancelled=cancelled.is_set, visual_review=visual_review, activity=activity)
+                                    cancelled=cancelled.is_set, visual_review=visual_review, activity=activity, pause=pause)
 
                             if center.start_registered_run(result, run, cancelled):
                                 panel.destroy()
