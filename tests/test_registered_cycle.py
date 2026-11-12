@@ -8,6 +8,7 @@ from shutil import copyfile
 from tempfile import TemporaryDirectory
 from threading import Event
 from time import monotonic, time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -20,6 +21,99 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_accepted_planning_rework_advances_without_functional_pass(self):
+        first, second = "C1", "C2"
+        scope = {"project_id": "fixture", "criteria": {k: {"text": k, "checks": []} for k in (first, second)},
+                 "goal": "Plan the implementation", "files": ["docs/PROJECT-PLAN.md"], "cycles": 3,
+                 "requirements": [], "visual_preview": True, "verifier": {"mode": registered_cycle.BASELINE_VERIFIER}}
+        session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), record=Mock(),
+                                  source=lambda: digest(session.image), changes=[], cycles_checked=0,
+                                  check_image=Mock(), owned_verified=True, usage_complete=True)
+
+        def call(number, phase, target, prompt):
+            if phase == "manager-planning":
+                return json.dumps({"criterion": second if number == 3 else first, "plan": "Plan"})
+            session.image = {"files": {"docs/PROJECT-PLAN.md": {"revision": number}}}
+            session.last_changed = ["docs/PROJECT-PLAN.md"]
+            return "diff"
+
+        def verify(_, number, key, diff, status):
+            verdict = "REWORK" if number == 1 else "ACCEPT"
+            checked = {"runtime": registered_cycle.BASELINE_VERIFIER, "integrity": "PASS", "owned_tree": "DRAINED",
+                       "observations": []}
+            return verdict, verdict, "Reason", checked, {"criteria": dict.fromkeys(scope["criteria"], "USER_TEST_REQUIRED"),
+                                                         "newly_verified": [], "regressed": []}
+
+        session.call = Mock(side_effect=call)
+        with (patch.object(registered_cycle, "Catalog"),
+              patch.object(registered_cycle, "read_frozen_requirements", return_value=[]),
+              patch.object(registered_cycle, "_review_and_verify", side_effect=verify),
+              patch.object(registered_cycle, "_decide", side_effect=lambda *args: args[-1]) as decide):
+            self.assertEqual(registered_cycle._cycles(session), "CYCLE_LIMIT")
+        self.assertEqual([item.args[-1] for item in decide.call_args_list], ["REWORK", "CONTINUE", "CONTINUE"])
+        self.assertEqual(decide.call_args_list[1].args[4]["newly_reviewed_without_functional_check"], [first])
+        self.assertEqual(decide.call_args_list[1].args[4]["criteria"][first], "USER_TEST_REQUIRED")
+        self.assertEqual([item.args[2] for item in session.call.call_args_list if item.args[1] == "developer"],
+                         [first, first, second])
+
+    def test_planned_documentation_counts_without_satisfying_red_functional_check(self):
+        key = "C1"
+        scope = {"project_id": "fixture", "criteria": {key: {"text": "Implement a feature", "checks": [{"title": key}]}},
+                 "goal": "Work", "files": ["docs/DESIGN.md", "src/main.py"], "cycles": 1, "requirements": [],
+                 "verifier": {"checks": {key: {"args": []}}}}
+        session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), check_image=Mock(),
+                                  record=Mock(), source=lambda: digest(session.image), changes=["docs/DESIGN.md"],
+                                  owned_verified=True, usage_complete=True)
+
+        def call(number, phase, target, prompt, **options):
+            if phase == "manager-planning":
+                return json.dumps({"criterion": key, "plan": "Write design", "mode": "documentation"})
+            session.image = {"files": {"docs/DESIGN.md": {"sha256": "updated"}}}
+            session.last_changed = ["docs/DESIGN.md"]
+            return "diff"
+
+        session.call = Mock(side_effect=call)
+        receipt = {"outcome": "COMPLETED", "verdict": "FAIL", "owned_tree": "DRAINED", "observations": []}
+        comparison = {"criteria": {key: "BLOCKED"}, "newly_verified": [], "regressed": []}
+        with (patch.object(registered_cycle, "Catalog"),
+              patch.object(registered_cycle, "read_frozen_requirements", return_value=[]),
+              patch.object(registered_cycle, "_review_and_verify",
+                           return_value=("ACCEPT", "ACCEPT", "", receipt, comparison)),
+              patch.object(registered_cycle, "_decide", side_effect=lambda *args: args[-1]) as decide):
+            self.assertEqual(registered_cycle._cycles(session), "CYCLE_LIMIT")
+        self.assertEqual(session.call.call_args.kwargs["allowed_paths"], ["docs/DESIGN.md"])
+        self.assertEqual(decide.call_args.args[-1], "CONTINUE")
+        self.assertEqual(comparison["progress_basis"], "PLANNED_DOCUMENTATION")
+        self.assertEqual(comparison["criteria"][key], "BLOCKED")
+        self.assertEqual(session.record.call_args.args[0], "native_inspection_progress_checkpoint")
+
+    def test_graceful_budget_stop_saves_settled_candidate_before_new_role(self):
+        scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Work", "checks": []}},
+                 "cycles": None, "graceful_stop": {}, "verifier": {}}
+        session = SimpleNamespace(scope=scope, image={"files": {}}, check=Mock(), check_image=Mock(), record=Mock(),
+                                  source=lambda: "verified-snapshot", changes=[], owned_verified=True,
+                                  usage_complete=True, admit_graceful=Mock(side_effect=Blocked("GRACEFUL_STOP")))
+        self.assertEqual(registered_cycle._cycles(session), "GRACEFUL_STOP")
+        self.assertEqual(session.record.call_args.args[0], "native_inspection_progress_checkpoint")
+        self.assertEqual(session.record.call_args.kwargs["cycle"], 0)
+
+    def test_first_empty_developer_turn_replans_and_second_saves_candidate(self):
+        scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Work", "checks": []}},
+                 "goal": "Work", "files": ["work.txt"], "cycles": None, "requirements": [], "verifier": {}}
+        session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), check_image=Mock(),
+                                  record=Mock(), source=lambda: "verified-snapshot", changes=[], owned_verified=True,
+                                  usage_complete=True)
+        session.call = Mock(side_effect=[json.dumps({"criterion": "C1", "plan": "First"}),
+                                         registered_cycle.NoDeveloperChange("no files"),
+                                         json.dumps({"criterion": "C1", "plan": "Different approach"}),
+                                         registered_cycle.NoDeveloperChange("no files")])
+        with (patch.object(registered_cycle, "Catalog"),
+              patch.object(registered_cycle, "read_frozen_requirements", return_value=[])):
+            self.assertEqual(registered_cycle._cycles(session), "NO_PROGRESS")
+        self.assertIn("Choose a different bounded approach", session.call.call_args_list[2].args[-1])
+        self.assertEqual(session.record.call_args.args[0], "native_inspection_progress_checkpoint")
+        self.assertEqual(session.record.call_args.kwargs["source_sha256"], "verified-snapshot")
+
     def test_explicit_verdicts_and_bounded_multiline_reason(self):
         parse = registered_cycle._parse_verdict
         options = registered_cycle.REVIEW_VERDICTS

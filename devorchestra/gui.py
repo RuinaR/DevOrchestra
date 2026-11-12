@@ -1063,10 +1063,13 @@ class CommandCenter:
         if stop := (progress or {}).get("stop"):
             detail.append(f"종료 예약 · {REGISTERED_STATES.get(stop, stop)}")
         if reason:
-            detail.append(("모델 응답의 판정을 읽지 못했습니다. 이어서 개발에서 보존된 응답을 확인하세요."
-                           if reason == "Role did not return a valid verdict" else str(reason)[:300]))
+            hint = {"Role did not return a valid verdict": "모델 응답의 판정을 읽지 못했습니다. 이어서 개발에서 보존된 응답을 확인하세요.",
+                    "NO_PROGRESS": "추가 진척 근거를 확인하지 못했습니다. 기획서만 승인했다면 자동 개발 설정에서 구현 파일 범위를 검토하세요."}
+            detail.append(hint.get(reason, str(reason)[:300]))
         if changed := (progress or {}).get("changed"):
             detail.append(f"변경 파일 {len(changed)}개 · {', '.join(changed[:5])[:250]}")
+        if reviewed := (progress or {}).get("latest_progress", {}).get("newly_reviewed_without_functional_check"):
+            detail.append("새로 검토 수용 · " + ", ".join(reviewed) + " · 기능 검증 대기")
         if criteria := (progress or {}).get("criteria"):
             detail.append("완료 기준 · " + " · ".join(
                 f"{key} {REGISTERED_STATES.get(value, value)}" for key, value in criteria.items()))
@@ -1176,6 +1179,12 @@ class CommandCenter:
                 lines.append(f"{cycle}사이클 · 시각 검토 · {row['verdict']}")
             elif kind == "native_inspection_manual_checkpoint":
                 lines.append(f"{cycle}사이클 · 체크포인트 기록")
+            elif kind == "native_inspection_progress_checkpoint":
+                lines.append(f"{cycle}사이클 · 새 승인으로 이어갈 후보 저장")
+            elif kind == "native_inspection_replan":
+                reason = {"NO_FILE_CHANGE": "승인 파일 변경 없음", "REPEATED_CANDIDATE": "이전 파일 상태 반복",
+                          "REPEATED_REVIEW": "이미 검토한 후보"}.get(row["reason"], row["reason"])
+                lines.append(f"{cycle}사이클 · {reason} · 재계획")
             elif kind in {"native_inspection_role_reused", "native_inspection_decision_applied",
                           "native_inspection_decision_rejected", "native_inspection_postprocess_failed",
                           "native_inspection_role_feedback"}:
@@ -1356,12 +1365,31 @@ class CommandCenter:
                 or bool(self.registered_job and not self.registered_job["settled"]))
 
     @staticmethod
+    def can_continue_progress_stop(progress):
+        end = (progress or {}).get("end") or {}
+        if (end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True
+                or end.get("staging_cleanup", {}).get("status") != "REMOVED"):
+            return False
+        if progress["checkpoint_kind"] == "native_inspection_progress_checkpoint":
+            return end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK"}
+        if end.get("outcome") == "USER_TEST_REQUIRED":
+            return progress["scope"]["verifier"].get("mode") in {"replica-integrity", "godot-owned-gui"}
+        latest = progress.get("latest_progress", {})
+        return (end.get("outcome") == "NO_PROGRESS"
+                and progress["scope"]["verifier"].get("mode") == "replica-integrity"
+                and latest.get("cycle") == end.get("cycle_count")
+                and latest.get("controller_decision") == "CONTINUE" and latest.get("reviewer") == "ACCEPT"
+                and "progress_basis" not in latest)
+
+    @staticmethod
     def can_resume_registered(progress):
         from . import registered_cycle
 
         end = (progress or {}).get("end") or {}
         if end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True:
             return False
+        if CommandCenter.can_continue_progress_stop(progress):
+            return True
         if registered_cycle.can_review_postprocess(end):
             return end.get("staging_cleanup", {}).get("status") == "RETAINED_FOR_RECOVERY"
         if end["outcome"] == registered_cycle.MANUAL_CHECKPOINT:
@@ -1381,7 +1409,8 @@ class CommandCenter:
         if action == "resume":
             from .gui_registered_cycle import show
 
-            show(self, self.view["project_id"], resume_only=True)
+            continuation = self.can_continue_progress_stop(self.view.get("registered_progress"))
+            show(self, self.view["project_id"], resume_only=not continuation, continue_progress=continuation)
         else:
             self.registered_job["pause"].change(action)
             self.render_shutdown()

@@ -53,6 +53,10 @@ class VerdictError(Blocked):
     """The provider settled, but its decision could not be interpreted."""
 
 
+class NoDeveloperChange(Blocked):
+    """The role completed and the approved candidate was unchanged."""
+
+
 class PauseControl:
     """One in-process owner's request, consumed only at a settled cycle boundary."""
     def __init__(self):
@@ -190,17 +194,56 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
     end = rows[-1] if rows else {}
     prior = start.get("scope", {})
     image_hash = digest(image)
+    cycle = end.get("cycle_count")
+    accepted = []
+    saved_progress = rows[-2] if len(rows) >= 2 else {}
+    progress_checkpoint = (
+        end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK"}
+        and saved_progress.get("kind") == "native_inspection_progress_checkpoint"
+        and saved_progress.get("run_id") == end.get("run_id") and saved_progress.get("source_sha256") == image_hash
+        and saved_progress.get("changed") == end.get("changed") and end.get("usage_complete") is True
+        and end.get("staging_cleanup", {}).get("status") == "REMOVED"
+        and digest(prior) == start.get("approval_sha256") == end.get("approval_sha256")
+        and all(name in prior.get("files", ()) or name in prior.get("prior_replica_candidate", {}).get("changed", ())
+                for name in end.get("changed", ())))
+    if progress_checkpoint:
+        accepted = [key for key in saved_progress["accepted_without_functional_check"] if key in prior["criteria"]]
+    elif end.get("outcome") == "NO_PROGRESS":
+        # Admit only a finished, accepted cycle whose final Manager explicitly requested continuation.
+        # Other no-progress exits (including repeated edits without a review) remain ineligible.
+        final = next((row for row in reversed(rows) if row.get("run_id") == end.get("run_id")
+                      and row["kind"] == "native_inspection_decision_applied"), {})
+        review = next((row for row in reversed(rows) if row.get("run_id") == end.get("run_id")
+                       and row["kind"] == "native_inspection_review_decision" and row.get("cycle") == cycle), {})
+        progress = next((row for row in reversed(rows) if row.get("run_id") == end.get("run_id")
+                         and row["kind"] == "native_inspection_cycle_progress" and row.get("cycle") == cycle), {})
+        if (not end.get("usage_complete") or end.get("staging_cleanup", {}).get("status") != "REMOVED"
+                or digest(prior) != start.get("approval_sha256")
+                or end.get("approval_sha256") != start.get("approval_sha256")
+                or prior.get("verifier", {}).get("mode") != BASELINE_VERIFIER
+                or final.get("cycle") != cycle or final.get("verdict") != "CONTINUE"
+                or review.get("verdict") != "ACCEPT" or review.get("target") not in prior.get("criteria", {})
+                or progress.get("controller_decision") != "CONTINUE" or progress.get("reviewer") != "ACCEPT"
+                or progress.get("newly_verified") != [] or progress.get("regressed") != []
+                or progress.get("source_sha256") != image_hash or "progress_basis" in progress
+                or final.get("source_sha256") != image_hash or review.get("source_sha256") != image_hash
+                or not end.get("changed") or any(name not in prior["files"] for name in end["changed"])):
+            raise Blocked("이전 작업은 검토와 복제본 상태를 확정할 수 없어 그대로 이어갈 수 없습니다.")
+        accepted = [review["target"]]
     if (end.get("kind") != "native_inspection_result" or end.get("run_id") != start.get("run_id")
-            or end.get("outcome") != "USER_TEST_REQUIRED" or end.get("owned_tree") != "DRAINED"
+            or (end.get("outcome") != "USER_TEST_REQUIRED" and not accepted and not progress_checkpoint)
+            or end.get("owned_tree") != "DRAINED"
             or end.get("replica_sha256") != image_hash or prior.get("replica") != str(replica)
             or prior.get("onboarding_sha256") != digest(onboarding)
-            or prior.get("verifier", {}).get("mode") not in {BASELINE_VERIFIER, game_pilot.REGISTERED_GUI}
-            or not any(row["kind"] == "native_inspection_role_result" and row.get("phase") == "verifier"
+            or (not progress_checkpoint and prior.get("verifier", {}).get("mode")
+                not in {BASELINE_VERIFIER, game_pilot.REGISTERED_GUI})
+            or (not progress_checkpoint and not any(row["kind"] == "native_inspection_role_result" and row.get("phase") == "verifier"
                        and row.get("run_id") == end["run_id"] and row.get("source_sha256") == image_hash
                        and (row.get("integrity") == "PASS" or row.get("game", {}).get("outcome") == "PASS")
-                       for row in rows)):
+                       for row in rows))):
         raise Blocked("복제본이 온보딩 상태와 다릅니다. 확인된 개발 결과인지 기록·복구에서 확인하세요.")
-    return {"run_id": end["run_id"], "receipt_sha256": digest(end), "changed": end["changed"]}
+    return {"run_id": end["run_id"], "receipt_sha256": digest(end), "changed": end["changed"],
+            **({"accepted_without_functional_check": accepted} if accepted else {})}
 
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
@@ -244,7 +287,10 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     candidate_base = None
     prior_replica_candidate = None
     if digest(image) != onboarding["replica_sha256"]:
-        if not game:
+        prior_rows = [row for row in events if row.get("project_id") == project and row.get("probe_kind") == KIND]
+        from_progress_checkpoint = (len(prior_rows) >= 2
+                                    and prior_rows[-2]["kind"] == "native_inspection_progress_checkpoint")
+        if not game or (game_limits is not None and from_progress_checkpoint):
             prior_replica_candidate = _settled_integrity_candidate(events, project, replica, onboarding, image)
         elif game_limits is None:
             raise Blocked("Replica no longer matches onboarding")
@@ -539,7 +585,7 @@ class RegisteredSession(_FixtureSession):
         elif "executable" in tool and fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
             raise Blocked("Approved executable identity changed")
 
-    def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=()):
+    def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=(), allowed_paths=None):
         saved = getattr(self, "saved_response", None)
         if saved:
             if ((cycle, phase, key) != (saved["cycle"], saved["phase"], saved["target"])
@@ -552,11 +598,14 @@ class RegisteredSession(_FixtureSession):
                         parent_run_id=self.scope["resume"]["parent_run_id"], message_sha256=saved["message_sha256"],
                         source_sha256=self.source())
             return saved["message"]
-        before = {name: _read_source(self.work, name, self.image) for name in self.scope["files"]} if phase == "developer" else {}
+        paths = self.scope["files"] if allowed_paths is None else allowed_paths
+        if allowed_paths is not None and (phase != "developer" or not set(paths) <= set(self.scope["files"])):
+            raise Blocked("The planned role paths exceed the approved scope")
+        before = {name: _read_source(self.work, name, self.image) for name in paths} if phase == "developer" else {}
         tool = self.scope["verifier"]
         game = tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI)
         scratch_root = None
-        if game and phase == "developer":
+        if game and phase == "developer" and allowed_paths is None:
             scratch_root = self.game_scratch
             prompt += ("\nThe Manager's read-only planning instructions do not restrict your approved Developer edits. "
                        f"For development commands, copy the project files to {self.game_scratch} and run Godot "
@@ -622,7 +671,7 @@ class RegisteredSession(_FixtureSession):
                 or any(name not in before or name not in new for name in changed)):
             raise Blocked("Developer changed Git identity, original or an unapproved path")
         if not changed:
-            raise Blocked("NO_PROGRESS")
+            raise NoDeveloperChange("Developer completed without changing the approved files")
         diff = "".join("".join(unified_diff(before[name].splitlines(keepends=True),
                                             _read_source(self.work, name, updated).splitlines(keepends=True),
                                             fromfile=f"a/{name}", tofile=f"b/{name}")) for name in changed)
@@ -1010,14 +1059,18 @@ def _decide(session, count, key, review, comparison, expected):
     if waiting_for_preview:
         manual = ("No visual review has been recorded. Reply CONTINUE so planning can move toward a runnable "
                   "preview within the approved files and offline tools. Missing visual evidence is not a defect. ")
+    rule = ("The reviewed documentation is a completed planning milestone. Functional checks that remain "
+            "unmet still need implementation. Reply CONTINUE. "
+            if comparison.get("documentation_progress") and expected == "CONTINUE" else
+            "Reply REWORK if the current criterion failed, review rejected it or a prior criterion regressed. "
+            "Reply COMPLETED only if all passed with review acceptance. ")
     message = session.call(count, "manager-final", key,
                          f"Current criterion {key}: {status[key]}. All frozen statuses: {status}. "
                          f"Reviewer: {review}. Regression: {comparison['regressed']}. "
                          + ("The Reviewer judged attached images. The deterministic verifier independently checked "
                             "execution evidence and capture integrity. Visual judgments are not functional PASS. "
                             if comparison.get("visual_review_sha256") else "") +
-                         "Reply REWORK if the current criterion failed, review rejected it or a prior criterion "
-                         "regressed. Reply COMPLETED only if all passed with review acceptance. "
+                         f"{rule}"
                          f"{manual}Otherwise reply CONTINUE for remaining criteria. Start with the decision on "
                          "the first line, then give a short reason grounded in the evidence. Do not quote secrets or prompts.")
     final, reason, truncated = _parse_verdict(message, FINAL_VERDICTS)
@@ -1042,9 +1095,10 @@ def _parse_plan(message, pending, *, game=False):
         plan = json.loads(message)
     except ValueError:
         raise Blocked("Manager did not return a structured plan") from None
+    modes = {"edit", "documentation", "verify"} if game else {"edit", "documentation"}
     if (type(plan) is not dict
-            or set(plan) not in ({"criterion", "plan"}, {"criterion", "plan", "mode"} if game else {"criterion", "plan"})
-            or plan.get("mode", "edit") not in ("edit", "verify")
+            or set(plan) not in ({"criterion", "plan"}, {"criterion", "plan", "mode"})
+            or plan.get("mode", "edit") not in modes
             or type(plan["criterion"]) is not str or plan["criterion"] not in pending
             or type(plan["plan"]) is not str or not 0 < len(plan["plan"].strip()) <= (1600 if game else 1000)):
         raise Blocked("Manager plan exceeds the approved criteria")
@@ -1053,7 +1107,11 @@ def _parse_plan(message, pending, *, game=False):
 
 def _expected_final(scope, key, comparison, review):
     status = comparison["criteria"]
-    if review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"} or comparison["regressed"]:
+    if review != "ACCEPT" or comparison["regressed"]:
+        return "REWORK"
+    if comparison.get("documentation_progress") and status[key] != "VERIFIED":
+        return "CONTINUE"
+    if status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"}:
         return "REWORK"
     if all(value == "VERIFIED" for value in status.values()):
         return "COMPLETED"
@@ -1061,6 +1119,43 @@ def _expected_final(scope, key, comparison, review):
         return "CONTINUE"
     return ("USER_TEST_REQUIRED" if scope["verifier"].get("mode") in {BASELINE_VERIFIER, game_pilot.REGISTERED_GUI}
             else "CONTINUE")
+
+
+def _documentation_path(name):
+    path = Path(name)
+    return (path.suffix.lower() in {".md", ".rst", ".adoc"}
+            or (path.parts[0].casefold() in {"docs", "documentation"} and path.suffix.lower() == ".txt"))
+
+
+def _cycle_stagnation(scope, key, review, checked, comparison, accepted, changed, stagnant, *, documentation=False):
+    """Count each accepted, changed criterion once without promoting it to functional VERIFIED."""
+    integrity = (scope["verifier"].get("mode") == BASELINE_VERIFIER and not scope["criteria"][key]["checks"]
+                 and checked.get("runtime") == BASELINE_VERIFIER and checked.get("integrity") == "PASS"
+                 and comparison["criteria"][key] == "USER_TEST_REQUIRED")
+    planned_docs = (documentation and all(_documentation_path(name) for name in changed)
+                    and checked.get("outcome") == "COMPLETED"
+                    and checked.get("verdict") in {"PASS", "FAIL", "NOT_VALIDATED"})
+    if (review == "ACCEPT" and not comparison["regressed"] and changed and checked.get("owned_tree") == "DRAINED"
+            and key not in accepted and (integrity or planned_docs)):
+        accepted.add(key)
+        comparison["newly_reviewed_without_functional_check"] = [key]
+        if planned_docs:
+            comparison["documentation_progress"] = True
+    progress = comparison["newly_verified"] or comparison.get("newly_reviewed_without_functional_check")
+    comparison["progress_basis"] = ("INDEPENDENT_CHECK" if comparison["newly_verified"]
+                                    else "PLANNED_DOCUMENTATION" if comparison.get("documentation_progress")
+                                    else "REVIEW_AND_INTEGRITY" if progress else "NONE")
+    return 0 if progress and not comparison["regressed"] and review == "ACCEPT" else stagnant + 1
+
+
+def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS"):
+    if not session.owned_verified or not session.usage_complete:
+        raise Blocked("NO_PROGRESS")
+    session.check()
+    session.check_image()
+    session.record("native_inspection_progress_checkpoint", cycle=cycle, source_sha256=session.source(),
+                   changed=session.changes, accepted_without_functional_check=sorted(accepted))
+    return outcome
 
 
 def _cycles(session, initial_plan=None, *, continuation=None):
@@ -1076,6 +1171,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
     known = {digest(session.image["files"])}
     reviewed = set()
     failures = set()
+    prior_candidate = scope.get("prior_replica_candidate", {})
+    accepted = set(prior_candidate.get("accepted_without_functional_check", ())) & criteria.keys()
     count = stagnant = 0
     feedback = ({"new_work": True, "existing_files": base["changed"],
                  "existing_plan": base["existing_plan"],
@@ -1088,10 +1185,16 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                         unverified="Read the latest independent play evidence. Do not assume unobserved criteria passed.",
                         role_feedback=base.get("role_feedback", []),
                         player_report=base.get("player_report"))
+    if accepted:
+        status.update(dict.fromkeys(accepted, "USER_TEST_REQUIRED"))
+        session.progress = status
+        feedback = {"existing_files": prior_candidate["changed"], "reviewed_without_functional_check": sorted(accepted),
+                    "next": "CONTINUE"}
     if continuation:
         count, stagnant = continuation["cycle"], continuation["stagnant"]
         status, feedback = continuation["criteria_status"], continuation["feedback"]
         known, reviewed, failures = (set(continuation[key]) for key in ("known", "reviewed", "failures"))
+        accepted.update(continuation.get("accepted_without_functional_check", ()))
         session.cycles_checked = count
         session.progress = status
         session.changes = continuation["changed"]
@@ -1110,6 +1213,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         session.record("native_inspection_manual_checkpoint", cycle=count, criteria_status=status,
                        source_sha256=session.source(), changed=session.changes, stagnant=stagnant,
                        known=sorted(known), reviewed=sorted(reviewed), failures=sorted(failures),
+                       accepted_without_functional_check=sorted(accepted),
                        feedback=next_context or None)
         return True
 
@@ -1119,17 +1223,24 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             return MANUAL_CHECKPOINT
         count += 1
         if "graceful_stop" in scope:
-            session.admit_graceful("manager-planning")
+            try:
+                session.admit_graceful("manager-planning")
+            except Blocked as error:
+                if str(error) != "GRACEFUL_STOP":
+                    raise
+                return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP")
         catalog = Catalog(session.runner.ledger).read()
         documents = read_frozen_requirements(catalog, project, scope["requirements"],
                                             session.runner.ledger.state_boundary)
         context = json.dumps({"goal": scope["goal"], "criteria": criteria, "status": status,
                               "approved_paths": scope["files"],
+                              "reviewed_without_functional_check": sorted(accepted),
                               "project_files": sorted(session.image["files"])[:60],
                               "prior_result": feedback}, ensure_ascii=False)
-        pending = [key for key, value in status.items() if value != "VERIFIED"]
+        pending = [key for key, value in status.items()
+                   if value != "VERIFIED" and (key not in accepted or criteria[key]["checks"])]
         if not pending:
-            pending = list(criteria)
+            pending = [key for key, value in status.items() if value != "VERIFIED"] or list(criteria)
         if feedback and feedback.get("next") == "REWORK" and feedback.get("target") in criteria:
             pending = [feedback["target"]]
         brief = scope["verifier"].get("manager_brief")
@@ -1156,9 +1267,15 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    f"{game_context}"
                                    f"Use the supplied context directly. Choose from {pending}. "
                                    "Reply with a single plain JSON object with keys criterion and plan. "
+                                   "For a planned document-only milestone, add mode: documentation and use only "
+                                   "approved document paths. Document progress does not satisfy functional checks. "
                                    "Keep the plan under 1000 characters. Request no broader permissions.")
             plan = _parse_plan(message, pending, game=bool(brief))
         key = plan["criterion"]
+        documentation = plan.get("mode") == "documentation"
+        planned_files = [name for name in scope["files"] if _documentation_path(name)] if documentation else scope["files"]
+        if documentation and not planned_files:
+            raise Blocked("문서 작업에 승인된 파일 경로가 없습니다.")
         tool = scope["verifier"]
         verification_args = tool.get("checks", {}).get(key, {}).get("args")
         if plan.get("mode") == "verify":
@@ -1166,7 +1283,14 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 raise Blocked("A review-only cycle requires an existing candidate")
             source = session.source()
             if source in reviewed:
-                raise Blocked("NO_PROGRESS")
+                stagnant += 1
+                session.record("native_inspection_replan", cycle=count, target=key, reason="REPEATED_REVIEW",
+                               consecutive_no_progress=stagnant, source_sha256=source)
+                if stagnant >= 2:
+                    return _save_progress_stop(session, count, accepted)
+                feedback = {"target": key, "next": "REWORK",
+                            "instruction": "This candidate was already reviewed. Choose a concrete change."}
+                continue
             reviewed.add(source)
             files = base["changed"]
             diff = "".join(line for name in files for line in unified_diff(
@@ -1184,29 +1308,50 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             visual_feedback = (f"Prior Reviewer findings (untrusted evidence): {feedback['review']}\n"
                                if feedback and feedback.get("next") == "REWORK" and "review" in feedback else "")
             _handoff(session, count, "developer", "Manager가 전달한 계획 · " + plan["plan"])
-            diff = session.call(count, "developer", key,
-                            f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\nPlan: {plan['plan']}\n"
-                            f"Only modify or create {scope['files']}. Preserve requirements, verification and Git. "
-                            f"{tool_context}{visual_feedback}"
-                            "Inspect the project and choose the implementation. Use installed tools only.")
+            try:
+                diff = session.call(count, "developer", key,
+                                    f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\nPlan: {plan['plan']}\n"
+                                    f"Only modify or create {planned_files}. Preserve requirements, verification and Git. "
+                                    f"{tool_context}{visual_feedback}"
+                                    "Inspect the project and choose the implementation. Use installed tools only.",
+                                    **({"allowed_paths": planned_files} if documentation else {}))
+            except NoDeveloperChange:
+                diff = ""
+            except Blocked as error:
+                if str(error) != "GRACEFUL_STOP":
+                    raise
+                return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP")
             identity = digest(session.image["files"])
-            if identity in known:
-                raise Blocked("NO_PROGRESS")
+            if not diff or identity in known:
+                stagnant += 1
+                if diff:
+                    accepted.clear()
+                reason = "NO_FILE_CHANGE" if not diff else "REPEATED_CANDIDATE"
+                session.record("native_inspection_replan", cycle=count, target=key, reason=reason,
+                               consecutive_no_progress=stagnant, source_sha256=session.source())
+                if stagnant >= 2:
+                    return _save_progress_stop(session, count, accepted)
+                if scope["cycles"] is not None and count >= scope["cycles"]:
+                    return _save_progress_stop(session, count, accepted, outcome="CYCLE_LIMIT")
+                feedback = {"target": key, "next": "REWORK", "review": (
+                    "The previous plan changed no approved files." if not diff
+                    else "The previous plan returned to a prior source state."),
+                    "instruction": "Choose a different bounded approach; do not repeat the same plan."}
+                continue
             known.add(identity)
             files = session.last_changed
         session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
-                                 "changed": files, "diff": diff,
+                                 "changed": files, "diff": diff, "documentation": documentation,
                                  "continuation": {"known": sorted(known), "reviewed": sorted(reviewed),
-                                                  "failures": sorted(failures), "stagnant": stagnant}}
+                                                  "failures": sorted(failures), "stagnant": stagnant,
+                                                  "accepted_without_functional_check": sorted(accepted)}}
         decision, review, finding, checked, comparison = _review_and_verify(session, count, key, diff, status)
         status = comparison["criteria"]
-        if comparison["newly_verified"] and not comparison["regressed"] and review == "ACCEPT":
-            stagnant = 0
-        else:
-            stagnant += 1
-        rework = review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"} or bool(comparison["regressed"])
+        stagnant = _cycle_stagnation(scope, key, review, checked, comparison, accepted, files, stagnant,
+                                     documentation=documentation)
         waiting_for_preview = (scope.get("visual_preview") and not comparison.get("visual_review_sha256"))
         expected = _expected_final(scope, key, comparison, review)
+        rework = expected == "REWORK"
         final = _decide(session, count, key, review, comparison, expected)
         session.signoff_state = {}
         if final == "COMPLETED":
@@ -1217,27 +1362,29 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 return MANUAL_CHECKPOINT
             return final
         if plan.get("mode") == "verify" and final != "REWORK":
-            return final
+            return _save_progress_stop(session, count, accepted, outcome=final)
         if "graceful_stop" in scope and session.stop_reason:
             feedback = {"target": key, "change_hash": digest(diff), "next": final}
             if (scope["cycles"] is None or count < scope["cycles"]) and save_if_requested():
                 return MANUAL_CHECKPOINT
-            return "GRACEFUL_STOP"
+            return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP")
+        repeated_failure = False
         if rework:
             failure = cycle_progress.failure_fingerprint(
                 "reviewer" if review != "ACCEPT" else "verifier",
                 [finding] if review != "ACCEPT" else checked["observations"],
                 digest(scope["verifier"]))
-            if failure in failures:
-                raise Blocked("NO_PROGRESS")
+            repeated_failure = failure in failures
             failures.add(failure)
         if stagnant >= 2:
-            raise Blocked("NO_PROGRESS")
+            return _save_progress_stop(session, count, accepted)
         feedback = {"target": key, "review": decision, "verifier": checked["observations"],
                     "change_hash": digest(diff), "next": final}
+        if repeated_failure:
+            feedback["instruction"] = "This finding repeats. Choose a different approach rather than repeating the previous plan."
         if waiting_for_preview:
             feedback["visual_review"] = checked.get("visual_preview", {}).get("reason", "NO_OWNED_GUI_CAPTURE")
-    return "CYCLE_LIMIT"
+    return _save_progress_stop(session, count, accepted, outcome="CYCLE_LIMIT")
 
 
 def _resume_contract(runner, events, head, project, expires, seconds, tokens, renew=False, *,
@@ -1418,6 +1565,8 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
         resume["visual"] = checkpoint["visual"]
     if checkpoint.get("pending_visual"):
         resume["pending_visual"] = checkpoint["pending_visual"]
+    if checkpoint.get("documentation"):
+        resume["documentation"] = True
     policy = game_pilot.graceful_policy(followup=True)
     policy["signoff_tokens"] = max(policy["signoff_tokens"], reservation)
     return ({**prior, "resume": resume, "replica_sha256": image, "ledger_head": head,
@@ -1586,7 +1735,7 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
     except Blocked as error:
         raise Blocked("보존된 응답의 판정을 확정할 수 없습니다. " + str(error)) from error
     resume = {key: checkpoint[key] for key in ("cycle", "criterion", "criteria_status", "changed", "continuation",
-                                               "review", "review_feedback", "comparison", "verification",
+                                               "review", "review_feedback", "comparison", "verification", "documentation",
                                                "visual", "pending_visual")
               if key in checkpoint}
     resume.update(mode="postprocess", parent_run_id=start["run_id"], saved_response=ref,
@@ -1629,6 +1778,8 @@ def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens
             raise Blocked("Original Git inventory changed after onboarding")
     resume = {key: checkpoint[key] for key in ("cycle", "criteria_status", "changed", "stagnant",
                                                "known", "reviewed", "failures", "feedback")}
+    if checkpoint.get("accepted_without_functional_check"):
+        resume["accepted_without_functional_check"] = checkpoint["accepted_without_functional_check"]
     resume.update(mode="next-cycle", parent_run_id=start["run_id"],
                   parent_reported_tokens=end["known_reported_tokens"])
     return ({**prior, "resume": resume, "replica_sha256": image, "ledger_head": head, "expires": expires,
@@ -1739,7 +1890,8 @@ def _resume_remaining(session, diff):
     postprocess = resume.get("mode") == "postprocess"
     session.changes = resume["changed_total"] if postprocess else session.scope["files"]
     session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
-                             "changed": resume["changed"], "diff": diff}
+                             "changed": resume["changed"], "diff": diff,
+                             "documentation": bool(resume.get("documentation"))}
     if resume.get("pending_visual"):
         session.signoff_state["pending_visual"] = resume["pending_visual"]
     if resume.get("continuation"):
@@ -1768,23 +1920,35 @@ def _resume_remaining(session, diff):
                                parent_run_id=resume["parent_run_id"], **resume["verification"])
             session.progress = comparison["criteria"]
             session.cycles_checked = count
+    if postprocess:
+        saved = resume.get("continuation") or {"known": [digest(session.image["files"])], "reviewed": [],
+                                               "failures": [], "stagnant": 0}
+        accepted = set(saved.get("accepted_without_functional_check", ()))
+        stagnant = _cycle_stagnation(session.scope, key, review, checked, comparison, accepted,
+                                    resume["changed"], saved["stagnant"],
+                                    documentation=bool(resume.get("documentation")))
+    elif resume.get("documentation") and not comparison.get("documentation_progress"):
+        _cycle_stagnation(session.scope, key, review, checked, comparison, set(), resume["changed"], 0,
+                          documentation=True)
     expected = _expected_final(session.scope, key, comparison, review)
     final = _decide(session, count, key, review, comparison, expected)
     if postprocess and final in {"CONTINUE", "REWORK"} and not session.stop_reason:
         feedback = {"target": key, "next": final, "change_hash": digest(diff),
                     "review": session.signoff_state.get("review_feedback", review),
                     "verifier": checked.get("observations", [])}
-        saved = resume.get("continuation") or {"known": [digest(session.image["files"])], "reviewed": [],
-                                               "failures": [], "stagnant": 0}
-        stagnant = (0 if comparison["newly_verified"] and not comparison["regressed"] and review == "ACCEPT"
-                    else saved["stagnant"] + 1)
         if stagnant >= 2:
-            raise Blocked("NO_PROGRESS")
+            return _save_progress_stop(session, count, accepted)
         session.signoff_state = {}
         return _cycles(session, continuation={**saved, "cycle": count, "stagnant": stagnant,
                                                "criteria_status": comparison["criteria"], "changed": session.changes,
+                                               "accepted_without_functional_check": sorted(accepted),
                                                "feedback": feedback})
-    return "GRACEFUL_STOP" if final == "CONTINUE" and getattr(session, "stop_reason", None) else final
+    if postprocess and final in {"CONTINUE", "REWORK"} and session.stop_reason:
+        return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP")
+    if final in {"CONTINUE", "REWORK"}:
+        outcome = "GRACEFUL_STOP" if final == "CONTINUE" and session.stop_reason else final
+        return _save_progress_stop(session, count, set(), outcome=outcome)
+    return final
 
 
 def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False, activity=None, pause=None):
@@ -1860,6 +2024,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 else:
                     outcome = _resume_remaining(session, diff) if resume else _cycles(session)
                 session.check_image()
+                if outcome == "NO_PROGRESS":
+                    reason = outcome
             except (Blocked, OSError, ValueError, KeyboardInterrupt) as error:
                 reason = "CANCELLED" if isinstance(error, KeyboardInterrupt) or cancelled() else str(error)
                 outcome = reason if reason in {"CANCELLED", "TIME_LIMIT", "TOKEN_LIMIT", "REQUEST_UNKNOWN",
@@ -1883,7 +2049,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             cleanup["preserve"] = preserve
         if preserve:
             cleanup = {"status": "RETAINED_FOR_RECOVERY", "workspace": lab.name}
-        if outcome in {"COMPLETED", MANUAL_CHECKPOINT} and cleanup.get("status") != "REMOVED":
+        if outcome in {"COMPLETED", MANUAL_CHECKPOINT, "NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP"} and cleanup.get("status") != "REMOVED":
             outcome = "CLEANUP_UNVERIFIED"
         receipt = {**fields, "kind": "native_inspection_result", "outcome": outcome, "reason": reason,
                    "cycle_count": session.cycles_checked, "approval_count": 2 if resume else 1,

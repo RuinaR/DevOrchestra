@@ -134,11 +134,13 @@ def _session_layout(panel, state):
     return body, footer
 
 
-def show(center, project, *, resume_only=False):
+def show(center, project, *, resume_only=False, continue_progress=False):
     runner = center.controller
     panel = center.panel()
     panel.title("등록 프로젝트 · Codex 개발 세션")
     state = tk.StringVar(panel, value="세션 검토를 누른 뒤 승인하면 자동 개발이 시작됩니다.")
+    if continue_progress:
+        state.set("기존 복제본을 유지합니다. 수정 파일 경로와 검증을 검토한 뒤 새 범위를 승인하세요.")
     body, footer = _session_layout(panel, state)
     try:
         data = Catalog(runner.ledger).read()["projects"][project]["data"]
@@ -208,8 +210,10 @@ def show(center, project, *, resume_only=False):
         entry.insert(0, draft.get(key, default))
         entry.grid(row=index, column=1, sticky="ew")
     inputs.columnconfigure(1, weight=1)
-    if baseline is not None and baseline["head"] is None and not baseline["files"]:
+    if baseline is not None and baseline["head"] is None and not baseline["files"] and not entries["files"].get():
         entries["files"].insert(0, "docs/PROJECT-PLAN.md")
+    ttk.Label(inputs, text="기획서만 지정하면 기획서만 편집합니다. 실제 구현에 필요한 새 소스·설정 파일 경로를 "
+              "여기에 추가하고 승인하세요.", wraplength=570).grid(row=len(entries), column=0, columnspan=2, sticky="w")
     ttk.Label(body, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
               wraplength=580).pack(anchor="w", pady=4)
     ttk.Label(body, text="빈 역할 입력은 전체 토큰 기준 내에서 해당 역할의 기본값을 사용합니다. "
@@ -518,6 +522,8 @@ def show(center, project, *, resume_only=False):
                 if result.get("visual_preview"):
                     summary += ("\nDeveloper가 세션 임시 폴더에 빌드한 Windows 앱을 오프라인 샌드박스에서 실행해 "
                                 "시작 화면을 캡처합니다. 화면이 준비되기 전에는 코드 검토를 계속합니다.")
+            if candidate := result.get("prior_replica_candidate"):
+                summary += "\n검증된 기존 복제본 변경 유지 · " + ", ".join(candidate["changed"])
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary, parent=panel):
                 launch(result)
             else:

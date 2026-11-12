@@ -30,6 +30,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             and row.get("probe_kind") == KIND and row.get("project_id") == project]
     scope = start["scope"]
     end = stop = None
+    latest_progress = {}
     cycle = scope.get("resume", {}).get("cycle", 0)
     roles, changed = {}, set()
     criteria = scope.get("resume", {}).get("criteria_status", {})
@@ -66,20 +67,22 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             changed.update(row["changed"])
         elif kind == "native_inspection_cycle_progress":
             criteria = row["criteria"]
+            latest_progress = row
         elif kind == "native_inspection_stop_requested":
             stop = row["reason"]
         elif kind == "native_inspection_result":
             end = row
     return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
             "end": end, "checkpoint_kind": rows[-2]["kind"] if end and len(rows) > 1 else None,
-            "cycle": cycle, "roles": roles, "stop": stop,
+            "cycle": cycle, "roles": roles, "stop": stop, "latest_progress": latest_progress,
             "history": [row for row in rows if row["kind"] in {
                 "native_inspection_role_intent", "native_inspection_role_result", "native_inspection_developer_diff",
                 "native_inspection_review_decision", "native_inspection_visual_review", "native_inspection_role_feedback",
                 "native_inspection_role_reused", "native_inspection_decision_applied",
                 "native_inspection_decision_rejected", "native_inspection_postprocess_failed",
                 "native_inspection_manager_plan_reused", "native_inspection_developer_skipped",
-                "native_inspection_manual_checkpoint"}],
+                "native_inspection_manual_checkpoint", "native_inspection_progress_checkpoint",
+                "native_inspection_replan"}],
             "changed": end.get("changed", []) if end else sorted(changed),
             "criteria": end.get("criteria_status", {}) if end else criteria,
             "tokens": end.get("known_reported_tokens", tokens) if end else tokens,
