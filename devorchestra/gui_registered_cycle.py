@@ -1,5 +1,6 @@
 """Command Center entry point for an owner-approved registered Codex session."""
 from concurrent.futures import Future
+from base64 import b64encode
 import json
 from pathlib import Path
 import sqlite3
@@ -8,7 +9,7 @@ from time import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from . import codex_setup, cycle_progress, game_pilot, registered_cycle, replica_readiness
+from . import codex_setup, cycle_progress, game_pilot, registered_cycle, replica_readiness, visual_review as visual
 from .catalog import Catalog
 from .ledger import digest
 
@@ -52,6 +53,42 @@ def _remaining_signoff(checkpoint):
     if checkpoint.get("review") is not None:
         return "독립 Verifier → 최종 Manager"
     return "Reviewer → 독립 Verifier → 최종 Manager"
+
+
+def _open_visual_report(center, runner, project):
+    panel = center.panel()
+    panel.title("소유 창 캡처와 AI 시각 검토")
+    panel.geometry("740x600")
+    display = center.editor_box(panel, height=20)
+    try:
+        report = next((row for row in reversed(registered_cycle.history(runner.ledger, project))
+                       if row["kind"] == "native_inspection_visual_review"), None)
+        if report is None:
+            display.insert("end", "시각 검토 응답이 아직 없습니다.")
+        else:
+            display.insert("end", f"{report['status']} · {report['verdict']} · 발견 {len(report['findings'])}건\n")
+            for observation in report.get("observations", ()):
+                display.insert("end", f"{observation['frame']} · {observation['visible']}\n")
+            for unverified in report.get("not_verified", ()):
+                display.insert("end", f"NOT_VERIFIED · {unverified}\n")
+            if code := report.get("code_finding"):
+                display.insert("end", f"코드 결함 · {code['file']} · {code['observed']}\n")
+            for item in report["findings"]:
+                display.insert("end", f"{item['id']} · {item['severity']} · {item['frame']} · {item['observed']}\n"
+                                      f"기대 {item['expected']}\n재현 {item['reproduce']}\n수정 {item['fix']}\n"
+                                      f"근거 {item['basis']} · 불확실성 {item['uncertainty']}\n")
+            panel.visual_images = []
+            for frame, data in zip(report["frames"], visual.read_frames(runner.ledger, report["frames"]), strict=True):
+                picture = tk.PhotoImage(master=panel, data=b64encode(data))
+                factor = max(1, (picture.width() + 639) // 640)
+                picture = picture.subsample(factor) if factor > 1 else picture
+                panel.visual_images.append(picture)
+                display.insert("end", f"\n{frame['id']} · {frame['step']} · {frame['width']}×{frame['height']}\n")
+                display.image_create("end", image=picture)
+                display.insert("end", "\n")
+    except (OSError, RuntimeError, ValueError, sqlite3.Error, tk.TclError) as error:
+        display.insert("end", f"캡처 기록을 열 수 없습니다. {error}")
+    display.configure(state="disabled")
 
 
 def _session_layout(panel, state):
@@ -136,9 +173,14 @@ def show(center, project):
     is_godot = baseline is not None and any(name.casefold() == "project.godot" for name in baseline["files"])
     draft = center.development_budget_drafts.setdefault(project, {})
     grants = _permission_checkboxes(body, draft)
+    use_images = tk.BooleanVar(panel, value=False)
+    ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
+                    variable=use_images).pack(anchor="w", pady=(0, 6))
+    ttk.Button(body, text="시각 검토 결과와 캡처 보기",
+               command=lambda: _open_visual_report(center, runner, project)).pack(anchor="w")
     if is_godot and project == game_pilot.PROJECT:
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
-        _game_preflight(center, panel, body, footer, runner, state, grants)
+        _game_preflight(center, panel, body, footer, runner, state, grants, use_images)
         return
     ttk.Button(body, text="등록 목표·기준 편집",
                command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
@@ -282,6 +324,12 @@ def show(center, project):
             lines.append(text)
         if stop:
             lines.append(f"종료 예약 · {stop['reason']} · 현재 작업 마무리")
+        for row in rows:
+            if row["kind"] == "native_inspection_visual_review":
+                lines.append(f"{row['cycle']} · {row['status']} · {row['verdict']} · 발견 {len(row['findings'])}건")
+                lines.extend(f"{item['severity']} · {item['frame']} · {item['observed']}" for item in row["findings"])
+            elif row["kind"] == "native_inspection_visual_integrity":
+                lines.append(f"{row['cycle']} · 캡처 무결성 · {row['result']}")
         if end:
             lines.extend((f"{end['outcome']} · {end['cycle_count']}회 · {end['known_reported_tokens']} 토큰",
                           f"변경: {', '.join(end['changed']) or '없음'}",
@@ -301,7 +349,7 @@ def show(center, project):
             save_budget()
             panel.destroy()
 
-    def submit(args, approval=None, *, resume=False, soft_limits=None, graceful=False):
+    def submit(args, approval=None, *, resume=False, soft_limits=None, graceful=False, visual_review=False):
         nonlocal future, active
         future = Future()
         active = True
@@ -321,7 +369,8 @@ def show(center, project):
                     registered_cycle.verify_resume_candidate(runner, project, cancelled=cancelled.is_set)
                 review_fn = registered_cycle.review_resume if resume else registered_cycle.review
                 run_fn = registered_cycle.run_resume if resume else registered_cycle.run
-                options = {"graceful": graceful} if resume else {"soft_limits": soft_limits}
+                options = ({"graceful": graceful} if resume else
+                           {"soft_limits": soft_limits, "visual_review": visual_review})
                 result = (review_fn(runner, *args, **options) if approval is None
                           else run_fn(runner, *args, approval=approval, cancelled=cancelled.is_set, **options))
                 future.set_result(result)
@@ -361,6 +410,8 @@ def show(center, project):
                            f"최종 Manager {result['role_tokens']['manager-final']:,}토큰\n"
                            f"{_remaining_signoff(checkpoint)} · 모델 최대 {result['model_calls_max']}회. "
                            "Developer 재호출과 원본 반영은 없습니다.")
+                if result.get("visual_review") and not checkpoint.get("review"):
+                    summary += "\n소유 테스트 창 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                 if center.confirm("추가 예산 및 중단 작업 재개 승인", summary, parent=panel):
                     submit(args, digest(result), resume=True, graceful=graceful)
                 else:
@@ -392,8 +443,11 @@ def show(center, project):
                             "토큰은 호출 전 잔여량과 공급자 응답 후 사용량을 확인합니다. "
                             "마무리 최대 1,800초·300,000토큰. 역할 유예 최대 900초. "
                             "무응답 600초, 도구 실행 중 무응답 1,200초에서 소유 Job을 회수합니다.")
+            if result.get("visual_review"):
+                summary += ("\n사이클마다 소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다. "
+                            "검토는 Reviewer 토큰 기준에 포함됩니다.")
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary, parent=panel):
-                submit(args, digest(result), soft_limits=soft_limits)
+                submit(args, digest(result), soft_limits=soft_limits, visual_review=visual_review)
             else:
                 state.set("실행 승인 취소됨")
 
@@ -446,7 +500,7 @@ def show(center, project):
             state.set(str(error))
             return
         cancelled.clear()
-        submit(args, soft_limits=limits)
+        submit(args, soft_limits=limits, visual_review=use_images.get())
 
     def resume():
         try:
@@ -506,7 +560,7 @@ def show(center, project):
     render()
 
 
-def _game_preflight(center, panel, body, footer, runner, state, grants):
+def _game_preflight(center, panel, body, footer, runner, state, grants, use_images):
     cancelled = Event()
     future = None
 
@@ -519,6 +573,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants):
 
     def start(export_windows=False, *, online=False, resume=False):
         nonlocal future
+        visual_review = online and not resume and use_images.get()
         limits = None
         if online and not resume:
             if _checked_permissions(grants, state) is None:
@@ -571,10 +626,11 @@ def _game_preflight(center, panel, body, footer, runner, state, grants):
                         result = registered_cycle.run_resume(runner, *resume_args, approval=approval,
                                                              cancelled=cancelled.is_set, graceful=graceful)
                     elif approval is None:
-                        result = registered_cycle.review_game(runner, archive, expires, limits)
+                        result = registered_cycle.review_game(runner, archive, expires, limits,
+                                                              visual_review=visual_review)
                     else:
                         result = registered_cycle.run_game(runner, archive, expires, limits, approval=approval,
-                                                           cancelled=cancelled.is_set)
+                                                           cancelled=cancelled.is_set, visual_review=visual_review)
                     future.set_result(result)
                 except Exception as error:
                     future.set_exception(error)
@@ -634,6 +690,8 @@ def _game_preflight(center, panel, body, footer, runner, state, grants):
                                         f"{policy['tool_idle_seconds']:,}초, 마무리 {policy['signoff_seconds']:,}초. "
                                         f"마무리 토큰 {policy['signoff_tokens']:,}은 "
                                         f"{'세션 기준 잔여량 내' if policy['signoff_within_session_tokens'] else '별도 예산'}에서 사용합니다.")
+                        if result.get("visual_review") and (not resume or not result["resume"].get("review")):
+                            summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                         if center.confirm(title, summary, parent=panel):
                             submit(digest(result))
                         else:

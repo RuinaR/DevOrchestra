@@ -436,9 +436,13 @@ class _FixtureSession:
 
     def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None, shell_tools=True,
                  decision_parser=None,
-                 context="This is an isolated arithmetic fixture.", extra_read_roots=(), scratch_root=None):
+                 context="This is an isolated arithmetic fixture.", extra_read_roots=(), scratch_root=None,
+                 images=(), image_evidence=()):
         self.check()
         self.check_image()
+        if images and (phase != "reviewer" or shell_tools or not self.scope.get("visual_review")
+                       or len(images) != len(image_evidence)):
+            raise Blocked("Image attachments require the approved read-only Reviewer")
         limit = self.scope["role_tokens"][phase]
         graceful = "graceful_stop" in self.scope
         if self.calls >= self.scope["model_calls_max"]:
@@ -455,7 +459,8 @@ class _FixtureSession:
                   "Use only the approved fixture scope. No external actions.\n" + prompt)
         self.calls += 1
         self.record("native_inspection_role_intent", cycle=cycle, phase=phase, target=target,
-                    role_call=self.calls, source_sha256=self.source(), prompt_sha256=digest(prompt))
+                    role_call=self.calls, source_sha256=self.source(), prompt_sha256=digest(prompt),
+                    **({"image_evidence": list(image_evidence)} if images else {}))
         role_log = self.logs(f"{cycle}-{phase}")
         self.check()
         self.owned_verified = False
@@ -477,7 +482,8 @@ class _FixtureSession:
         try:
             result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
                                                       tool_root=tool_root, shell_tools=shell_tools,
-                                                      extra_read_roots=extra_read_roots, scratch_root=scratch_root),
+                                                      extra_read_roots=extra_read_roots, scratch_root=scratch_root,
+                                                      images=images),
                               self.work, role_log, self.env, seconds=timeout, check=observed_check,
                               output_limit=output_limit, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
                               memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2)

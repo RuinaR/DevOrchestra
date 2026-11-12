@@ -253,7 +253,10 @@ class RegisteredCycleTests(unittest.TestCase):
             text = next(widget for widget in children if isinstance(widget, tk.Text))
             text.delete("1.0", "end")
             text.insert("1.0", json.dumps(params[-1]))
-            for checkbox in (widget for widget in children if isinstance(widget, ttk.Checkbutton)):
+            from devorchestra.gui_registered_cycle import LABELS
+
+            for checkbox in (widget for widget in children
+                             if isinstance(widget, ttk.Checkbutton) and widget["text"] in LABELS.values()):
                 if not checkbox.instate(["selected"]):
                     checkbox.invoke()
             confirmations = []

@@ -1,5 +1,9 @@
 # 개발 인수인계
 
+등록 개발 창에서 **AI 시각 검토**를 선택하면 승인 범위에 이미지 전달이 포함된다. Godot 소유 창 검사나 기준별 소유 창 검사 한두 개를 사용한다. 개발자가 끝나면 기존 Verifier 실행 경로로 캡처를 수집하고, Reviewer 호출 뒤 후보 해시와 이미지를 재확인한다. 결과와 캡처는 개발 세션 창에서 조회한다. 화면 비교는 승인된 고정 입력 시나리오를 사용한다. 실제 온라인 결함 발견과 재작업을 검증하려면 별도 승인된 합성 프로젝트에서 전후 캡처로 한 번의 수정을 관측한다. 이전에 승인한 Reviewer 지침 해시와 현재 지침이 다르면 기존 승인으로 새 Reviewer를 실행할 수 없다.
+
+공식 Codex 0.167.1에서 CLI는 `codex exec --image FILE`, App Server는 `turn/start.input`의 `localImage`, TypeScript SDK는 `thread.run`의 `local_image`를 사용한다. 이 구현은 기존 ChatGPT 구독 로그인과 CLI JSON 이벤트를 유지한다. 모델별 입력 형식은 App Server의 `model/list.inputModalities`에서 확인할 수 있다. DevOrchestra는 내부 캡처 PNG를 최대 네 장, 각 4 MiB와 2048×2048 이내로 제한한다. 이미지 비용은 Reviewer 호출에서 제공자가 보고한 사용량으로 관리하며 이미지 전용 토큰을 추정하지 않는다. [CLI 옵션](https://learn.chatgpt.com/docs/cli/reference) · [App Server](https://learn.chatgpt.com/docs/app-server) · [0.167.1 TypeScript SDK](https://github.com/openai/codex/blob/rust-v0.167.1/sdk/typescript/src/thread.ts)
+
 Command Center의 **검증된 EXE · 사용자 플레이 기록**에서 현재 후보를 실행하고 관찰을 저장한다. 새 승인으로 게임 계획을 세울 때 Manager는 해당 후보의 사용자 평가와 보존된 Reviewer·최종 Manager의 지적을 참고할 수 있다. 기존 후보에 수정이 필요하지 않으면 계획에 `mode: verify`를 넣어 Developer를 건너뛰고 실제 diff를 Reviewer와 Verifier가 검토한다. 사용자 평가를 근거로 동결 기준을 자동 통과시키지는 않는다. 모델 판정 원문 대신 짧은 근거, 기준, 대상 파일, 우선순위, 응답 해시를 비공개 원장에 남긴다.
 
 Lantern Ruins의 오프라인 재작업 후보는 결과 화면과 재시작 초기화 수정 후 Windows 내보내기 및 실제 시간 키 입력 검사를 통과했다. 검증 스크립트는 `tools/lantern-ruins-playcheck.gd`에 있다. 새 작업은 Command Center에서 **Windows EXE 내보내기 및 오프라인 검증**으로 확정한 후보를 **게임 온라인 개발 검토**에서 검토해 승인한다. 이전 Reviewer의 상세 지적은 원문이 보존되지 않아 확인할 수 없다. 승리·실패·재시작의 재현 근거를 사용하고, 첫 플레이의 난이도와 시각 품질을 별도로 확인한다.

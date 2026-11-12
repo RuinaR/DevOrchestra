@@ -466,7 +466,8 @@ def _preflight(work, data, lab, observe, check, workers, manifest, script, asset
     return None
 
 
-def _export_release(ledger, run_id, replica, data, lab, observe, check, workers, result, *, generic=False):
+def _export_release(ledger, run_id, replica, data, lab, observe, check, workers, result, *, generic=False,
+                    visual=False):
     release = data / "release"
     release.mkdir()
     exe = release / "GamePilot.exe"
@@ -484,7 +485,7 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
         raise Blocked("Windows export produced unexpected sidecar files")
     result["export"] = "WINDOWS_X64_EXPORTED"
     screenshot = data / "exported-window.png"
-    before_input = data / "before-input.png" if generic else None
+    before_input = data / "before-input.png" if generic or visual else None
 
     def interact(api, job, deadline):
         observed = _inspect_export(api, job, deadline, check, screenshot, workers, before_input=before_input)
@@ -499,9 +500,9 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
     output.mkdir()
     license_path = replica / "assets" / "kenney" / "License.txt"
     files = [(exe, exe.name), (screenshot, screenshot.name)]
-    if generic:
+    if before_input is not None:
         files.append((before_input, before_input.name))
-    else:
+    if not generic:
         files.append((license_path, "Kenney-LICENSE.txt"))
     for source, name in files:
         check_path(source)
@@ -514,7 +515,7 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
         raise Blocked("Preserved export differs from the executable that was tested")
     result.update(outcome="PASS", gui="EXPORTED_WINDOW_CAPTURED_AND_CLOSED", executable=identity,
                   artifact_directory=output.name, window_image_path=screenshot.name,
-                  input=("SPACE_AND_CLIENT_CLICK_SENT_RESPONSE_NOT_VALIDATED" if generic
+                  input=("SPACE_AND_CLIENT_CLICK_SENT_RESPONSE_NOT_VALIDATED" if before_input is not None
                          else "SPACE_MESSAGES_SENT_RESPONSE_NOT_VALIDATED"))
 
 
@@ -566,7 +567,8 @@ def verify_development(session, cycle):
 
     try:
         _export_release(ledger, f"{session.fields['run_id']}-cycle-{cycle}", session.work,
-                        data, lab, observe, session.check, workers, result, generic=generic)
+                        data, lab, observe, session.check, workers, result, generic=generic,
+                        visual=scope.get("visual_review", False))
     except Blocked as error:
         if not session.owned_verified or str(error) == "SIGNOFF_PENDING":
             raise

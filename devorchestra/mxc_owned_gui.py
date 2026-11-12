@@ -177,6 +177,7 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
                     sleep(0.03)
                 if before_input is not None:
                     before = _capture(window, before_input, workers)
+                    before["captured_at"] = datetime.now(timezone.utc).isoformat()
                 window.message("root", 0x0100, 0x20, 0x00390001)  # WM_KEYDOWN, Space
                 window.message("root", 0x0101, 0x20, 0xC0390001)  # WM_KEYUP
                 if before_input is not None:
@@ -186,6 +187,7 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
                 after = _capture(window, image_path, workers)
                 result = {"image": after, "initial_size": list(initial), "resized": list(requested)}
                 if before_input is not None:
+                    after["captured_at"] = datetime.now(timezone.utc).isoformat()
                     result.update(before_input=before, screen_changed=before["sha256"] != after["sha256"],
                                   input="SPACE_AND_CLIENT_CLICK_SENT")
                 return result

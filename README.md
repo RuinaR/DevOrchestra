@@ -30,6 +30,7 @@ DevOrchestra는 Windows에서 Codex 개발을 관리하는 Command Center입니�
 - Godot 파일럿은 Windows 내보내기와 독립 플레이 검증 증거를 갖췄습니다. 전체 게임의 최종 완료 판정은 대기 중입니다.
 - 다른 Windows 계정의 공식 로그인부터 실제 자동 개발까지 이어지는 신규 설치 종단 간 검증은 릴리스 합격 조건입니다. 현재 증거는 [현재 상태](https://github.com/RuinaR/DevOrchestra/blob/main/docs/CURRENT-STATUS.md)와 [릴리스 검증표](https://github.com/RuinaR/DevOrchestra/blob/main/docs/WINDOWS-RELEASE-QA.md)에 기록합니다.
 - 로컬 GUI 캡처는 릴리스 검증 자료에 포함합니다. 사용자의 원장, 인증 홈과 실제 프로젝트는 로컬 저장소에서 관리합니다.
+- 등록 프로젝트에서 **AI 시각 검토**를 선택하면 최종 승인 범위에 소유 테스트 창 캡처의 Codex 전달이 포함됩니다. 분석 응답과 캡처는 개발 세션 창에서 확인할 수 있습니다.
 
 ## 개발 및 빌드
 

@@ -181,16 +181,20 @@ def _check_dedicated_config(home, temporary, *, approved_replicas=()):
             raise Blocked("Dedicated Codex home contains settings outside trial-generated trust entries")
 
 
-def _check_cached_model(home, model):
+def _check_cached_model(home, model, *, requires_image=False):
     if not re.fullmatch(r"[a-z0-9_.-]{1,64}", model):
         raise Blocked("Invalid Codex model identifier")
     path = home / "models_cache.json"
     check_path(path)
     if path.exists():
         cache = json.loads(_read_observation(path, 2 * 1024 * 1024))
-        if not any(row.get("slug") == model and row.get("visibility") == "list"
-                   for row in cache.get("models", []) if type(row) is dict):
+        entry = next((row for row in cache.get("models", []) if type(row) is dict
+                      and row.get("slug") == model and row.get("visibility") == "list"), None)
+        if entry is None:
             raise Blocked("Approved model is absent from the dedicated CLI model catalog")
+        modalities = entry.get("input_modalities")
+        if requires_image and modalities is not None and (type(modalities) is not list or "image" not in modalities):
+            raise Blocked("The dedicated Codex model catalog does not advertise image input")
 
 
 def _verify_output(binary, work, output, environment, check, *, test_command="call total.cmd 3"):
@@ -202,11 +206,16 @@ def _verify_output(binary, work, output, environment, check, *, test_command="ca
 
 
 def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tools=True,
-               extra_read_roots=(), scratch_root=None):
+               extra_read_roots=(), scratch_root=None, images=()):
+    attachments = []
+    for path in images:
+        if not path.is_absolute() or "," in str(path):
+            raise Blocked("Codex image attachment path is ambiguous")
+        attachments.extend(("--image", str(path)))
     return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root, shell_tools=shell_tools,
                          extra_read_roots=extra_read_roots, scratch_root=scratch_root),
             "exec", "--ignore-user-config", "--json",
-            "--ephemeral", "--model", model, "--cd", str(work), prompt]
+            "--ephemeral", "--model", model, "--cd", str(work), *attachments, prompt]
 
 
 def _diagnostic(events):
