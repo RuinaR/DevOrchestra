@@ -126,11 +126,24 @@ def section(parent, name):
     return frame
 
 
+def on_width(widget, resize):
+    width = None
+
+    def configure(event):
+        nonlocal width
+        if event.width != width:
+            width = event.width
+            resize(width)
+
+    widget.bind("<Configure>", configure, add="+")
+
+
 class CommandCenter:
     def __init__(self, root, reader):
         self.root = root
         self.reader = reader
         self.view = None
+        self.first_run = False
         self.event_lookup = {}
         self.project_ids = list(PROJECTS)
         self.run_options = {}
@@ -139,7 +152,7 @@ class CommandCenter:
         self.gui_verification_cancel = None
         self.shutdown_notice = None
         self.question_window = None
-        self.page = "dashboard"
+        self.page = None
         self.audit_page = 0
         self.projection_lock = Lock()
         self.poll_future = None
@@ -182,7 +195,6 @@ class CommandCenter:
 
         command = tk.Frame(body, bg=BG)
         self.command_frame = command
-        command.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, ui_design.GAP))
         command.columnconfigure(0, weight=1)
         projects = section(command, "프로젝트와 요구사항")
         projects.grid(row=0, column=0, sticky="ew")
@@ -200,7 +212,7 @@ class CommandCenter:
         self.mission.pack(fill="x", pady=(4, 0))
         self.goal = label(mission, fg=MUTED)
         self.goal.pack(fill="x")
-        mission.bind("<Configure>", lambda e: self.goal.configure(wraplength=max(240, e.width - 40)))
+        on_width(mission, lambda width: self.goal.configure(wraplength=max(240, width - 40)))
         self.development_button = ttk.Button(mission, text="개발 시작", command=self.development_start,
                                              style="Primary.TButton", state="disabled")
         self.development_button.pack(fill="x", pady=(8, 2))
@@ -229,8 +241,11 @@ class CommandCenter:
         self.safety.pack(fill="x", pady=(5, 0))
         self.resources = label(safety)
         self.resources.pack(fill="x")
-        safety.bind("<Configure>", lambda e: [widget.configure(wraplength=max(230, e.width - 40))
-                                             for widget in (self.safety, self.resources)])
+        def wrap_safety(width):
+            for widget in (self.safety, self.resources):
+                widget.configure(wraplength=max(230, width - 40))
+
+        on_width(safety, wrap_safety)
         controls = tk.Frame(safety, bg=PANEL)
         controls.pack(fill="x")
         self.shutdown_label = label(safety, fg=AMBER)
@@ -300,6 +315,9 @@ class CommandCenter:
             "operations": (mission, safety, operations), "verification": (verification,),
             "approval": (approval,), "records": (audit, safety), "settings": (settings,),
         }
+        command.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, ui_design.GAP))
+        for frame in {frame for frames in self.page_frames.values() for frame in frames}:
+            frame.grid_remove()
         self.navigation = {}
         label(rail, "운영 공간", 9, bg=ui_design.RAIL, fg=MUTED).pack(anchor="w", pady=(0, 8))
         for key, title in (("dashboard", "01  대시보드"), ("projects", "02  프로젝트"),
@@ -328,10 +346,8 @@ class CommandCenter:
         buttons = [ttk.Button(area, text=title, command=action, style=style) for title, action in actions]
         columns = None
 
-        def flow(width):
+        def set_columns(updated):
             nonlocal columns
-            required = max(button.winfo_reqwidth() for button in buttons)
-            updated = 2 if width >= (required + 6) * 2 else 1
             if updated == columns:
                 return
             columns = updated
@@ -340,17 +356,20 @@ class CommandCenter:
             for index, button in enumerate(buttons):
                 button.grid(row=index // columns, column=index % columns, sticky="ew", padx=3, pady=3)
 
-        area.bind("<Configure>", lambda event: flow(event.width))
-        flow(0)
+        def flow(width):
+            required = max(button.winfo_reqwidth() for button in buttons)
+            set_columns(2 if width >= (required + 6) * 2 else 1)
+
+        on_width(area, flow)
+        set_columns(2)
 
     @staticmethod
     def flow_cards(parent, cards, minimum):
         scale = max(1, float(parent.tk.call("tk", "scaling")) * 72 / 96)
         columns = None
 
-        def layout(width):
+        def layout(count):
             nonlocal columns
-            count = min(len(cards), max(1, int(width / (minimum * scale))))
             if count == columns:
                 return
             columns = count
@@ -361,22 +380,33 @@ class CommandCenter:
                 card.grid(row=index // columns, column=index % columns, sticky="nsew",
                           padx=(0, 5), pady=(0, 5), ipadx=3, ipady=3)
 
-        parent.bind("<Configure>", lambda event: layout(event.width))
-        layout(0)
+        on_width(parent, lambda width: layout(min(len(cards), max(1, int(width / (minimum * scale))))))
+        layout(len(cards))
 
     def navigate(self, page):
+        previous = self.page
+        if previous == page:
+            self.workspace_canvas.yview_moveto(0)
+            return
         details_changed = getattr(self, "details_visible", False) != (page == "operations")
         visible = set(self.page_frames[page])
-        for frame in {frame for group in self.page_frames.values() for frame in group}:
-            (frame.grid if frame in visible else frame.grid_remove)()
+        outgoing = set(self.page_frames[previous]) if previous else set()
+        for frame in outgoing - visible:
+            frame.grid_remove()
+        safety = self.page_frames["operations"][1]
+        for frame in self.page_frames[page]:
+            if frame is safety:
+                frame.grid(row=9 if page == "records" else 6)
+            elif frame not in outgoing:
+                frame.grid()
         self.page = page
         self.details_visible = page == "operations"
-        (self.command_frame.grid if page in ("dashboard", "projects", "operations")
-         else self.command_frame.grid_remove)()
-        if page in ("records", "operations"):
-            self.page_frames["operations"][1].grid_configure(row=9 if page == "records" else 6)
-        for key, item in self.navigation.items():
-            item.configure(style="RailActive.TButton" if key == page else "Rail.TButton")
+        command_pages = ("dashboard", "projects", "operations")
+        if (page in command_pages) != (previous in command_pages):
+            (self.command_frame.grid if page in command_pages else self.command_frame.grid_remove)()
+        if previous:
+            self.navigation[previous].configure(style="Rail.TButton")
+        self.navigation[page].configure(style="RailActive.TButton")
         self.workspace_canvas.yview_moveto(0)
         if self.view and details_changed:
             self.render()
@@ -442,8 +472,9 @@ class CommandCenter:
         content = tk.Frame(canvas, bg=BG)
         content.grid_columnconfigure(0, weight=1)
         embedded = canvas.create_window(0, 0, window=content, anchor="nw")
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(embedded, width=event.width))
-        content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        on_width(canvas, lambda width: canvas.itemconfigure(embedded, width=width))
+        content.bind("<Configure>", lambda event: canvas.configure(
+            scrollregion=(0, 0, event.width, event.height)))
 
         def wheel(event):
             widget = event.widget
@@ -671,6 +702,7 @@ class CommandCenter:
 
     def clear(self, reason, *, first_run=False):
         self.view = None
+        self.first_run = first_run
         if hasattr(self, "shutdown_buttons"):
             self.render_shutdown()
         self.global_badge.configure(text="처음 시작" if first_run else "저장소 확인 필요",
@@ -2637,8 +2669,11 @@ def main():
         root.mainloop()
         return
     root = tk.Tk()
+    root.withdraw()
     center = CommandCenter(root, ProjectionReader(ledger))
-    if ledger.storage_status()["status"] == "NOT_INITIALIZED":
+    root.update_idletasks()
+    root.deiconify()
+    if center.first_run:
         root.after_idle(center.setup_wizard)
     root.mainloop()
 
