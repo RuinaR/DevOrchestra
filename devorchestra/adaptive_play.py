@@ -16,6 +16,9 @@ from .role_contract import _unique_object
 
 STEPS = 3
 SECONDS = 360
+GODOT_INPUTS = 16
+GODOT_DECISIONS = 24
+GODOT_SECONDS = 720
 MAX_HOLD_MS = 600
 MAX_KEYS = 3
 GAME_EXECUTABLE_LIMIT = 256 * 1024**2
@@ -24,16 +27,32 @@ KEYS = {**{name: ord(name) for name in "WASDQEZXRFCV"},
         "UP": 0x26, "DOWN": 0x28, "LEFT": 0x25, "RIGHT": 0x27,
         "SPACE": 0x20, "ENTER": 0x0D, "ESC": 0x1B}
 ACTIONS = ("keys", "click", "move", "wait", "observe", "stop")
+INPUT_ACTIONS = frozenset(("keys", "click", "move"))
 
 
-def approval():
+def _legacy_approval():
     return {"steps": STEPS, "seconds": SECONDS, "keys": sorted(KEYS), "actions": list(ACTIONS),
             "max_keys": MAX_KEYS, "max_hold_ms": MAX_HOLD_MS}
 
 
-def verify_action_chain(frames, actions, source):
+def approval(*, godot=False):
+    return {**_legacy_approval(), "steps": GODOT_DECISIONS if godot else 6,
+            "seconds": GODOT_SECONDS if godot else SECONDS, "input_steps": GODOT_INPUTS if godot else STEPS}
+
+
+def review_frames(frames):
+    if len(frames) <= visual.MAX_FRAMES:
+        return frames
+    last = len(frames) - 1
+    return [frames[index * last // (visual.MAX_FRAMES - 1)] for index in range(visual.MAX_FRAMES)]
+
+
+def verify_action_chain(frames, actions, source, *, policy=None):
     """Check the ordered Controller receipts independently of the model's visual verdict."""
-    if (not 1 <= len(frames) <= STEPS + 1 or len(frames) != len(actions) + 1
+    policy = _legacy_approval() if policy is None else policy
+    input_count = sum(row["action"]["action"] in INPUT_ACTIONS for row in actions)
+    if (not 1 <= len(frames) <= policy["steps"] + 1 or len(frames) != len(actions) + 1
+            or input_count > policy.get("input_steps", policy["steps"])
             or len({frame["executable_sha256"] for frame in frames}) != 1
             or any(frame["source_sha256"] != source or frame["id"] != f"P{index}"
                    for index, frame in enumerate(frames))):
@@ -43,7 +62,7 @@ def verify_action_chain(frames, actions, source):
         if (row["step"], row["before"], row["after"], row["result"]) != (
                 index, before, after, "SCREEN_CHANGED" if before != after else "SCREEN_UNCHANGED"):
             raise Blocked("Adaptive play action does not match its before and after frames")
-    return sum(row["action"]["action"] in {"keys", "click", "move"} and row["result"] == "SCREEN_CHANGED"
+    return sum(row["action"]["action"] in INPUT_ACTIONS and row["result"] == "SCREEN_CHANGED"
                for row in actions)
 
 
@@ -142,12 +161,15 @@ def run(session, cycle, key, verification, context):
     """Execute one play attempt. Inputs have intent and receipt records and are never replayed."""
     session.check()
     session.check_image()
-    if session.scope.get("adaptive_play") != approval():
+    policy = session.scope.get("adaptive_play")
+    if policy not in (_legacy_approval(), approval(), approval(godot=True)):
         raise Blocked("Approved play action limits changed")
     target = _candidate(session, cycle, verification)
     if target is None or not _budget(session):
         return [], [], "NO_PLAYABLE_CANDIDATE" if target is None else "PLAY_BUDGET"
     directory, name, expected, args = target
+    if policy == approval(godot=True) and name != "GamePilot.exe":
+        return [], [], "NO_PLAYABLE_CANDIDATE"
     binary = directory / name
     check_path(binary)
     bundle_options = {}
@@ -176,6 +198,7 @@ def run(session, cycle, key, verification, context):
     model_clear, game_clear = True, False
     outcome = "STEP_LIMIT"
     started = monotonic()
+    input_limit = policy.get("input_steps", policy["steps"])
     session.record("native_inspection_play_started", cycle=cycle, target=key, source_sha256=session.source(),
                    executable_sha256=expected, bundle_sha256=digest(bundle), backend="CODEX_IMAGE_OWNED_WINDOW")
 
@@ -206,7 +229,8 @@ def run(session, cycle, key, verification, context):
                 outcome = "FOREGROUND_UNSAFE"
                 return
             client = observe()
-            for step in range(1, STEPS + 1):
+            input_count = 0
+            for step in range(1, policy["steps"] + 1):
                 session.soft_boundary("reviewer")
                 if not _budget(session):
                     outcome = "PLAY_BUDGET"
@@ -215,7 +239,8 @@ def run(session, cycle, key, verification, context):
                 frame = frames[-1]
                 paths = visual.stage(ledger, [frame], session.logs(f"{cycle}-play-input-{step}"))
                 prompt = (f"{context}\nUse the attached real frame {frame['id']} to choose ONE next action. "
-                          f"Prior verified input receipts: {json.dumps(actions)}. "
+                          f"Recent action receipts: {json.dumps(actions[-4:])}. "
+                          f"Remaining: {input_limit - input_count} inputs and {policy['steps'] - step + 1} decisions. "
                           f"Client origin and size within image: {client}. x,y are client-relative. "
                           f"Allowed keys {', '.join(KEYS)}. Up to {MAX_KEYS} held together for 30–{MAX_HOLD_MS}ms; "
                           "click/move use coordinates and ms=0; wait uses 30–600ms; observe and stop use zero values. "
@@ -269,16 +294,21 @@ def run(session, cycle, key, verification, context):
                        "result": "SCREEN_CHANGED" if changed else "SCREEN_UNCHANGED",
                        "before": frame["sha256"], "after": frames[-1]["sha256"]}
                 actions.append(row)
+                input_count += int(action["action"] in INPUT_ACTIONS)
                 session.record("native_inspection_play_action_result", cycle=cycle, target=key, **row)
                 if activity := getattr(session, "activity", None):
-                    activity(cycle, "reviewer", f"AI 플레이 {step}/{STEPS} · {action['action']} · {row['result']}")
+                    activity(cycle, "reviewer", f"AI 플레이 {input_count}/{input_limit} · {action['action']} · {row['result']}")
+                if input_count == input_limit:
+                    if "input_steps" in policy:
+                        outcome = "INPUT_LIMIT"
+                    return
 
         inspect_owned_window(api, job, deadline, session.check, None, workers, play=play)
 
     argv = [*trial_flags(session.work, writable=False, tool_root=directory, shell_tools=False),
             *_args(binary, *args, profile=PROFILE)]
     try:
-        result = _observe(session.binary, argv, directory, logs, session.verify_env, seconds=SECONDS,
+        result = _observe(session.binary, argv, directory, logs, session.verify_env, seconds=policy["seconds"],
                           memory=1024**3, check=session.check, output_limit=65536, encoding="utf-8", interact=interact)
         game_clear = result["job_active"] == 0
         if result["exitCode"]:

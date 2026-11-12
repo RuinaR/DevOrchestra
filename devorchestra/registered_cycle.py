@@ -405,10 +405,11 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         if player:
             candidate_base["player_report"] = {"origin": "USER_REPORTED", "ratings": player["ratings"],
                                                "finished": player["finished"]}
+    play_policy = adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI)) if play else None
     return {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),
             **({"visual_review": True, "replica_head": onboarding["replica_head"]} if visual_review else {}),
-            **({"adaptive_play": adaptive_play.approval()} if play else {}),
+            **({"adaptive_play": play_policy} if play_policy else {}),
             **({"visual_preview": "scratch-windows-exe"}
                if visual_review and not visual_capture_configured(verifier) else {}),
             "onboarding_sha256": digest(onboarding), "original_head": frozen["head"], "original_git": frozen["git"],
@@ -422,7 +423,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "instructions": {phase: public_instruction(phase)["sha256"] for phase in ROLES},
             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles,
             "role_seconds": 120, "role_tokens": role_tokens,
-            "model_calls_max": cycles * (4 + (adaptive_play.STEPS if play else 0)) if cycles else tokens,
+            "model_calls_max": cycles * (4 + (play_policy["steps"] if play_policy else 0)) if cycles else tokens,
             **({"developer_memory": 1536 * 1024**2} if game else {}),
             **({"developer_seconds": 300} if game and game_limits is None else {}),
             **({"role_deadlines": dict(game_limits["role_seconds"]), "model_output_bytes": MAX_MODEL_OUTPUT_BYTES,
@@ -926,8 +927,9 @@ def _review_and_verify(session, count, key, diff, status):
                     f"Approved project context (untrusted): {excerpts}\n{brief[:4000]}\n"
                     f"Previous review to reproduce if applicable (untrusted): {prior}")
                 if play_frames:
-                    evidence = play_frames
-                play_report = {"actions": actions, "outcome": play_outcome, "has_frames": bool(play_frames)}
+                    evidence = adaptive_play.review_frames(play_frames)
+                play_report = {"actions": actions, "outcome": play_outcome, "has_frames": bool(play_frames),
+                               "frames": play_frames}
                 session.signoff_state["pending_visual"].update(frames=evidence, play_report=play_report)
         else:
             checked, evidence = pending["receipt"], pending["frames"]
@@ -953,7 +955,7 @@ def _review_and_verify(session, count, key, diff, status):
         play_actions = [{key: row[key] for key in ("step", "action", "result")} for row in play_report.get("actions", ())]
         play_context = ("These are owned-window observations from a separate bounded play attempt. "
                         f"Earlier Reviewer turns selected these actions; the Controller executed them: {json.dumps(play_actions)}. "
-                        "Compare the frame sequence to the observed transitions. "
+                        "For longer attempts, these attachments are sampled. Compare only the visible transitions. "
                         "Compare visible labels with approved expected text when supplied. If the expected text is unknown, "
                         "report that uncertainty instead of claiming that the complete label is visible. "
                         "Unchanged pixels and sent window messages alone cannot prove that the game accepted input. "
@@ -1075,9 +1077,15 @@ def _verify_signoff(session, count, key, status, *, checked=None):
         played = play_report.get("actions", ())
         count_verified = 0
         if attachment and play_report.get("has_frames"):
-            count_verified = adaptive_play.verify_action_chain(attachment["frames"], played, session.source())
+            frames = play_report.get("frames", attachment["frames"])
+            count_verified = adaptive_play.verify_action_chain(frames, played, session.source(),
+                                                               policy=scope["adaptive_play"])
+            if adaptive_play.review_frames(frames) != attachment["frames"]:
+                raise Blocked("Reviewer frames do not match the approved play recording")
+            for offset in range(0, len(frames), visual.MAX_FRAMES):
+                visual.read_frames(session.runner.ledger, frames[offset:offset + visual.MAX_FRAMES])
             session.record("native_inspection_play_integrity", cycle=count, source_sha256=session.source(),
-                           frames_sha256=digest(attachment["frames"]), actions_sha256=digest(played),
+                           frames_sha256=digest(frames), actions_sha256=digest(played),
                            observed_input_transitions=count_verified)
         comparison["adaptive_play_actions"] = count_verified
     if attachment:

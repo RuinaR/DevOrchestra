@@ -75,6 +75,18 @@ class PlayTests(unittest.TestCase):
             with self.assertRaises(Blocked):
                 adaptive_play.verify_action_chain(frames, [{**action, **replacement}], "source")
 
+    def test_wait_does_not_use_input_allowance_and_review_samples_the_full_chain(self):
+        policy = adaptive_play.approval(godot=True)
+        names = ("wait", "keys", "observe", "keys", "keys")
+        frames = [{"id": f"P{i}", "source_sha256": "source", "executable_sha256": "exe", "sha256": str(i)}
+                  for i in range(len(names) + 1)]
+        actions = [{"step": i, "before": str(i - 1), "after": str(i), "result": "SCREEN_CHANGED",
+                    "action": {"action": name}} for i, name in enumerate(names, 1)]
+        self.assertEqual(3, adaptive_play.verify_action_chain(frames, actions, "source", policy=policy))
+        self.assertEqual([frames[i] for i in (0, 1, 3, 5)], adaptive_play.review_frames(frames))
+        with self.assertRaises(Blocked):
+            adaptive_play.verify_action_chain(frames, actions, "source", policy={**policy, "input_steps": 2})
+
     @unittest.skipUnless(os.environ.get("DEVORCHESTRA_GUI_E2E") == "1", "Owned Windows GUI opt-in")
     def test_three_actual_owned_window_transitions_with_offline_reviewer(self):
         from devorchestra.mxc_host_probe import _observe
@@ -163,7 +175,7 @@ class Fixture : Form {
                     "visual_preview": {"status": "CAPTURED", "executable_sha256": fingerprint(executable)["sha256"],
                                        "bundle_sha256": digest(snapshot(build))}},
                     "Exercise the owned test fixture")
-            self.assertEqual("STEP_LIMIT", result)
+            self.assertEqual("INPUT_LIMIT", result)
             self.assertEqual(4, len({frame["sha256"] for frame in frames}))
             self.assertEqual(["SCREEN_CHANGED"] * 3, [row["result"] for row in actions])
             self.assertTrue(session.owned_verified)

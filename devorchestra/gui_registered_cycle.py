@@ -118,7 +118,10 @@ def _open_visual_report(center, runner, project):
 
 def _play_approval(scope):
     if play := scope.get("adaptive_play"):
+        inputs = (f"실제 입력 최대 {play['input_steps']}회. 대기·재관찰은 모델 호출에만 포함합니다. "
+                  if "input_steps" in play else "")
         return (f"\nAI 플레이 · 사이클당 추가 모델 최대 {play['steps']}회, 소유 창 실행 최대 {play['seconds']}초. "
+                f"{inputs}"
                 "창 내부 클릭·이동과 600ms 이내 최대 3키 동시 입력을 허용합니다. "
                 f"허용 키: {', '.join(play['keys'])}. 각 화면을 Codex에 전송합니다.")
     return ""
