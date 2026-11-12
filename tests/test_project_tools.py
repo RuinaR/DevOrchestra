@@ -17,6 +17,11 @@ from devorchestra.replica_evidence import snapshot
 
 
 class ProjectToolsTests(unittest.TestCase):
+    def test_https_context_missing_file_is_a_shared_transport_failure(self):
+        with patch.object(project_tools, "build_opener", side_effect=FileNotFoundError(2, "fixture")):
+            with self.assertRaises(project_tools.PackageRuntimeUnavailable):
+                project_tools._github_metadata("repos/example/tool", lambda: None)
+
     def test_portable_tools_are_exposed_only_during_developer_and_reuse_one_download(self):
         with TemporaryDirectory() as folder:
             base = Path(folder)

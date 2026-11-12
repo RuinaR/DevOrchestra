@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 from pathlib import Path, PureWindowsPath
 import re
+import ssl
 import stat
 from time import monotonic
 from urllib.error import URLError
@@ -29,6 +30,19 @@ class PackageUnavailable(Blocked):
     """GitHub could not provide the approved package; no Developer was dispatched."""
 
 
+class PackageRuntimeUnavailable(PackageUnavailable):
+    """The shared package transport is unavailable for this session."""
+
+
+def _transport_failure(error, message):
+    cause = getattr(error, "reason", error)
+    if isinstance(cause, FileNotFoundError):
+        return PackageRuntimeUnavailable("도구 다운로드에 필요한 로컬 런타임 파일을 찾을 수 없습니다.")
+    if isinstance(cause, ssl.SSLCertVerificationError):
+        return PackageRuntimeUnavailable("도구 다운로드 서버의 TLS 인증서를 검증할 수 없습니다.")
+    return PackageUnavailable(message)
+
+
 def selection(requested):
     if type(requested) is not list or len(requested) > MAX_TOOLS:
         raise Blocked(f"한 작업에서 GitHub 자료를 최대 {MAX_TOOLS}개 지정하세요.")
@@ -50,15 +64,15 @@ def selection(requested):
 
 def _github_metadata(path, check):
     check()
-    opener = build_opener(ProxyHandler({}), _DirectDownload())
     request = Request("https://api.github.com/" + path, headers={
         "Accept": "application/vnd.github+json", "User-Agent": "DevOrchestra",
     })
     try:
+        opener = build_opener(ProxyHandler({}), _DirectDownload())
         with opener.open(request, timeout=8) as response:
             raw = response.read(1024**2 + 1)
-    except (URLError, TimeoutError) as error:
-        raise PackageUnavailable("GitHub 자료 조회에 실패했습니다. 공개 여부와 정확한 버전을 확인하세요.") from error
+    except (URLError, TimeoutError, FileNotFoundError, ssl.SSLCertVerificationError) as error:
+        raise _transport_failure(error, "GitHub 자료 조회에 실패했습니다. 공개 여부와 정확한 버전을 확인하세요.") from error
     check()
     if len(raw) > 1024**2:
         raise Blocked("GitHub 응답이 크기 한도를 넘었습니다.")
@@ -168,8 +182,8 @@ def download(tool, path, check):
 def download_github(tool, path, check):
     try:
         return _download(tool, path, check)
-    except (URLError, TimeoutError) as error:
-        raise PackageUnavailable("GitHub ZIP을 내려받을 수 없습니다.") from error
+    except (URLError, TimeoutError, FileNotFoundError, ssl.SSLCertVerificationError) as error:
+        raise _transport_failure(error, "GitHub ZIP을 내려받을 수 없습니다.") from error
 
 
 def _member_path(name):

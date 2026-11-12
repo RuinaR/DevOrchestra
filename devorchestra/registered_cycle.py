@@ -259,6 +259,45 @@ def _allows_github_tools(scope):
     return scope.get("portable_source_policy") == project_tools.GITHUB_POLICY
 
 
+def _recoverable_pre_developer_stop(rows):
+    """Carry a prior candidate through a failed, settled tool preparation."""
+    if not rows:
+        return False
+    start, end = rows[0], rows[-1]
+    scope = start.get("scope", {})
+    prior = scope.get("prior_replica_candidate", {})
+    run = [row for row in rows if row.get("run_id") == start.get("run_id")]
+    if (start.get("kind") != "native_inspection_intent" or end.get("kind") != "native_inspection_result"
+            or end.get("run_id") != start.get("run_id") or end.get("outcome") != "BLOCKED"
+            or end.get("cycle_count") != 0
+            or end.get("usage_complete") is not True or end.get("owned_tree") != "DRAINED"
+            or end.get("staging_cleanup") != {"status": "RETAINED_FOR_RECOVERY", "workspace": start.get("workspace")}
+            or not prior.get("changed") or end.get("changed") != prior["changed"]
+            or end.get("replica_sha256") != scope.get("replica_sha256")
+            or digest(scope) != start.get("approval_sha256") or end.get("approval_sha256") != start["approval_sha256"]
+            or not _allows_github_tools(scope)):
+        return False
+    dispatched = [row for row in run if row["kind"] == "native_inspection_role_intent"]
+    settled = [row for row in run if row["kind"] == "native_inspection_role_result"]
+    tools = [row for row in run if row["kind"] == "native_inspection_project_tools_intent"]
+    cleanup = [row for row in run if row["kind"] == "native_inspection_project_tools_cleanup"]
+    if (not dispatched or len(dispatched) != len(settled) or len(settled) != end.get("model_turns_dispatched")
+            or any(intent.get("phase") != "manager-planning" or result.get("phase") != "manager-planning"
+                   or intent.get("cycle") != result.get("cycle") or intent.get("source_sha256") != scope["replica_sha256"]
+                   or result.get("outcome") != "COMPLETED" or result.get("owned_tree") != "DRAINED"
+                   or not isinstance(result.get("provider_usage"), dict)
+                   or any(type(result["provider_usage"].get(key)) is not int
+                          or result["provider_usage"][key] < 0 for key in ("input_tokens", "output_tokens"))
+                   for intent, result in zip(dispatched, settled))):
+        return False
+    usage = sum(row["provider_usage"]["input_tokens"] + row["provider_usage"]["output_tokens"] for row in settled)
+    return (usage == end.get("known_reported_tokens")
+            and len(tools) == len(cleanup) == 1
+            and bool(tools[0].get("directory")) and tools[0]["directory"] == cleanup[0].get("directory")
+            and cleanup[0].get("result") == "REMOVED"
+            and run[-2] == cleanup[0])
+
+
 def _settled_integrity_candidate(events, project, replica, onboarding, image):
     rows = [row for row in events if row.get("project_id") == project and row.get("probe_kind") == KIND]
     start = next((row for row in reversed(rows) if row["kind"] == "native_inspection_intent"), {})
@@ -268,6 +307,8 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
     cycle = end.get("cycle_count")
     accepted = []
     saved_progress = rows[-2] if len(rows) >= 2 else {}
+    recovered_preflight = _recoverable_pre_developer_stop(
+        [row for row in rows if row.get("run_id") == start.get("run_id")])
     manual = (end.get("outcome") == MANUAL_CHECKPOINT
               and saved_progress.get("kind") == "native_inspection_manual_checkpoint")
     allowed_changes = set(prior.get("files", ())) | set(prior.get("prior_replica_candidate", {}).get("changed", ()))
@@ -285,7 +326,10 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
         and end.get("staging_cleanup", {}).get("status") == "REMOVED"
         and digest(prior) == start.get("approval_sha256") == end.get("approval_sha256")
         and set(end.get("changed", ())) <= allowed_changes)
-    if progress_checkpoint:
+    if recovered_preflight:
+        accepted = [key for key in prior["prior_replica_candidate"].get("accepted_without_functional_check", ())
+                    if key in prior["criteria"]]
+    elif progress_checkpoint:
         accepted = [key for key in saved_progress.get("accepted_without_functional_check", ()) if key in prior["criteria"]]
     elif end.get("outcome") == "NO_PROGRESS":
         # Admit only a finished, accepted cycle whose final Manager explicitly requested continuation.
@@ -310,13 +354,15 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
             raise Blocked("이전 작업은 검토와 복제본 상태를 확정할 수 없어 그대로 이어갈 수 없습니다.")
         accepted = [review["target"]]
     if (end.get("kind") != "native_inspection_result" or end.get("run_id") != start.get("run_id")
-            or (end.get("outcome") != "USER_TEST_REQUIRED" and not accepted and not progress_checkpoint)
+            or (end.get("outcome") != "USER_TEST_REQUIRED" and not accepted
+                and not progress_checkpoint and not recovered_preflight)
             or end.get("owned_tree") != "DRAINED"
             or end.get("replica_sha256") != image_hash or prior.get("replica") != str(replica)
             or prior.get("onboarding_sha256") != digest(onboarding)
-            or (not progress_checkpoint and prior.get("verifier", {}).get("mode")
+            or (not progress_checkpoint and not recovered_preflight and prior.get("verifier", {}).get("mode")
                 not in {BASELINE_VERIFIER, game_pilot.REGISTERED_GUI})
-            or (not progress_checkpoint and not any(row["kind"] == "native_inspection_role_result" and row.get("phase") == "verifier"
+            or (not progress_checkpoint and not recovered_preflight
+                and not any(row["kind"] == "native_inspection_role_result" and row.get("phase") == "verifier"
                        and row.get("run_id") == end["run_id"] and row.get("source_sha256") == image_hash
                        and (row.get("integrity") == "PASS" or row.get("game", {}).get("outcome") == "PASS")
                        for row in rows))):
@@ -1872,6 +1918,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                        if not whole and (documentation or "artifact" in plan) else {}))
             except NoDeveloperChange:
                 diff = ""
+            except project_tools.PackageRuntimeUnavailable as error:
+                defer(count, key, "PREREQUISITE", str(error))
+                return stop(count, outcome=NEEDS_INPUT, feedback=feedback)
             except project_tools.PackageUnavailable as error:
                 defer(count, key, "PREREQUISITE", str(error))
                 if eligible == {key}:

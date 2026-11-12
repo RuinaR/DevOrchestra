@@ -280,6 +280,30 @@ class RegisteredTrustTests(unittest.TestCase):
             self.assertEqual("SKIPPED_NO_CANDIDATE", view["roles"][phase]["outcome"])
         self.assertEqual(5, view["tokens"])
 
+    def test_pre_developer_recovery_requires_clean_stage_and_no_mutating_role(self):
+        scope = {"prior_replica_candidate": {"changed": ["design.md"]}, "replica_sha256": "same",
+                 "portable_source_policy": "GITHUB_PUBLIC_ZIP_V1"}
+        common = {"run_id": "fixture", "approval_sha256": digest(scope)}
+        rows = [
+            {**common, "kind": "native_inspection_intent", "scope": scope, "workspace": "fixture-stage"},
+            {**common, "kind": "native_inspection_role_intent", "phase": "manager-planning",
+             "cycle": 1, "source_sha256": "same"},
+            {**common, "kind": "native_inspection_role_result", "phase": "manager-planning", "cycle": 1,
+             "outcome": "COMPLETED", "owned_tree": "DRAINED", "provider_usage": {"input_tokens": 3, "output_tokens": 2}},
+            {**common, "kind": "native_inspection_project_tools_intent", "directory": "fixture-tools"},
+            {**common, "kind": "native_inspection_project_tools_cleanup", "directory": "fixture-tools", "result": "REMOVED"},
+            {**common, "kind": "native_inspection_result", "outcome": "BLOCKED", "owned_tree": "DRAINED",
+             "reason": "arbitrary preparation failure", "cycle_count": 0, "model_turns_dispatched": 1,
+             "usage_complete": True, "known_reported_tokens": 5, "changed": ["design.md"], "replica_sha256": "same",
+             "staging_cleanup": {"status": "RETAINED_FOR_RECOVERY", "workspace": "fixture-stage"}},
+        ]
+        self.assertTrue(registered_cycle._recoverable_pre_developer_stop(rows))
+        for index, patch_values in ((1, {"phase": "developer"}), (4, {"result": "UNCONFIRMED"}),
+                                    (-1, {"replica_sha256": "different"}), (-1, {"known_reported_tokens": 0})):
+            changed = rows.copy()
+            changed[index] = {**changed[index], **patch_values}
+            self.assertFalse(registered_cycle._recoverable_pre_developer_stop(changed))
+
     def test_read_only_planner_cannot_defer_approved_developer_work(self):
         from devorchestra.replica_evidence import snapshot
 

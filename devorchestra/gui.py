@@ -1198,6 +1198,10 @@ class CommandCenter:
                 lines.append(f"{cycle}사이클 · Reviewer용 화면 준비 시작")
             elif kind == "native_inspection_review_capture_result":
                 lines.append(f"{cycle}사이클 · Reviewer용 화면 준비 종료")
+            elif kind == "native_inspection_project_tools_intent":
+                packages = [f"{tool['repository']} @ {tool['ref']}" if isinstance(tool, dict) else tool
+                            for tool in row["packages"]]
+                lines.append(f"{cycle}사이클 · 프로젝트 도구 준비 시작 · " + ", ".join(packages))
             elif kind == "native_inspection_project_tool_ready":
                 name = f"{row['repository']} @ {row['ref']}" if "repository" in row else row["name"]
                 lines.append(f"{cycle}사이클 · 프로젝트 도구 준비 · {name}")
@@ -1402,6 +1406,8 @@ class CommandCenter:
     @staticmethod
     def can_continue_progress_stop(progress):
         end = (progress or {}).get("end") or {}
+        if (progress or {}).get("tool_preflight_recoverable"):
+            return True
         if (end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True
                 or end.get("staging_cleanup", {}).get("status") != "REMOVED"):
             return False

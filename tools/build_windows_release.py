@@ -6,12 +6,20 @@ import os
 from pathlib import Path
 import platform
 import re
+import ssl
 import struct
 import subprocess
 import sys
 from uuid import uuid4
 from time import monotonic
 from zipfile import ZIP_DEFLATED, ZipFile
+
+
+def _tls_bundle():
+    """Bundle data referenced by the build Python's patched SSL module."""
+    ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    asset = Path(ssl.__file__).with_name("codex-rejected-cas.pem")
+    return [asset] if asset.is_file() else []
 
 
 def _package(root, output, argv):
@@ -107,12 +115,14 @@ def main():
             f"StringStruct('FileVersion','{release}'), StringStruct('Comments','Git {sha}')])]), "
             "VarFileInfo([VarStruct('Translation',[1033,1200])])])", encoding="utf-8",
         )
+        tls_assets = _tls_bundle()
         _package(root, staging, [
             "-m", "PyInstaller", "--onefile", "--windowed", "--noupx",
             "--name", "DevOrchestra", "--paths", str(root), "--specpath", str(staging),
             "--workpath", str(staging / "work"), "--distpath", str(output / "dist"),
             "--add-data", f"{metadata};devorchestra", "--add-data", f"{root / 'defaults'};defaults",
             "--add-data", f"{root / 'devorchestra' / 'ui_assets'};devorchestra/ui_assets",
+            *(arg for asset in tls_assets for arg in ("--add-data", f"{asset};.")),
             "--version-file", str(resource), str(launcher),
         ])
         if git("rev-parse", "HEAD") != sha or git("status", "--porcelain", "--untracked-files=normal"):
@@ -140,6 +150,7 @@ def main():
         from devorchestra.ui_design import ASSET_FILES
         if ("devorchestra/release.json" not in names or not {f"defaults/{path}" for path in SOURCES.values()} <= names
                 or not {f"devorchestra/ui_assets/{path}" for path in ASSET_FILES} <= names
+                or not {asset.name for asset in tls_assets} <= names
                 or not any(name.startswith("_tcl_data/") for name in names)
                 or not any(name.startswith("_tk_data/") for name in names)):
             raise SystemExit("BUNDLED_RESOURCES_UNVERIFIED")
