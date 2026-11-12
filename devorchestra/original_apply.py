@@ -141,10 +141,23 @@ def _prepare_registered(events, head, project, expires, source, replica, frozen,
     final_cycle = end["cycle_count"]
     review = next((row for row in reversed(history) if row["kind"] == "native_inspection_cycle_progress"
                    and row["cycle"] == final_cycle), {})
-    verified = next((row for row in reversed(history) if row["kind"] == "native_inspection_role_result"
+    verified = next((row for row in reversed(history)
+                     if row["kind"] in {"native_inspection_role_result", "native_inspection_verifier_reused"}
                      and row["cycle"] == final_cycle and row["phase"] == "verifier"), {})
     decision = next((row for row in reversed(history) if row["kind"] == "native_inspection_role_result"
                      and row["cycle"] == final_cycle and row["phase"] == "manager-final"), {})
+    resume = scope.get("resume", {})
+    if (not decision and resume.get("mode") == "postprocess"
+            and resume.get("saved_response", {}).get("phase") == "manager-final"
+            and any(row["kind"] == "native_inspection_role_reused" and row["cycle"] == final_cycle
+                    and row["phase"] == "manager-final" and row["parent_run_id"] == resume["parent_run_id"]
+                    and row["message_sha256"] == resume["saved_response"]["message_sha256"]
+                    and row["source_sha256"] == end["replica_sha256"] for row in history)):
+        applied = next((row for row in reversed(history) if row["kind"] == "native_inspection_decision_applied"
+                        and row["cycle"] == final_cycle and row["phase"] == "manager-final"
+                        and row["source_sha256"] == end["replica_sha256"]), {})
+        if applied:
+            decision = {"manager_decision": applied["verdict"], "outcome": "COMPLETED"}
     image = snapshot(replica)
     if (review.get("reviewer") != "ACCEPT" or review.get("controller_decision") != "COMPLETED"
             or decision.get("manager_decision") != "COMPLETED" or decision.get("outcome") != "COMPLETED"

@@ -429,6 +429,23 @@ def show(center, project, *, resume_only=False):
                 return
             if resume:
                 checkpoint = result["resume"]
+                if checkpoint.get("mode") == "postprocess":
+                    role = ROLE_LABELS[checkpoint["saved_response"]["phase"]]
+                    summary = (f"{project}\n복제본 {result['replica']}\n"
+                               f"저장된 {role} 응답과 현재 후보를 사용합니다. "
+                               f"{checkpoint['cycle']}사이클의 남은 판정부터 이어갑니다.\n"
+                               f"이전 확정 사용량 {checkpoint['parent_reported_tokens']:,}토큰\n"
+                               f"{'새 승인 예산' if checkpoint.get('renewed_budget') else '남은 예산'} "
+                               f"{result['seconds']:,}초 · {result['tokens']:,}토큰 · "
+                               f"모델 최대 {result['model_calls_max']}회\n"
+                               "승인 범위 내에서 판정을 마치고 필요하면 다음 사이클에서 재작업합니다.")
+                    if checkpoint.get("renewed_budget"):
+                        summary += f"\n이번 추가 승인은 {result['cycles']}사이클까지 유효합니다."
+                    if center.confirm("보존된 모델 응답에서 이어서 개발", summary, parent=panel):
+                        launch(result)
+                    else:
+                        state.set("재개 승인 취소됨")
+                    return
                 if checkpoint.get("mode") == "next-cycle":
                     summary = (f"{project}\n복제본 {result['replica']}\n"
                                f"다음 사이클 {checkpoint['cycle'] + 1}부터 이어갑니다.\n"
@@ -546,6 +563,47 @@ def show(center, project, *, resume_only=False):
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             state.set("저장된 개발 기록을 읽지 못했습니다. 기록·복구 화면에서 상태를 확인하세요.")
             return
+        if rows and registered_cycle.can_review_postprocess(rows[-1]):
+            prior, result = rows[0]["scope"], rows[-1]
+            seconds, tokens, calls = registered_cycle.manual_remaining(prior, result)
+            dialog = tk.Toplevel(panel, padx=12, pady=12)
+            dialog.title("보존된 모델 응답 재개 예산")
+            dialog.transient(panel)
+            ttk.Label(dialog, text=f"기존 잔여 {max(0, seconds):,}초 · {max(0, tokens):,}토큰 · "
+                      f"모델 최대 {max(0, calls)}회").pack(anchor="w", pady=(0, 8))
+            limits = {}
+            for field, title, default in (
+                    ("seconds", "새 시간 예산(초)", 1800),
+                    ("tokens", "새 토큰 예산", sum(prior["role_tokens"].values()) + prior["role_tokens"]["manager-final"])):
+                ttk.Label(dialog, text=title).pack(anchor="w")
+                entry = limits[field] = ttk.Entry(dialog)
+                entry.insert(0, str(min(default, registered_cycle.MAX_SESSION_TOKENS)))
+                entry.pack(fill="x")
+            hint = ttk.Label(dialog, wraplength=460)
+            hint.pack(fill="x")
+
+            def review(renew=False):
+                try:
+                    use_seconds, use_tokens = ((int(limits[key].get()) for key in ("seconds", "tokens"))
+                                               if renew else (seconds, tokens))
+                    if renew and not (60 <= use_seconds <= registered_cycle.MAX_SESSION_SECONDS
+                                      and max(prior["role_tokens"].values()) <= use_tokens
+                                      <= registered_cycle.MAX_SESSION_TOKENS):
+                        raise ValueError
+                except ValueError:
+                    hint.configure(text="시간과 토큰을 확인하세요. 토큰은 가장 큰 역할 한도 이상이어야 합니다.")
+                    return
+                args = (project, int(time()) + use_seconds + 2940, use_seconds, use_tokens, renew)
+                dialog.destroy()
+                cancelled.clear()
+                submit(args, resume=True, graceful=True)
+
+            ttk.Button(dialog, text="남은 예산으로 재개 검토", command=review,
+                       state="normal" if min(seconds, tokens, calls) >= 0 else "disabled").pack(fill="x", pady=(6, 0))
+            ttk.Button(dialog, text="새 예산으로 재개 검토", command=lambda: review(True)).pack(fill="x")
+            dialog.bind("<Escape>", lambda _event: dialog.destroy())
+            dialog.grab_set()
+            return
         if rows and rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT:
             seconds, tokens, _ = registered_cycle.manual_remaining(rows[0]["scope"], rows[-1])
             cancelled.clear()
@@ -647,7 +705,8 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
         graceful = False
         if resume:
             rows = registered_cycle.history(runner.ledger, game_pilot.PROJECT)
-            if rows and rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT:
+            if rows and (rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT
+                         or registered_cycle.can_review_postprocess(rows[-1])):
                 panel.destroy()
                 show(center, game_pilot.PROJECT, resume_only=True)
                 return

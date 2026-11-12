@@ -41,6 +41,16 @@ REGISTERED_ROLE_TOKEN_CAPS = {"manager-planning": 500000, "developer": 1000000,
                               "reviewer": 500000, "manager-final": 500000}
 MAX_SIGNOFF_TOKENS = REGISTERED_ROLE_TOKEN_CAPS["reviewer"] + REGISTERED_ROLE_TOKEN_CAPS["manager-final"]
 MANUAL_CHECKPOINT = "CHECKPOINT_SAVED"
+POSTPROCESS_PENDING = "POSTPROCESS_PENDING"
+LEGACY_VERDICT_ERROR = "Role did not return a valid verdict"
+REVIEW_VERDICTS = {"ACCEPT", "REWORK"}
+FINAL_VERDICTS = {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"}
+VERDICT_TOKENS = REVIEW_VERDICTS | FINAL_VERDICTS | {"UNAVAILABLE", "BLOCKED"}
+MAX_VERDICT_REASON = 1200
+
+
+class VerdictError(Blocked):
+    """The provider settled, but its decision could not be interpreted."""
 
 
 class PauseControl:
@@ -80,11 +90,29 @@ def validate_limits(limits):
 
 
 def _verdict(message, options):
-    """Allow a bounded explanation after an explicit, standalone verdict."""
-    match = re.fullmatch(r"([A-Z_]+)(?:[ \t]+(?:[—–:-][ \t]*)?([^\r\n]{1,500}))?", message.strip())
-    if not match or match[1] not in options:
-        raise Blocked("Role did not return a valid verdict")
-    return match[1], match[2] or ""
+    verdict, reason, _ = _parse_verdict(message, options)
+    return verdict, reason
+
+
+def _parse_verdict(message, options):
+    """Read one explicit leading verdict and a bounded, possibly multiline reason."""
+    lines = message.strip().splitlines() if isinstance(message, str) else []
+    header = re.fullmatch(r"([A-Z_]+)(?:[ \t]*[:—–-][ \t]*(.*)|[ \t]+(.+))?", lines[0]) if lines else None
+    if not header or header[1] not in options:
+        raise VerdictError(LEGACY_VERDICT_ERROR)
+    verdict = header[1]
+    first_reason = (header[2] or header[3] or "").strip()
+    alternatives = re.match(r"^(?:or\s+|and\s+|vs\.?\s+|[/|]\s*)([A-Z_]+)\b", first_reason)
+    explicit_second = re.fullmatch(r"([A-Z_]+)(?:[ \t]*[:—–-].*)?", first_reason)
+    if any(match and match[1] in VERDICT_TOKENS - {verdict} for match in (alternatives, explicit_second)):
+        raise VerdictError("Role returned conflicting verdicts")
+    for line in lines[1:]:
+        value = line.strip().removeprefix("**").replace("**", "")
+        explicit = re.fullmatch(r"(?:Verdict:[ \t]*)?([A-Z_]+)(?:[ \t]*[:—–-].*)?", value)
+        if explicit and explicit[1] in VERDICT_TOKENS - {verdict}:
+            raise VerdictError("Role returned conflicting verdicts")
+    reason = "\n".join([first_reason, *lines[1:]]).strip()
+    return verdict, reason[:MAX_VERDICT_REASON].rstrip(), len(reason) > MAX_VERDICT_REASON
 
 
 def _tools(spec, criteria, image, writable):
@@ -512,6 +540,18 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("Approved executable identity changed")
 
     def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=()):
+        saved = getattr(self, "saved_response", None)
+        if saved:
+            if ((cycle, phase, key) != (saved["cycle"], saved["phase"], saved["target"])
+                    or list(image_evidence) != saved["images"]):
+                raise Blocked("Saved model response does not match the requested role and evidence")
+            self.check()
+            self.check_image()
+            self.saved_response = None
+            self.record("native_inspection_role_reused", cycle=cycle, phase=phase, target=key,
+                        parent_run_id=self.scope["resume"]["parent_run_id"], message_sha256=saved["message_sha256"],
+                        source_sha256=self.source())
+            return saved["message"]
         before = {name: _read_source(self.work, name, self.image) for name in self.scope["files"]} if phase == "developer" else {}
         tool = self.scope["verifier"]
         game = tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI)
@@ -546,6 +586,7 @@ class RegisteredSession(_FixtureSession):
                                                 shell_tools=phase in self.scope["shell_roles"] and not images,
                                                 images=images, image_evidence=image_evidence,
                                                 decision_parser=(_final_decision if phase == "manager-final" else None),
+                                                raw_decision=True,
                                                 context="Work on this registered Git replica using the approved scope.")
         except Blocked as error:
             last = self.phases[-1] if self.phases else {}
@@ -727,16 +768,21 @@ class RegisteredSession(_FixtureSession):
 
 
 def _final_decision(message):
-    return _verdict(message, {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"})[0]
+    return _verdict(message, FINAL_VERDICTS)[0]
 
 
-def _record_feedback(session, cycle, criterion, role, verdict, message, reason, files=()):
+def _safe_feedback(reason):
+    reason = " ".join(reason.split())
     # Keep only a short finding. Omit suspected credentials and copied links.
     sensitive = re.search(r"https?://|\b(?:bearer|password|secret|credential|api[ _-]?key|token|cookie|private key)\b"
                           r"|\b[A-Za-z0-9_+/=-]{32,}\b|[\x00-\x1f\x7f]", reason, re.I)
+    return "[omitted: possible sensitive text]" if sensitive else reason
+
+
+def _record_feedback(session, cycle, criterion, role, verdict, message, reason, files=(), *, truncated=False):
     session.record("native_inspection_role_feedback", cycle=cycle, target=criterion, role=role,
                    verdict=verdict, priority="REWORK_REQUIRED" if verdict == "REWORK" else "NORMAL",
-                   reason="[omitted: possible sensitive text]" if sensitive else reason or None,
+                   reason=_safe_feedback(reason) or None, reason_truncated=truncated,
                    files=list(files), source_sha256=session.source(), message_sha256=digest(message))
 
 
@@ -778,6 +824,7 @@ def _review_and_verify(session, count, key, diff, status):
     files = ", ".join(changed[:4]) or "변경 파일 목록 없음"
     _handoff(session, count, "reviewer", f"Developer 변경 {len(changed)}개 · {files}. "
              f"현재 완료 기준과 실제 diff를 비교합니다. 첨부 화면 {len(evidence)}장.")
+    truncated = False
     if evidence:
         inputs = visual.stage(session.runner.ledger, evidence, session.logs(f"{count}-visual-input"))
         ids = [frame["id"] for frame in evidence]
@@ -809,8 +856,8 @@ def _review_and_verify(session, count, key, diff, status):
         except Blocked as error:
             session.record("native_inspection_visual_review", cycle=count, target=key, verdict="UNAVAILABLE",
                            findings=[], frames=evidence, response_sha256=digest(raw),
-                           source_sha256=session.source(), status="NOT_VERIFIED", reason=str(error))
-            raise
+                           source_sha256=session.source(), status="ANALYSIS_FAILED", reason=str(error))
+            raise VerdictError("Reviewer image response failed the strict visual contract") from error
         review = report["verdict"]
         findings = visual.safe_findings(report["findings"])
         code = visual.safe_findings([report["code_finding"]])[0] if report["code_finding"] else None
@@ -837,15 +884,20 @@ def _review_and_verify(session, count, key, diff, status):
             session.phases.append({"cycle": count, "phase": "visual-review", "outcome": "NOT_VERIFIED",
                                    "reason": reason})
             prompt += "\nNo owned GUI image is available. Review the code only. Visual quality is NOT_VERIFIED."
-        decision = session.call(count, "reviewer", key, prompt + "\nReply ACCEPT or REWORK and one concrete finding.")
-        review, finding = _verdict(decision, {"ACCEPT", "REWORK"})
-    _record_feedback(session, count, key, "reviewer", review, raw if evidence else decision, finding,
-                     session.signoff_state.get("changed", ()))
+        raw = session.call(count, "reviewer", key, prompt +
+                           "\nStart with ACCEPT or REWORK on the first line. Give concrete reasons on following lines.")
+        review, finding, truncated = _parse_verdict(raw, REVIEW_VERDICTS)
+        decision = f"{review} · {_safe_feedback(finding)}" if finding else review
+    _record_feedback(session, count, key, "reviewer", review, raw, finding,
+                     session.signoff_state.get("changed", ()), truncated=truncated)
     if review == "REWORK" and not finding:
-        raise Blocked("Reviewer did not provide a rework finding")
+        finding = "Reviewer requested rework without a finding. Recheck the current criterion against the diff."
+        decision = f"{review} · {finding}"
     session.signoff_state["review"] = review
+    session.signoff_state["review_feedback"] = decision
     session.record("native_inspection_review_decision", cycle=count, target=key, verdict=review,
-                   finding_sha256=digest(finding), source_sha256=session.source())
+                   finding_sha256=digest(finding), source_sha256=session.source(), reason_truncated=truncated,
+                   response_sha256=digest(raw))
     checked, comparison = _verify_signoff(session, count, key, status, checked=checked)
     return decision, review, finding, checked, comparison
 
@@ -853,7 +905,8 @@ def _review_and_verify(session, count, key, diff, status):
 def _verify_signoff(session, count, key, status, *, checked=None):
     scope = session.scope
     criteria = scope["criteria"]
-    if "graceful_stop" in scope:
+    if ("graceful_stop" in scope and checked is None
+            and not any(key in session.signoff_state for key in ("visual", "pending_visual"))):
         session.admit_graceful("verifier")
     attachment = session.signoff_state.get("visual")
     if attachment:
@@ -873,6 +926,12 @@ def _verify_signoff(session, count, key, status, *, checked=None):
                 raise Blocked("Saved verification candidate changed")
     if checked is None:
         checked = session.verify_registered(count)
+    verification = {key: checked[key] for key in ("source_sha256", "verdict", "owned_tree") if key in checked}
+    session.signoff_state["verification"] = verification
+    if scope.get("resume", {}).get("mode") == "postprocess" and scope["resume"].get("pending_visual"):
+        if len(verification) == 3:
+            session.record("native_inspection_verifier_reused", cycle=count, phase="verifier",
+                           parent_run_id=scope["resume"]["parent_run_id"], **verification)
     comparison = cycle_progress.compare(criteria, status, checked)
     if attachment:
         comparison["visual_review_sha256"] = attachment["response_sha256"]
@@ -901,6 +960,33 @@ def _save_signoff(session):
     session.record("native_inspection_signoff_checkpoint",
                    **{k: v for k, v in state.items() if k != "diff"},
                    source_sha256=session.source(), diff_sha256=digest(diff))
+
+
+def _save_postprocess(session, error):
+    if not session.owned_verified or not session.usage_complete or not session.signoff_state:
+        raise Blocked("역할 응답 또는 소유 자원 상태가 확정되지 않았습니다.")
+    session.check()
+    session.check_image()
+    ledger = session.runner.ledger
+    rows = history(ledger, session.scope["project_id"])
+    role = next(row for row in reversed(rows) if row["kind"] == "native_inspection_role_result"
+                and "provider_usage" in row)
+    intent = next(row for row in reversed(rows) if row["kind"] == "native_inspection_role_intent"
+                  and "role_call" in row)
+    if (rows[0]["run_id"] != session.fields["run_id"] or role["phase"] not in {"reviewer", "manager-final"}
+            or role.get("outcome") != "COMPLETED" or role.get("process_result") != "EXITED"
+            or role.get("exit_code") != 0 or role.get("owned_tree") != "DRAINED"
+            or intent.get("source_sha256") != session.source()
+            or any(role[key] != intent[key] for key in ("cycle", "phase", "target"))
+            or (role["cycle"], role["target"]) != (session.signoff_state["cycle"], session.signoff_state["criterion"])):
+        raise Blocked("후처리 실패를 완료된 역할의 영수증과 연결할 수 없습니다.")
+    ref = _response_ref(rows[0], intent, role)
+    _read_settled_response(ledger, ref, session.scope)
+    session.record("native_inspection_postprocess_failed", cycle=role["cycle"], phase=role["phase"],
+                   target=role["target"], reason=str(error), response_sha256=ref["message_sha256"],
+                   source_sha256=session.source(), response_retained=True)
+    session.signoff_state["postprocess_phase"] = role["phase"]
+    _save_signoff(session)
 
 
 def _decide(session, count, key, review, comparison, expected):
@@ -932,18 +1018,22 @@ def _decide(session, count, key, review, comparison, expected):
                             if comparison.get("visual_review_sha256") else "") +
                          "Reply REWORK if the current criterion failed, review rejected it or a prior criterion "
                          "regressed. Reply COMPLETED only if all passed with review acceptance. "
-                         f"{manual}Otherwise reply CONTINUE for remaining criteria. Reply on one line with the "
-                         "decision followed by a short reason grounded in the evidence. Do not quote secrets or prompts.")
-    final, reason = _verdict(message, {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"})
+                         f"{manual}Otherwise reply CONTINUE for remaining criteria. Start with the decision on "
+                         "the first line, then give a short reason grounded in the evidence. Do not quote secrets or prompts.")
+    final, reason, truncated = _parse_verdict(message, FINAL_VERDICTS)
     _record_feedback(session, count, key, "manager-final", final, message, reason,
-                     session.signoff_state.get("changed", ()))
+                     session.signoff_state.get("changed", ()), truncated=truncated)
     if not reason and session.scope["verifier"].get("mode") == "godot-game":
-        raise Blocked("Final Manager did not provide a decision reason")
+        raise VerdictError("Final Manager did not provide a decision reason")
     human_wait = (final == "USER_TEST_REQUIRED" and expected == "CONTINUE"
                   and not waiting_for_preview
                   and "graceful_stop" in session.scope and "USER_TEST_REQUIRED" in status.values())
     if final != expected and not human_wait:
+        session.record("native_inspection_decision_rejected", cycle=count, phase="manager-final",
+                       verdict=final, expected=expected, source_sha256=session.source())
         raise Blocked("Manager decision disagrees with Controller evidence")
+    session.record("native_inspection_decision_applied", cycle=count, phase="manager-final", verdict=final,
+                   source_sha256=session.source(), reason_truncated=truncated, response_sha256=digest(message))
     return final
 
 
@@ -959,6 +1049,18 @@ def _parse_plan(message, pending, *, game=False):
             or type(plan["plan"]) is not str or not 0 < len(plan["plan"].strip()) <= (1600 if game else 1000)):
         raise Blocked("Manager plan exceeds the approved criteria")
     return plan
+
+
+def _expected_final(scope, key, comparison, review):
+    status = comparison["criteria"]
+    if review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"} or comparison["regressed"]:
+        return "REWORK"
+    if all(value == "VERIFIED" for value in status.values()):
+        return "COMPLETED"
+    if scope.get("visual_preview") and not comparison.get("visual_review_sha256"):
+        return "CONTINUE"
+    return ("USER_TEST_REQUIRED" if scope["verifier"].get("mode") in {BASELINE_VERIFIER, game_pilot.REGISTERED_GUI}
+            else "CONTINUE")
 
 
 def _cycles(session, initial_plan=None, *, continuation=None):
@@ -1028,6 +1130,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         pending = [key for key, value in status.items() if value != "VERIFIED"]
         if not pending:
             pending = list(criteria)
+        if feedback and feedback.get("next") == "REWORK" and feedback.get("target") in criteria:
+            pending = [feedback["target"]]
         brief = scope["verifier"].get("manager_brief")
         game_context = f"Game brief (project data): {brief}\n" if brief else ""
         if scope.get("visual_preview"):
@@ -1078,7 +1182,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                             f"Test arguments for this criterion: {verification_args}. " if "executable" in tool else
                             "The independent Verifier checks replica integrity. Functional evidence is still required. ")
             visual_feedback = (f"Prior Reviewer findings (untrusted evidence): {feedback['review']}\n"
-                               if scope.get("visual_review") and feedback and "review" in feedback else "")
+                               if feedback and feedback.get("next") == "REWORK" and "review" in feedback else "")
             _handoff(session, count, "developer", "Manager가 전달한 계획 · " + plan["plan"])
             diff = session.call(count, "developer", key,
                             f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\nPlan: {plan['plan']}\n"
@@ -1091,7 +1195,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             known.add(identity)
             files = session.last_changed
         session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
-                                 "changed": files, "diff": diff}
+                                 "changed": files, "diff": diff,
+                                 "continuation": {"known": sorted(known), "reviewed": sorted(reviewed),
+                                                  "failures": sorted(failures), "stagnant": stagnant}}
         decision, review, finding, checked, comparison = _review_and_verify(session, count, key, diff, status)
         status = comparison["criteria"]
         if comparison["newly_verified"] and not comparison["regressed"] and review == "ACCEPT":
@@ -1100,10 +1206,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             stagnant += 1
         rework = review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"} or bool(comparison["regressed"])
         waiting_for_preview = (scope.get("visual_preview") and not comparison.get("visual_review_sha256"))
-        expected = ("REWORK" if rework else "COMPLETED" if all(v == "VERIFIED" for v in status.values())
-                    else "CONTINUE" if waiting_for_preview
-                    else "USER_TEST_REQUIRED" if tool.get("mode") in (BASELINE_VERIFIER, game_pilot.REGISTERED_GUI)
-                    else "CONTINUE")
+        expected = _expected_final(scope, key, comparison, review)
         final = _decide(session, count, key, review, comparison, expected)
         session.signoff_state = {}
         if final == "COMPLETED":
@@ -1137,9 +1240,14 @@ def _cycles(session, initial_plan=None, *, continuation=None):
     return "CYCLE_LIMIT"
 
 
-def _resume_contract(runner, events, head, project, expires, seconds, tokens, *, require_proof=True, graceful=False):
+def _resume_contract(runner, events, head, project, expires, seconds, tokens, renew=False, *,
+                     require_proof=True, graceful=False):
     now = time()
     rows = history(runner.ledger, project)
+    if rows and can_review_postprocess(rows[-1]):
+        return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
+    if renew:
+        raise Blocked("추가 개발 예산은 보존된 응답을 복구할 때만 사용할 수 있습니다.")
     if rows and rows[-1].get("outcome") == MANUAL_CHECKPOINT:
         return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
     if (type(expires) is not int or not now < expires <= now + (4800 if graceful else 1800)
@@ -1324,6 +1432,174 @@ def manual_remaining(scope, result):
             scope["model_calls_max"] - result["model_turns_dispatched"])
 
 
+def can_review_postprocess(result):
+    return (result.get("outcome") == POSTPROCESS_PENDING
+            or (result.get("outcome"), result.get("reason")) == ("BLOCKED", LEGACY_VERDICT_ERROR))
+
+
+def _response_ref(start, intent, role):
+    return {"workspace": start["workspace"], "cycle": role["cycle"], "phase": role["phase"],
+            "target": role["target"], "message_sha256": role["message_sha256"],
+            "provider_usage": role["provider_usage"], "source_sha256": intent["source_sha256"],
+            "images": intent.get("image_evidence", []), "commands_sha256": digest(role.get("command_events", []))}
+
+
+def _read_settled_response(ledger, ref, scope):
+    phase = ref["phase"]
+    if (not re.fullmatch(r"native-command-[a-z0-9_]+", ref["workspace"])
+            or phase not in {"reviewer", "manager-final"} or type(ref["cycle"]) is not int or ref["cycle"] < 1):
+        raise Blocked("보존된 역할 응답 경로를 확인할 수 없습니다.")
+    limit = scope.get("model_output_bytes", 262144)
+    path = ledger.local_directory("temp") / ref["workspace"] / "tmp" / f"{ref['cycle']}-{phase}" / "probe.stdout"
+    try:
+        raw = _read_observation(path, limit + 1)
+        if len(raw) > limit:
+            raise ValueError("Output limit exceeded")
+        response = _cli_evidence(raw.decode("utf-8"), command_pattern=r"(?!)", retain_message=True)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+        raise Blocked("보존된 모델 응답을 읽거나 완료 이벤트를 확인할 수 없습니다.") from error
+    if (digest(response["message"]) != ref["message_sha256"]
+            or response["provider_usage"] != ref["provider_usage"]
+            or digest(response["command_events"]) != ref["commands_sha256"]
+            or (response["command_events"] and (ref["images"] or phase not in scope["shell_roles"]))):
+        raise Blocked("보존된 모델 응답·사용량·도구 기록이 영수증과 일치하지 않습니다.")
+    return response["message"].strip()
+
+
+def _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, ref):
+    """Reconstruct only the first approved Developer diff from a pristine onboarding baseline."""
+    scope = rows[0]["scope"]
+    if (ref["phase"] != "reviewer" or ref["cycle"] != 1 or ref["images"]
+            or scope.get("resume") or scope["replica_sha256"] != onboarding["replica_sha256"]):
+        raise Blocked("이전 버전의 후보에는 검증 가능한 복구 기준이 없습니다.")
+    diffs = [row for row in rows if row["kind"] == "native_inspection_developer_diff"]
+    if len(diffs) != 1 or diffs[0]["source_sha256"] != digest(image):
+        raise Blocked("기존 Developer 변경 영수증을 확인할 수 없습니다.")
+    changed = diffs[0]["changed"]
+    if not changed or changed != rows[-1]["changed"] or any(name not in scope["files"] for name in changed):
+        raise Blocked("변경 파일이 승인 범위와 일치하지 않습니다.")
+    before = dict(image["files"])
+    for name in changed:
+        if name in frozen["files"]:
+            before[name] = frozen["files"][name]
+        else:
+            before.pop(name, None)
+    if digest({**image, "files": before}) != scope["replica_sha256"]:
+        raise Blocked("기존 복제본 시작 상태를 다시 확인할 수 없습니다.")
+    diff = "".join("".join(unified_diff(
+        _read_source(source, name, {"files": before}).splitlines(keepends=True),
+        _read_source(replica, name, image).splitlines(keepends=True), fromfile=f"a/{name}", tofile=f"b/{name}"))
+        for name in changed)
+    if not diff or len(diff) > MAX_DIFF or digest(diff) != diffs[0]["cycle_diff_sha256"]:
+        raise Blocked("기존 Developer diff가 실행 기록과 일치하지 않습니다.")
+    checkpoint = {"cycle": 1, "criterion": ref["target"], "criteria_status": dict.fromkeys(scope["criteria"], "NOT_STARTED"),
+                  "changed": changed, "continuation": {"known": sorted({digest(before), digest(image["files"])}),
+                  "reviewed": [], "failures": [], "stagnant": 0}}
+    if scope.get("visual_review"):
+        candidates = [row for row in rows if row["kind"] == "native_inspection_role_result"
+                      and row["phase"] == "verifier" and row["cycle"] == 1
+                      and row.get("source_sha256") == digest(image) and row.get("owned_tree") == "DRAINED"
+                      and row.get("outcome") == "COMPLETED"]
+        if len(candidates) == 1:
+            checkpoint["pending_visual"] = {"receipt": candidates[0], "frames": []}
+    return checkpoint, diff
+
+
+def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew):
+    start, end = rows[0], rows[-1]
+    prior = start["scope"]
+    if (end["kind"] != "native_inspection_result" or end.get("owned_tree") != "DRAINED"
+            or end.get("usage_complete") is not True or end.get("staging_cleanup", {}).get("status") != "RETAINED_FOR_RECOVERY"
+            or digest(prior) != start["approval_sha256"] or end.get("approval_sha256") != start["approval_sha256"]
+            or not re.fullmatch(r"[a-f0-9]{32}", start["run_id"])
+            or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
+                   for e in events if e["kind"] == "native_inspection_intent")):
+        raise Blocked("소유 자원과 사용량이 확정된 미사용 복구 기록이 필요합니다.")
+    remaining_seconds, remaining_tokens, calls = manual_remaining(prior, end)
+    if (type(renew) is not bool or type(seconds) is not int or type(tokens) is not int
+            or (renew and not (60 <= seconds <= MAX_SESSION_SECONDS
+                               and max(prior["role_tokens"].values()) <= tokens <= MAX_SESSION_TOKENS))
+            or (not renew and (min(seconds, tokens, calls) < 0
+                               or (seconds, tokens) != (remaining_seconds, remaining_tokens)))
+            or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000):
+        raise Blocked("남은 승인 예산과 재개 요청이 일치하지 않습니다.")
+    ledger = runner.ledger
+    source, replica, frozen, onboarding = baseline(ledger, prior["project_id"])
+    image = snapshot(replica)
+    if (str(source) != prior["original"] or str(replica) != prior["replica"]
+            or digest(onboarding) != prior["onboarding_sha256"]
+            or Catalog(ledger).read()["projects"][prior["project_id"]]["revision"] != prior["project_revision"]
+            or not original_matches(source, frozen) or digest(image) != end["replica_sha256"]):
+        raise Blocked("원본, 프로젝트 승인 또는 작업 복제본이 변경됐습니다.")
+    with _git(ledger, source) as (git, _):
+        if _scan(source, git, frozen["local_examples"]) != frozen:
+            raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
+    intents = [row for row in rows if row["kind"] == "native_inspection_role_intent" and "role_call" in row]
+    results = [row for row in rows if row["kind"] == "native_inspection_role_result" and "provider_usage" in row]
+    if (not intents or len(intents) != len(results) or len(results) != end["model_turns_dispatched"]
+            or any(not isinstance(row["provider_usage"], dict) for row in results)
+            or sum(row["provider_usage"]["input_tokens"] + row["provider_usage"]["output_tokens"]
+                   for row in results) != end["known_reported_tokens"]):
+        raise Blocked("기존 역할 호출 수와 확정 사용량을 대조할 수 없습니다.")
+    intent, role = intents[-1], results[-1]
+    if (role["phase"] not in {"reviewer", "manager-final"} or role.get("outcome") != "COMPLETED"
+            or role.get("process_result") != "EXITED" or role.get("exit_code") != 0
+            or role.get("owned_tree") != "DRAINED" or role.get("target") not in prior["criteria"]
+            or any(role[key] != intent[key] for key in ("cycle", "phase", "target"))
+            or intent["source_sha256"] != digest(image)
+            or any(row.get("approval_sha256") != start["approval_sha256"] for row in (intent, role))):
+        raise Blocked("기존 역할 응답이 승인된 복제본과 일치하지 않습니다.")
+    ref = _response_ref(start, intent, role)
+    message = _read_settled_response(ledger, ref, prior)
+    if end["outcome"] == POSTPROCESS_PENDING:
+        checkpoint = rows[-2]
+        if (checkpoint["kind"] != "native_inspection_signoff_checkpoint"
+                or checkpoint.get("postprocess_phase") != role["phase"]
+                or checkpoint.get("source_sha256") != digest(image)
+                or (checkpoint.get("cycle"), checkpoint.get("criterion")) != (role["cycle"], role["target"])):
+            raise Blocked("후처리 체크포인트가 응답과 일치하지 않습니다.")
+        path = ledger.local_directory("recovery") / f"registered-signoff-{start['run_id']}.diff"
+        diff = _read_observation(path, MAX_DIFF * 4 + 1).decode("utf-8")
+        if len(diff) > MAX_DIFF or digest(diff) != checkpoint["diff_sha256"]:
+            raise Blocked("체크포인트의 변경 내용이 다릅니다.")
+        if role["phase"] == "manager-final":
+            verification = checkpoint.get("verification", {})
+            if (not checkpoint.get("comparison") or checkpoint.get("review") not in REVIEW_VERDICTS
+                    or verification.get("source_sha256") != digest(image) or verification.get("owned_tree") != "DRAINED"
+                    or not any(row["kind"] in {"native_inspection_role_result", "native_inspection_verifier_reused"}
+                               and row.get("phase") == "verifier" and row.get("cycle") == role["cycle"]
+                               and all(row.get(key) == value for key, value in verification.items())
+                               for row in rows)):
+                raise Blocked("최종 Manager에 전달된 독립 검증 근거를 확인할 수 없습니다.")
+    else:
+        checkpoint, diff = _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, ref)
+    try:
+        if ref["images"]:
+            if checkpoint.get("pending_visual", {}).get("frames") != ref["images"]:
+                raise Blocked("시각 검토 화면이 응답과 일치하지 않습니다.")
+            visual.read_frames(ledger, ref["images"])
+            visual.parse(message, [frame["id"] for frame in ref["images"]], checkpoint["changed"])
+        else:
+            verdict, reason, _ = _parse_verdict(message, REVIEW_VERDICTS if role["phase"] == "reviewer" else FINAL_VERDICTS)
+            if role["phase"] == "manager-final" and prior["verifier"].get("mode") == "godot-game" and not reason:
+                raise VerdictError("Final Manager did not provide a decision reason")
+    except Blocked as error:
+        raise Blocked("보존된 응답의 판정을 확정할 수 없습니다. " + str(error)) from error
+    resume = {key: checkpoint[key] for key in ("cycle", "criterion", "criteria_status", "changed", "continuation",
+                                               "review", "review_feedback", "comparison", "verification",
+                                               "visual", "pending_visual")
+              if key in checkpoint}
+    resume.update(mode="postprocess", parent_run_id=start["run_id"], saved_response=ref,
+                  parent_reported_tokens=end["known_reported_tokens"], changed_total=end["changed"])
+    cycles = prior["cycles"]
+    if renew:
+        resume["renewed_budget"] = True
+        cycles = ref["cycle"] + 1
+        calls = 5 if ref["phase"] == "reviewer" else 4
+    return ({**prior, "resume": resume, "replica_sha256": digest(image), "ledger_head": head,
+             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles, "model_calls_max": calls}, diff)
+
+
 def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now):
     start, checkpoint, end = rows[0], rows[-2], rows[-1]
     prior = start["scope"]
@@ -1460,11 +1736,16 @@ def _resume_remaining(session, diff):
     status = resume["criteria_status"]
     session.progress = status
     session.cycles_checked = count - 1
-    session.changes = session.scope["files"]
+    postprocess = resume.get("mode") == "postprocess"
+    session.changes = resume["changed_total"] if postprocess else session.scope["files"]
     session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
                              "changed": resume["changed"], "diff": diff}
     if resume.get("pending_visual"):
         session.signoff_state["pending_visual"] = resume["pending_visual"]
+    if resume.get("continuation"):
+        session.signoff_state["continuation"] = resume["continuation"]
+    if resume.get("review_feedback"):
+        session.signoff_state["review_feedback"] = resume["review_feedback"]
     if resume.get("visual"):
         attachment = session.signoff_state["visual"] = resume["visual"]
         if any(frame["source_sha256"] != session.source() for frame in attachment["frames"]):
@@ -1473,23 +1754,36 @@ def _resume_remaining(session, diff):
     review = resume.get("review")
     comparison = resume.get("comparison")
     if review is None:
-        _, review, _, _, comparison = _review_and_verify(session, count, key, diff, status)
+        _, review, _, checked, comparison = _review_and_verify(session, count, key, diff, status)
     else:
         session.signoff_state["review"] = review
         if comparison is None:
-            _, comparison = _verify_signoff(session, count, key, status)
+            checked, comparison = _verify_signoff(session, count, key, status)
         else:
+            checked = session.signoff_state.get("pending_visual", {}).get("receipt", {})
             session.signoff_state["comparison"] = comparison
+            if postprocess and resume.get("verification"):
+                session.signoff_state["verification"] = resume["verification"]
+                session.record("native_inspection_verifier_reused", cycle=count, phase="verifier",
+                               parent_run_id=resume["parent_run_id"], **resume["verification"])
             session.progress = comparison["criteria"]
             session.cycles_checked = count
-    status = comparison["criteria"]
-    expected = ("REWORK" if review != "ACCEPT" or status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"}
-                or comparison["regressed"]
-                else "COMPLETED" if all(value == "VERIFIED" for value in status.values())
-                else "USER_TEST_REQUIRED" if session.scope["verifier"].get("mode") in
-                (BASELINE_VERIFIER, game_pilot.REGISTERED_GUI)
-                else "CONTINUE")
+    expected = _expected_final(session.scope, key, comparison, review)
     final = _decide(session, count, key, review, comparison, expected)
+    if postprocess and final in {"CONTINUE", "REWORK"} and not session.stop_reason:
+        feedback = {"target": key, "next": final, "change_hash": digest(diff),
+                    "review": session.signoff_state.get("review_feedback", review),
+                    "verifier": checked.get("observations", [])}
+        saved = resume.get("continuation") or {"known": [digest(session.image["files"])], "reviewed": [],
+                                               "failures": [], "stagnant": 0}
+        stagnant = (0 if comparison["newly_verified"] and not comparison["regressed"] and review == "ACCEPT"
+                    else saved["stagnant"] + 1)
+        if stagnant >= 2:
+            raise Blocked("NO_PROGRESS")
+        session.signoff_state = {}
+        return _cycles(session, continuation={**saved, "cycle": count, "stagnant": stagnant,
+                                               "criteria_status": comparison["criteria"], "changed": session.changes,
+                                               "feedback": feedback})
     return "GRACEFUL_STOP" if final == "CONTINUE" and getattr(session, "stop_reason", None) else final
 
 
@@ -1548,6 +1842,9 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             session = RegisteredSession(runner, scope, lab, len(events), head, fields, cancelled)
             session.activity = activity
             session.pause = pause
+            if resume and scope["resume"].get("mode") == "postprocess":
+                ref = scope["resume"]["saved_response"]
+                session.saved_response = {**ref, "message": _read_settled_response(ledger, ref, scope)}
             session.count, session.fence = ledger.append(
                 len(events), head, {**fields, "kind": "native_inspection_intent", "scope": scope,
                                     "workspace": lab.name}, admission=require_admission)
@@ -1573,9 +1870,16 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                         _save_signoff(session)
                     except (Blocked, OSError, ValueError) as checkpoint_error:
                         outcome, reason = "BLOCKED", str(checkpoint_error)
+                if isinstance(error, VerdictError) and reason != "CANCELLED":
+                    try:
+                        _save_postprocess(session, error)
+                        outcome = POSTPROCESS_PENDING
+                    except (Blocked, OSError, ValueError, StopIteration) as checkpoint_error:
+                        reason = f"{reason} · 응답 복구 기록 확인 실패: {checkpoint_error}"
             if not session.owned_verified:
                 return {**fields, "outcome": "RECOVERY_REQUIRED", "owned_tree": "UNRESOLVED", "reason": reason}
-            preserve = outcome in {"REQUEST_UNKNOWN", "USAGE_UNKNOWN", "TIME_LIMIT", "CANCELLED", "BLOCKED"}
+            preserve = outcome in {"REQUEST_UNKNOWN", "USAGE_UNKNOWN", "TIME_LIMIT", "CANCELLED", "BLOCKED",
+                                   POSTPROCESS_PENDING}
             cleanup["preserve"] = preserve
         if preserve:
             cleanup = {"status": "RETAINED_FOR_RECOVERY", "workspace": lab.name}

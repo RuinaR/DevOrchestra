@@ -4,13 +4,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from shutil import copyfile
 from tempfile import TemporaryDirectory
 from threading import Event
 from time import monotonic, time
 import unittest
 from unittest.mock import Mock, patch
 
-from devorchestra import cycle_progress, game_pilot, native_cycle, original_apply, project_onboarding, registered_cycle
+from devorchestra import codex_setup, cycle_progress, game_pilot, native_cycle, original_apply, project_onboarding, registered_cycle
 from devorchestra.catalog import Catalog, new_project
 from devorchestra.ledger import Ledger, digest
 from devorchestra.lease import Blocked
@@ -19,6 +20,28 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_explicit_verdicts_and_bounded_multiline_reason(self):
+        parse = registered_cycle._parse_verdict
+        options = registered_cycle.REVIEW_VERDICTS
+        for message, verdict, reason in [
+            ("ACCEPT", "ACCEPT", ""), ("REWORK", "REWORK", ""),
+            ("REWORK: fix labels", "REWORK", "fix labels"),
+            ("REWORK\r\n1. Fix labels.\r\n\r\n- ACCEPT was considered.", "REWORK",
+             "1. Fix labels.\n\n- ACCEPT was considered."),
+            ("REWORK\n\nFirst paragraph.\n\nSecond paragraph.", "REWORK",
+             "First paragraph.\n\nSecond paragraph."),
+        ]:
+            with self.subTest(message=message):
+                self.assertEqual(parse(message, options), (verdict, reason, False))
+        for message in ("I recommend REWORK", "ACCEPT or REWORK", "ACCEPT\nREWORK: change it",
+                        "ACCEPT/REWORK", "COMPLETED", "ACCEPTED"):
+            with self.subTest(message=message), self.assertRaises(registered_cycle.VerdictError):
+                parse(message, options)
+        for verdict in registered_cycle.FINAL_VERDICTS:
+            self.assertEqual(parse(verdict + "\nGrounded reason.", registered_cycle.FINAL_VERDICTS)[0], verdict)
+        self.assertEqual(parse("REWORK\n" + "a" * 2000, options),
+                         ("REWORK", "a" * registered_cycle.MAX_VERDICT_REASON, True))
+
     def test_shutdown_reservation_can_be_cancelled_until_checkpoint_is_claimed(self):
         pause = registered_cycle.PauseControl()
         pause.change("request")
@@ -102,7 +125,14 @@ class RegisteredCycleTests(unittest.TestCase):
     def test_resume_settled_developer_without_repeating_model_calls(self):
         self._exercise(True)
 
-    def _exercise(self, resume):
+    def test_windows_postprocess_reuses_reviewer_then_reworks_without_replay(self):
+        self._exercise(False, recover=True)
+
+    def test_windows_postprocess_reuses_final_manager_and_verifier_without_model_calls(self):
+        self._exercise(False, recover="manager")
+
+    def _exercise(self, resume, *, recover=False):
+        manager_recovery = recover == "manager"
         approved = Path(__file__).resolve().parents[1] / ".ai-local" / "temp"
         with TemporaryDirectory(prefix="registered-test-", dir=approved) as folder:
             base = Path(folder)
@@ -112,6 +142,9 @@ class RegisteredCycleTests(unittest.TestCase):
             ledger = Ledger(runtime / "state" / "p1.sqlite3", local_root=runtime)
             ledger.initialize()
             (ledger.local_directory("state") / "codex-developer-home").mkdir()
+            archive = codex_setup.archive_path(ledger)
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            copyfile(os.environ["DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"], archive)
             runner = Runner(ledger)
             (original / "formatting.py").write_text('GREETING = "old"\nSIGNOFF = "old"\n', encoding="utf-8")
             (original / "check.py").write_text(
@@ -152,10 +185,11 @@ class RegisteredCycleTests(unittest.TestCase):
                     keys[0]: {"args": ["/d", "/q", "/c", "type", "greeting.txt"], "stdout": "hello", "inputs": []},
                     keys[1]: {"args": ["/d", "/q", "/c", "type", "closing.txt"], "stdout": "goodbye", "inputs": []}}}
             params = ("registered-test", os.environ["DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"], int(time()) + 600,
-                      300, 270000, 2, ["formatting.py", "closing.py"] if resume else ["greeting.txt", "closing.txt"],
+                      300, 270000, 1 if manager_recovery else 2,
+                      ["formatting.py", "closing.py"] if resume else ["greeting.txt", "closing.txt"],
                       list(registered_cycle.PERMISSIONS), tests)
             calls = []
-            developer_observed = Event() if not resume and os.environ.get("DEVORCHESTRA_REGISTERED_GUI_QA") else None
+            developer_observed = Event() if not resume and not recover and os.environ.get("DEVORCHESTRA_REGISTERED_GUI_QA") else None
 
             def transport(binary, argv, work, logs, env, **options):
                 (logs / "probe.stderr").write_bytes(b"")
@@ -178,7 +212,17 @@ class RegisteredCycleTests(unittest.TestCase):
                         options["check"]()
                         self.assertTrue(developer_observed.wait(15), "Main window never showed the running command")
                         command_events.append({"type": "item.completed", "item": {**command, "exit_code": 0}})
-                    if not resume:
+                    if manager_recovery:
+                        (work / "greeting.txt").write_text("hello\n", encoding="ascii")
+                        (work / "closing.txt").write_text("goodbye\n", encoding="ascii")
+                    elif recover:
+                        if cycle == 1:
+                            (work / "greeting.txt").write_text("candidate\n", encoding="ascii")
+                        else:
+                            self.assertIn("Fix the placeholder", argv[-1])
+                            (work / "greeting.txt").write_text("hello\n", encoding="ascii")
+                            (work / "closing.txt").write_text("goodbye\n", encoding="ascii")
+                    elif not resume:
                         filename, value = ("greeting.txt", "hello") if cycle == 1 else ("closing.txt", "goodbye")
                         (work / filename).write_text(value + "\n", encoding="ascii")
                     elif cycle == 2:
@@ -187,16 +231,25 @@ class RegisteredCycleTests(unittest.TestCase):
                         code = 'GREETING = "hello"\nSIGNOFF = "old"\n' if cycle == 1 else (
                             'GREETING = "hello"\nSIGNOFF = "goodbye"\n')
                         (work / "formatting.py").write_text(code, encoding="utf-8")
-                message = {"manager-planning": json.dumps({"criterion": keys[cycle - 1], "plan": "Update the text"}),
-                           "developer": "Edited", "reviewer": "ACCEPT — the diff meets the criterion.",
-                           "manager-final": "CONTINUE — one check remains." if cycle == 1 else "COMPLETED"}[phase]
+                message = {"manager-planning": json.dumps({"criterion": keys[0 if recover else cycle - 1],
+                                                           "plan": "Update the text"}),
+                           "developer": "Edited",
+                           "reviewer": ("REWORK\n1. Fix the placeholder.\n\nThe display still needs the greeting."
+                                        if recover and not manager_recovery and cycle == 1 else "ACCEPT — the diff meets the criterion."),
+                           "manager-final": ("COMPLETED\nBoth independent checks passed." if manager_recovery
+                                             else "REWORK\nThe review requires a fix." if recover and cycle == 1
+                                             else "CONTINUE — one check remains." if cycle == 1
+                                             else "COMPLETED\nBoth independent checks passed.")}[phase]
                 events = [{"type": "thread.started", "thread_id": "offline"}, {"type": "turn.started"},
                           *command_events,
                           {"type": "item.completed", "item": {"type": "agent_message", "text": message}},
                           {"type": "turn.completed", "usage": {
                               "input_tokens": 60000 if resume and (cycle, phase) == (2, "developer") else 100,
                               "output_tokens": 5}}]
-                return {"stdout": "\n".join(map(json.dumps, events)), "exitCode": 0, "job_active": 0}
+                stdout = "\n".join(map(json.dumps, events))
+                if recover:
+                    (logs / "probe.stdout").write_text(stdout, encoding="utf-8")
+                return {"stdout": stdout, "exitCode": 0, "job_active": 0}
 
             with patch.object(native_cycle, "_observe", side_effect=transport), patch.object(
                     registered_cycle, "_diagnostic", return_value={"request_id": "offline"}):
@@ -206,7 +259,47 @@ class RegisteredCycleTests(unittest.TestCase):
                                                   visual_review=True)
                 self.assertEqual(preview["visual_preview"], "scratch-windows-exe")
                 self.assertEqual(calls, [])
-                if resume:
+                if recover:
+                    parse = registered_cycle._parse_verdict
+
+                    def legacy_format(message, options):
+                        failing_role = (message.startswith("COMPLETED\n") and options == registered_cycle.FINAL_VERDICTS
+                                        if manager_recovery else
+                                        message.startswith("REWORK\n") and options == registered_cycle.REVIEW_VERDICTS)
+                        if failing_role:
+                            raise registered_cycle.VerdictError("Simulated previous parser failure")
+                        return parse(message, options)
+
+                    with patch.object(registered_cycle, "_parse_verdict", side_effect=legacy_format):
+                        stopped = registered_cycle.run(runner, *params, approval=digest(scope))
+                    self.assertEqual(stopped["outcome"], registered_cycle.POSTPROCESS_PENDING)
+                    self.assertEqual(stopped["model_turns_dispatched"], 4 if manager_recovery else 3)
+                    self.assertEqual(stopped["known_reported_tokens"], 420 if manager_recovery else 315)
+                    seconds, tokens, _ = registered_cycle.manual_remaining(scope, stopped)
+                    args = ("registered-test", int(time()) + seconds + 2940, seconds, tokens)
+                    approved = registered_cycle.review_resume(runner, *args, graceful=True)
+                    ref = approved["resume"]["saved_response"]
+                    self.assertEqual(ref["phase"], "manager-final" if manager_recovery else "reviewer")
+                    expected_calls = [(1, "manager-planning"), (1, "developer"), (1, "reviewer")]
+                    if manager_recovery:
+                        expected_calls.append((1, "manager-final"))
+                    self.assertEqual(calls, expected_calls)
+                    saved_log = ledger.local_directory("temp") / ref["workspace"] / "tmp" / f"1-{ref['phase']}" / "probe.stdout"
+                    saved_bytes = saved_log.read_bytes()
+                    saved_log.write_bytes(saved_bytes.replace(b"independent", b"changed").replace(b"placeholder", b"substituted"))
+                    try:
+                        with self.assertRaisesRegex(Blocked, "영수증"):
+                            registered_cycle._read_settled_response(ledger, ref, approved)
+                    finally:
+                        saved_log.write_bytes(saved_bytes)
+                    result = registered_cycle.run_resume(runner, *args, approval=digest(approved), graceful=True)
+                    self.assertEqual((result["model_turns_dispatched"], result["known_reported_tokens"]),
+                                     (0, 0) if manager_recovery else (5, 525))
+                    rows = registered_cycle.history(ledger, "registered-test")
+                    self.assertTrue(any(row["kind"] == "native_inspection_role_reused" for row in rows))
+                    with self.assertRaises(Blocked):
+                        registered_cycle.run_resume(runner, *args, approval=digest(approved), graceful=True)
+                elif resume:
                     stopped = registered_cycle.run(runner, *params, approval=digest(scope))
                     self.assertEqual(stopped["outcome"], "TOKEN_LIMIT")
                     args = ("registered-test", int(time()) + 600, 300, 110000)
@@ -233,8 +326,8 @@ class RegisteredCycleTests(unittest.TestCase):
                 self.assertEqual(result["outcome"], "COMPLETED", result)
                 with self.assertRaises(Blocked):
                     registered_cycle.run(runner, *params, approval=digest(scope))
-            self.assertEqual(len(calls), 8)
-            self.assertEqual(result["cycle_count"], 2)
+            self.assertEqual(len(calls), 4 if manager_recovery else 8)
+            self.assertEqual(result["cycle_count"], 1 if manager_recovery else 2)
             self.assertEqual(result["criteria_status"], dict.fromkeys(keys, "VERIFIED"))
             self.assertEqual(result["staging_cleanup"]["status"], "REMOVED")
             self.assertIn('"old"', (original / "formatting.py").read_text())

@@ -39,6 +39,9 @@ REGISTERED_STATES = {
     "TIME_LIMIT": "시간 기준 도달", "TOKEN_LIMIT": "토큰 기준 도달", "CYCLE_LIMIT": "사이클 상한 도달",
     "NO_PROGRESS": "진척 없음", "NOT_VERIFIED": "검증 미확인", "VERIFIED": "검증 완료",
     "CHECKPOINT_SAVED": "체크포인트 저장됨",
+    "POSTPROCESS_PENDING": "응답 저장됨 · 판정 재처리 대기", "RESPONSE_REUSED": "저장된 응답 재사용",
+    "ACCEPT": "검토 수용", "RESPONSE_COMPLETE": "모델 응답 완료", "DECISION_REJECTED": "Controller 판정 불일치",
+    "VERDICT_PARSED": "판정 해석 완료",
     "NOT_STARTED": "대기", "REGRESSED": "회귀", "CONTINUE": "다음 작업 진행", "REWORK": "재작업 필요",
 }
 POLL_MS = 1500
@@ -1057,7 +1060,8 @@ class CommandCenter:
         if stop := (progress or {}).get("stop"):
             detail.append(f"종료 예약 · {REGISTERED_STATES.get(stop, stop)}")
         if reason:
-            detail.append(str(reason)[:300])
+            detail.append(("모델 응답의 판정을 읽지 못했습니다. 이어서 개발에서 보존된 응답을 확인하세요."
+                           if reason == "Role did not return a valid verdict" else str(reason)[:300]))
         if changed := (progress or {}).get("changed"):
             detail.append(f"변경 파일 {len(changed)}개 · {', '.join(changed[:5])[:250]}")
         if criteria := (progress or {}).get("criteria"):
@@ -1147,7 +1151,7 @@ class CommandCenter:
             tools.setdefault((cycle, phase), []).append("인계 · " + message if kind == "handoff" else message)
         lines, pending = [], set()
         for row in history:
-            cycle, phase, kind = row["cycle"], row.get("phase"), row["kind"]
+            cycle, phase, kind = row["cycle"], row.get("phase", row.get("role")), row["kind"]
             key = (cycle, phase)
             role = REGISTERED_LABELS.get(phase, "")
             if kind == "native_inspection_role_intent":
@@ -1169,6 +1173,11 @@ class CommandCenter:
                 lines.append(f"{cycle}사이클 · 시각 검토 · {row['verdict']}")
             elif kind == "native_inspection_manual_checkpoint":
                 lines.append(f"{cycle}사이클 · 체크포인트 기록")
+            elif kind in {"native_inspection_role_reused", "native_inspection_decision_applied",
+                          "native_inspection_decision_rejected", "native_inspection_postprocess_failed",
+                          "native_inspection_role_feedback"}:
+                outcome = self.registered_role_state(row, None, False)
+                lines.append(f"{cycle}사이클 · {role} · {REGISTERED_STATES.get(outcome, outcome)}")
             else:
                 title_text = "계획 재사용" if kind == "native_inspection_manager_plan_reused" else "Developer 건너뜀"
                 lines.append(f"{cycle}사이클 · {title_text}")
@@ -1193,6 +1202,17 @@ class CommandCenter:
             return "WAITING"
         if row["kind"] == "native_inspection_role_intent":
             return "RUNNING" if running and not end else "UNSETTLED"
+        if row["kind"] == "native_inspection_role_reused":
+            return "RESPONSE_REUSED"
+        if row["kind"] == "native_inspection_postprocess_failed":
+            return "POSTPROCESS_PENDING"
+        if row["kind"] == "native_inspection_role_feedback":
+            return "VERDICT_PARSED"
+        if row["kind"] == "native_inspection_decision_rejected":
+            return "DECISION_REJECTED"
+        if (row["kind"] == "native_inspection_role_result" and row.get("outcome") == "COMPLETED"
+                and row.get("phase") in {"reviewer", "manager-final"}):
+            return "RESPONSE_COMPLETE"
         return row.get("verdict", row.get("manager_decision", row.get("outcome", "UNSETTLED")))
 
     def answer_question(self):
@@ -1339,6 +1359,8 @@ class CommandCenter:
         end = (progress or {}).get("end") or {}
         if end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True:
             return False
+        if registered_cycle.can_review_postprocess(end):
+            return end.get("staging_cleanup", {}).get("status") == "RETAINED_FOR_RECOVERY"
         if end["outcome"] == registered_cycle.MANUAL_CHECKPOINT:
             scope = progress["scope"]
             seconds, tokens, calls = registered_cycle.manual_remaining(scope, end)

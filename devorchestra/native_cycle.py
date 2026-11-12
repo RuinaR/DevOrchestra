@@ -469,7 +469,7 @@ class _FixtureSession:
         return response
 
     def dispatch(self, cycle, phase, target, prompt, *, test_pattern=None, expected="", tool_root=None, shell_tools=True,
-                 decision_parser=None,
+                 decision_parser=None, raw_decision=False,
                  context="This is an isolated arithmetic fixture.", extra_read_roots=(), scratch_root=None,
                  images=(), image_evidence=()):
         self.check()
@@ -604,7 +604,7 @@ class _FixtureSession:
         self.check()
         if not writable:
             self.check_image()
-        response["message"] = receipt["manager_decision"] if decision_parser else message.strip()
+        response["message"] = receipt["manager_decision"] if decision_parser and not raw_decision else message.strip()
         return response, recovered_developer
 
     def fixture_lines(self, filename):

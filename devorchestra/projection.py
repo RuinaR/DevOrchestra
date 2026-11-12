@@ -51,6 +51,17 @@ def registered_progress(events, project):
             roles["manager-planning"] = {**row, "outcome": "REUSED"}
         elif kind == "native_inspection_developer_skipped":
             roles["developer"] = {**row, "outcome": "SKIPPED"}
+        elif kind == "native_inspection_role_reused":
+            roles[row["phase"]] = {**row, "outcome": "RESPONSE_REUSED"}
+        elif kind == "native_inspection_role_feedback":
+            phase = row["role"]
+            roles[phase] = {**roles.get(phase, {}), **row, "phase": phase}
+        elif kind == "native_inspection_review_decision":
+            roles["reviewer"] = {**roles.get("reviewer", {}), **row, "phase": "reviewer"}
+        elif kind in {"native_inspection_decision_applied", "native_inspection_decision_rejected",
+                      "native_inspection_postprocess_failed"}:
+            phase = row["phase"]
+            roles[phase] = {**roles.get(phase, {}), **row}
         elif kind == "native_inspection_developer_diff":
             changed.update(row["changed"])
         elif kind == "native_inspection_cycle_progress":
@@ -64,7 +75,9 @@ def registered_progress(events, project):
             "cycle": cycle, "roles": roles, "stop": stop,
             "history": [row for row in rows if row["kind"] in {
                 "native_inspection_role_intent", "native_inspection_role_result", "native_inspection_developer_diff",
-                "native_inspection_review_decision", "native_inspection_visual_review",
+                "native_inspection_review_decision", "native_inspection_visual_review", "native_inspection_role_feedback",
+                "native_inspection_role_reused", "native_inspection_decision_applied",
+                "native_inspection_decision_rejected", "native_inspection_postprocess_failed",
                 "native_inspection_manager_plan_reused", "native_inspection_developer_skipped",
                 "native_inspection_manual_checkpoint"}],
             "changed": end.get("changed", []) if end else sorted(changed),
