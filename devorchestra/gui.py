@@ -1457,7 +1457,11 @@ class CommandCenter:
         if action == "resume":
             from .gui_registered_cycle import show
 
-            continuation = self.can_continue_progress_stop(self.view.get("registered_progress"))
+            progress = self.view.get("registered_progress") or {}
+            if progress.get("tool_preflight_recoverable"):
+                show(self, self.view["project_id"], resume_only=True)
+                return
+            continuation = self.can_continue_progress_stop(progress)
             show(self, self.view["project_id"], resume_only=not continuation, continue_progress=continuation)
         else:
             self.registered_job["pause"].change(action)

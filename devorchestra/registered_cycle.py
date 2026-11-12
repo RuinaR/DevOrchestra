@@ -2014,6 +2014,8 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
         return _resume_size_stopped_candidate(runner, events, head, rows, expires, seconds, tokens, now, renew)
     if renew:
         raise Blocked("추가 개발 예산은 보존된 응답을 복구할 때만 사용할 수 있습니다.")
+    if _recoverable_pre_developer_stop(rows):
+        return _resume_tool_preparation(runner, events, head, rows, expires, seconds, tokens, now)
     if rows and rows[-1].get("outcome") == MANUAL_CHECKPOINT:
         return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
     if rows and can_review_registered_plan(rows[-1]):
@@ -2364,9 +2366,60 @@ def _read_settled_response(ledger, ref, scope):
     if (digest(response["message"]) != ref["message_sha256"]
             or response["provider_usage"] != ref["provider_usage"]
             or digest(response["command_events"]) != ref["commands_sha256"]
-            or (response["command_events"] and (ref["images"] or phase not in scope["shell_roles"]))):
+            or (response["command_events"] and (ref["images"] or ref["phase"] not in scope["shell_roles"]))):
         raise Blocked("보존된 모델 응답·사용량·도구 기록이 영수증과 일치하지 않습니다.")
     return response["message"].strip()
+
+
+def _resume_tool_preparation(runner, events, head, rows, expires, seconds, tokens, now):
+    start, end = rows[0], rows[-1]
+    prior = start["scope"]
+    if any(row["kind"] == "native_inspection_intent"
+           and row.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"] for row in events):
+        raise Blocked("저장된 계획의 재개 승인이 이미 사용됐습니다.")
+    remaining_seconds, remaining_tokens, calls = manual_remaining(prior, end)
+    if (type(seconds) is not int or type(tokens) is not int or (seconds, tokens) != (remaining_seconds, remaining_tokens)
+            or seconds < 60 or calls < 1 or tokens < prior["role_tokens"]["developer"]
+            or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000):
+        raise Blocked("남은 승인 예산으로 Developer부터 재개할 수 없습니다.")
+    ledger = runner.ledger
+    source, replica, frozen, onboarding = baseline(ledger, prior["project_id"])
+    candidate = snapshot(replica)
+    image = digest(candidate)
+    if (str(source) != prior["original"] or str(replica) != prior["replica"]
+            or digest(onboarding) != prior["onboarding_sha256"] or image != prior["replica_sha256"]
+            or Catalog(ledger).read()["projects"][prior["project_id"]]["revision"] != prior["project_revision"]
+            or not original_matches(source, frozen)):
+        raise Blocked("저장된 계획 이후 원본, 복제본 또는 프로젝트 설정이 바뀌었습니다.")
+    with _git(ledger, source) as (git, _):
+        if _scan(source, git, frozen["local_examples"]) != frozen:
+            raise Blocked("원본 Git 상태가 온보딩과 일치하지 않습니다.")
+    intent = next(row for row in reversed(rows) if row["kind"] == "native_inspection_role_intent")
+    role = next(row for row in reversed(rows) if row["kind"] == "native_inspection_role_result")
+    accepted = next((row for row in reversed(rows) if row["kind"] == "native_inspection_plan_accepted"), {})
+    setup = next(row for row in rows if row["kind"] == "native_inspection_project_tools_intent")
+    if (role.get("exit_code") != 0 or role.get("process_result") != "EXITED"
+            or accepted.get("cycle") != role["cycle"] or setup.get("cycle") != role["cycle"]):
+        raise Blocked("도구 준비에 연결된 확정 계획 영수증이 없습니다.")
+    message = _read_settled_response(ledger, _response_ref(start, intent, role), prior)
+    role_capabilities = prior.get("planning_protocol") == PLANNING_PROTOCOL
+    plan = _parse_plan(message, [accepted.get("target")], approved_paths=prior["files"],
+                       github_tools=True, project_edit=bool(prior.get("project_edit")), role_capabilities=role_capabilities)
+    if role_capabilities:
+        plan = _repair_planning_handoff(plan, _developer_capabilities(prior))
+    if (plan["criterion"] not in prior["criteria"] or plan.get("mode") not in {"edit", "documentation"}
+            or digest(plan) != accepted.get("plan_sha256") or plan.get("tools") != setup.get("packages")):
+        raise Blocked("저장된 계획과 승인된 도구 준비 기록이 일치하지 않습니다.")
+    doc_accepted = prior["prior_replica_candidate"].get("accepted_without_functional_check", [])
+    resume = {"mode": "after-registered-planning", "cycle": role["cycle"] - 1, "criterion": plan["criterion"],
+              "parent_run_id": start["run_id"], "parent_reported_tokens": end["known_reported_tokens"],
+              "plan_sha256": digest(plan), "changed": end["changed"], "stagnant": 0,
+              "criteria_status": {key: "USER_TEST_REQUIRED" if key in doc_accepted else "NOT_STARTED"
+                                  for key in prior["criteria"]},
+              "accepted_without_functional_check": doc_accepted, "feedback": None,
+              "known": [digest(candidate["files"])], "reviewed": [], "failures": []}
+    return ({**prior, "resume": resume, "ledger_head": head, "expires": expires,
+             "seconds": seconds, "tokens": tokens, "model_calls_max": calls}, plan)
 
 
 def _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, ref):

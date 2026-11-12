@@ -710,7 +710,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             dialog.grab_set()
             return
         if rows and (rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT
-                     or registered_cycle.can_review_registered_plan(rows[-1])):
+                     or registered_cycle.can_review_registered_plan(rows[-1])
+                     or registered_cycle._recoverable_pre_developer_stop(rows)):
             try:
                 seconds, tokens, _ = (registered_cycle.registered_plan_remaining(runner.ledger, rows)
                                       if registered_cycle.can_review_registered_plan(rows[-1]) else
