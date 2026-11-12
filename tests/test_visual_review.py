@@ -1,4 +1,4 @@
-from json import dumps
+from json import dumps, loads
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -114,6 +114,16 @@ class VisualReviewTests(unittest.TestCase):
             self.assertFalse(blockers)
         with self.assertRaises(Blocked):
             visual_review.parse(self.report(), ["F2"])
+
+    def test_bounded_uncertainty_notes_do_not_discard_valid_visual_observations(self):
+        report = loads(self.report(verdict="ACCEPT", kind="suggestion"))
+        report["not_verified"] = [f"Unverified observation {number}" for number in range(5)]
+        result, blockers = visual_review.parse(dumps(report), ["F1"])
+        self.assertEqual(report["not_verified"], result["not_verified"])
+        self.assertEqual([], blockers)
+        report["not_verified"] *= 2
+        with self.assertRaises(Blocked):
+            visual_review.parse(dumps(report), ["F1"])
 
     def test_runtime_freezes_reviewer_document_and_passes_real_attachment_arguments(self):
         instruction = public_instruction("reviewer")

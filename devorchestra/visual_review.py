@@ -14,6 +14,7 @@ from .role_contract import _unique_object
 
 MAX_FRAMES = 4
 MAX_FINDINGS = 4
+MAX_NOT_VERIFIED = 8
 SENSITIVE = re.compile(r"https?://|\b(?:bearer|password|secret|credential|api[ _-]?key|token|cookie)\b"
                        r"|\b[A-Za-z0-9_+/=-]{32,}\b", re.I)
 
@@ -188,7 +189,7 @@ def parse(message, frame_ids, changed_files=()):
                 or result["verdict"] not in ("ACCEPT", "REWORK", "UNAVAILABLE")
                 or type(result["observations"]) is not list or len(result["observations"]) != len(frame_ids)
                 or type(result["findings"]) is not list or len(result["findings"]) > MAX_FINDINGS
-                or type(result["not_verified"]) is not list or len(result["not_verified"]) > 4
+                or type(result["not_verified"]) is not list or len(result["not_verified"]) > MAX_NOT_VERIFIED
                 or not all(_description(item) for item in result["not_verified"])):
             raise ValueError
         code = result["code_finding"]

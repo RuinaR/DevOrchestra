@@ -950,8 +950,10 @@ def _review_and_verify(session, count, key, diff, status):
                     for row in checked["observations"]], "source_sha256": session.source()}
         play_actions = [{key: row[key] for key in ("step", "action", "result")} for row in play_report.get("actions", ())]
         play_context = ("These are owned-window observations from a separate bounded play attempt. "
-                        f"Actual action receipts in order: {json.dumps(play_actions)}. "
+                        f"Earlier Reviewer turns selected these actions; the Controller executed them: {json.dumps(play_actions)}. "
                         "Compare the frame sequence to the observed transitions. "
+                        "Compare visible labels with approved expected text when supplied. If the expected text is unknown, "
+                        "report that uncertainty instead of claiming that the complete label is visible. "
                         "Unchanged pixels and sent window messages alone cannot prove that the game accepted input. "
                         if play_report.get("has_frames") else
                         "Any input shown here came from the Controller scenario. Do not claim to have played "
@@ -970,7 +972,7 @@ def _review_and_verify(session, count, key, diff, status):
                            "or control feel. If images are missing reply UNAVAILABLE. Return only JSON with verdict "
                            "(ACCEPT, REWORK, UNAVAILABLE), observations (ordered objects with frame and visible; "
                            "describe a concrete fact visible in each image), findings (0 to 4), and not_verified "
-                           "(up to 4 descriptions of conditions the images cannot establish). "
+                           f"(up to {visual.MAX_NOT_VERIFIED} descriptions of conditions the images cannot establish). "
                            "Each finding has id V1 to V4, kind defect or suggestion, severity low/medium/high/critical, "
                            "frame ID, observed, expected, reproduce, fix, basis, and uncertainty low/medium/high. "
                            "Include code_finding as null or an object with file (an exact changed path) and observed "
