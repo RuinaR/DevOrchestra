@@ -127,7 +127,7 @@ class Fixture : Form {
                 selected.append(frame["sha256"])
                 session.calls += 1
                 session.usage += 10
-                return json.dumps(proposal(keys=[["ENTER", "RIGHT", "SPACE"][len(selected) - 1]])), False
+                return {"message": json.dumps(proposal(keys=[["ENTER", "RIGHT", "SPACE"][len(selected) - 1]]))}, False
 
             session.dispatch = choose
             archive = os.environ.get("DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE")

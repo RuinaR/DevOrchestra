@@ -1,5 +1,7 @@
 # 현재 상태
 
+**WinForms 소유 창 AI 플레이 · 실제 이미지 이해 1회, 전체 실증 미완료.** 공식 CLI 0.167.1과 구독 모델이 실제 첫 화면의 안내를 읽고 올바른 키를 선택했다. Controller가 CLI 응답 객체에서 메시지를 꺼내지 않아 당시 입력을 거부했고, 다음 시각 검토 요청은 CLI의 지침 파일 읽기 오류(Windows 오류 5)로 턴 완료를 확인하지 못했다. 확인된 사용량은 입력 10,666·출력 78토큰이며 두 번째 요청 사용량은 미확정이다. 응답 처리를 수정했다. 별도 오프라인 실행에서 EXE와 첫 화면의 동일 해시를 대조한 뒤 저장된 모델 응답을 적용해 실제 화면 전환 한 건과 Job 회수를 확인했다. 실제 온라인 3단계 플레이와 최종 시각 판정, 게임 및 자동 재작업은 아직 미검증이다.
+
 **소유 창 AI 플레이 · IMPLEMENTED / SYNTHETIC_PASS.** 새 승인에서 AI 플레이를 켜면 기존 소유 창 브로커와 공식 Codex CLI 이미지 입력을 연결한다. 사이클마다 최대 3회 모델이 한 장의 실제 창 이미지에서 다음 행동을 제안하며, Controller가 좌표·키·시간·창 소유권을 검증하고 새 화면을 기록한다. 별도 WinForms 시험 앱을 공식 CLI의 오프라인 MXC로 실행해 세 차례 입력과 네 장의 서로 다른 화면, 소유 Job 회수를 확인했다. 행동 선택은 모의 응답이었다. 사용자 앱을 대상으로 삼지 않았다. 실제 구독 모델의 행동 선택, Godot 실플레이, 시각 결함의 실제 Developer 수정·재빌드·재플레이는 아직 검증되지 않았다.
 
 **공식 Windows Computer Use · 자동 세션 입력 BLOCKED.** 공식 데스크톱 기능은 활성 데스크톱의 포인터·키보드·포커스를 사용한다. 고정 공식 Windows x64 Codex CLI 0.167.1의 `exec --help`, `app-server --help`와 실험 항목을 포함한 공개 JSON 스키마를 로컬에서 확인했다. Computer Use 설정과 정책 타입은 있었지만 Controller 소유 Windows Job의 창만 대상으로 관측·입력하는 공개 호출은 확인되지 않았다. 계정 설정과 앱 허용 정책은 창 단위 비간섭 증거가 될 수 없다. 이번에는 공식 조작과 온라인 모델 호출을 실행하지 않았다. 기존 브로커의 실제 WinForms 입력·관측, 호출 범위 검증, 취소·시간 초과 후 Job 회수 및 별도 시험 프로세스 생존을 Windows에서 확인했다. 새 시각 검토 기록은 캡처 출처, 시나리오 입력 및 CLI 이미지 검토를 표시하고 자율 플레이는 `NOT_VERIFIED`로 남긴다. [Windows Computer Use](https://learn.chatgpt.com/docs/computer-use#windows-foreground-use) · [App Server](https://learn.chatgpt.com/docs/app-server)

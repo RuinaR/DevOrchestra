@@ -201,12 +201,13 @@ def run(session, cycle, key, verification, context):
                         raise Blocked("Owned game became the foreground window")
 
                 try:
-                    raw, _ = session.dispatch(cycle, "reviewer", key, prompt, shell_tools=False, images=paths,
-                                              image_evidence=[frame], response_schema=schema(), play_step=step,
-                                              operation_check=check_play)
+                    response, _ = session.dispatch(cycle, "reviewer", key, prompt, shell_tools=False, images=paths,
+                                                   image_evidence=[frame], response_schema=schema(), play_step=step,
+                                                   operation_check=check_play)
                 finally:
                     model_clear = session.owned_verified
                 try:
+                    raw = response["message"]
                     proposed = parse(raw, client)
                 except Blocked:
                     outcome = "PROPOSAL_REJECTED"
