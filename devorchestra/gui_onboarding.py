@@ -13,7 +13,7 @@ from .ledger import digest
 from .runtime import Runner
 
 
-def show_panel(center, initial, *, project=None):
+def show_panel(center, initial, *, project=None, restart=False):
     if project is None:
         index = center.project.current()
         if index < 0:
@@ -21,9 +21,18 @@ def show_panel(center, initial, *, project=None):
         project = center.project_ids[index]
     runner = Runner(center.reader.ledger)
     panel = center.panel()
-    panel.title("기존 Git 프로젝트 문맥")
-    panel.geometry("810x690")
+    panel.title("처음부터 다시 시작" if restart else "기존 Git 프로젝트 문맥")
+    panel.geometry("810x520" if restart else "810x690")
+    destination_problem = ""
+    if restart and not initial:
+        try:
+            initial = project_onboarding.restart_destination(runner.ledger, project)
+        except (OSError, RuntimeError, ValueError) as error:
+            destination_problem = str(error)
     ttk.Label(panel, text=f"{project} · 원본 읽기 전용 / 개발 권한 별도 승인").pack(anchor="w")
+    if restart:
+        ttk.Label(panel, text="원본에서 새 작업 복제본을 만듭니다. 이전 복제본이 있으면 그대로 보관됩니다. "
+                  "기존 개발 기록은 기록·복구에서 확인할 수 있습니다.", wraplength=700).pack(anchor="w", pady=(6, 0))
     ttk.Label(panel, text="복제본 경로 · 상위 폴더를 선택하면 그 안에 새 복제본을 만듭니다.",
               wraplength=700).pack(anchor="w", pady=(6, 0))
     destination = ttk.Entry(panel)
@@ -34,24 +43,28 @@ def show_panel(center, initial, *, project=None):
         parent = filedialog.askdirectory(parent=panel, mustexist=True)
         if parent:
             destination.delete(0, "end")
-            destination.insert(0, str(Path(parent) / "development-copy"))
+            name = Path(initial).name if restart and initial else "development-copy"
+            destination.insert(0, str(Path(parent) / name))
 
     ttk.Button(panel, text="새 복제본의 상위 폴더 선택", command=choose).pack(anchor="w")
     ttk.Label(panel, text="추가 로컬 예제 경로 · 승인된 .example.json 또는 .sample.json · 한 줄에 하나").pack(anchor="w")
     examples = center.editor_box(panel, height=3)
     actions = ttk.Frame(panel)
     actions.pack(fill="x")
-    ttk.Label(panel, text="오프라인 .NET 검증").pack(anchor="w", pady=(6, 0))
-    build_type = ttk.Combobox(panel, state="readonly", values=("SDK 프로젝트", "기존 Roslyn 계약", "WinForms SDK"))
+    build_area = ttk.Frame(panel)
+    if not restart:
+        build_area.pack(fill="x")
+    ttk.Label(build_area, text="오프라인 .NET 검증").pack(anchor="w", pady=(6, 0))
+    build_type = ttk.Combobox(build_area, state="readonly", values=("SDK 프로젝트", "기존 Roslyn 계약", "WinForms SDK"))
     build_type.current(0)
     build_type.pack(anchor="w")
-    ttk.Label(panel, text="SDK 테스트 .csproj 경로 또는 Roslyn C# 상대 경로 두 개").pack(anchor="w")
-    build_paths = ttk.Entry(panel)
+    ttk.Label(build_area, text="SDK 테스트 .csproj 경로 또는 Roslyn C# 상대 경로 두 개").pack(anchor="w")
+    build_paths = ttk.Entry(build_area)
     build_paths.pack(fill="x")
-    ttk.Label(panel, text='SDK 테스트 이름, Roslyn 기대 벡터 또는 WinForms 장면 JSON').pack(anchor="w")
-    build_vectors = ttk.Entry(panel)
+    ttk.Label(build_area, text='SDK 테스트 이름, Roslyn 기대 벡터 또는 WinForms 장면 JSON').pack(anchor="w")
+    build_vectors = ttk.Entry(build_area)
     build_vectors.pack(fill="x")
-    verification = ttk.Frame(panel)
+    verification = ttk.Frame(build_area)
     verification.pack(fill="x")
     report = center.editor_box(panel, height=15, state="disabled")
     busy, approved, build_approved = False, None, None
@@ -99,7 +112,11 @@ def show_panel(center, initial, *, project=None):
             if not approved or approved[:2] != (path, include):
                 display("복제본 경로와 예제를 다시 검토하세요.")
                 return
-            if not center.confirm("기존 Git 프로젝트 복제", "검토된 파일만 새 경로에 복사합니다. 원본 Git 이력은 그대로 보존됩니다.",
+            title = "새 복제본으로 다시 시작" if restart else "기존 Git 프로젝트 복제"
+            summary = (f"검토된 원본 파일로 아래 복제본을 만들고 현재 프로젝트에 연결합니다.\n{path}\n"
+                       "이전 작업 기록은 보존되며 새 복제본에서 새 세션을 승인할 수 있습니다."
+                       if restart else "검토된 파일만 새 경로에 복사합니다. 원본 Git 이력은 그대로 보존됩니다.")
+            if not center.confirm(title, summary,
                                   parent=panel):
                 return
         build_input = (build_paths.get(), build_vectors.get(), build_type.current())
@@ -143,7 +160,7 @@ def show_panel(center, initial, *, project=None):
                 if mode == "status":
                     value = project_onboarding.status(runner.ledger, project)
                 elif mode == "review":
-                    value = project_onboarding.review(runner, project, path, include)
+                    value = project_onboarding.review(runner, project, path, include, restart=restart)
                 elif mode == "build-review":
                     value = runner.build_verifier_scope(*build_args)
                 elif mode == "build":
@@ -151,7 +168,7 @@ def show_panel(center, initial, *, project=None):
                     if build_input[2] == 1:
                         value = project_onboarding.status(runner.ledger, project)
                 else:
-                    value = project_onboarding.create(runner, project, path, include, approval)
+                    value = project_onboarding.create(runner, project, path, include, approval, restart=restart)
             except Exception as error:
                 from .lease import Blocked
 
@@ -221,12 +238,24 @@ def show_panel(center, initial, *, project=None):
                 if mode == "create":
                     approved = None
                     center.refresh()
+                    if restart:
+                        display(f"새 복제본 준비 완료\n{value['replica']}\n\n새 개발 세션 설정에서 개발 범위를 승인하세요.")
+                        actions.pack_forget()
+                        ttk.Button(panel, text="새 개발 세션 설정", style="Primary.TButton",
+                                   command=open_development).pack(anchor="e", pady=8)
 
         Thread(target=work, daemon=True).start()
         panel.after(100, poll)
 
+    def open_development():
+        from .gui_registered_cycle import show
+
+        panel.destroy()
+        show(center, project)
+
     buttons = []
-    for name, mode in (("준비 상태", "status"), ("문맥 및 복제 범위 검토", "review"), ("승인하고 복제본 생성", "create")):
+    for name, mode in (("준비 상태", "status"), ("문맥 및 복제 범위 검토", "review"),
+                       ("승인하고 새 복제본 만들기" if restart else "승인하고 복제본 생성", "create")):
         button = ttk.Button(actions, text=name, command=lambda mode=mode: run(mode))
         button.pack(side="left", padx=(0, 6))
         buttons.append(button)
@@ -238,4 +267,7 @@ def show_panel(center, initial, *, project=None):
     cancel_button.pack(side="left")
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: close())
-    run("review" if initial else "status")
+    if destination_problem:
+        display(destination_problem)
+    else:
+        run("review" if initial else "status")

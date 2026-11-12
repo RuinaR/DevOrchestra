@@ -227,6 +227,7 @@ class CommandCenter:
                                     ("프로젝트 빠른 검색", self.search_projects),
                                     ("목표와 완료 기준 편집", lambda: self.register_project(edit=True)),
                                     ("요구사항 문서", self.requirement_settings),
+                                    ("처음부터 다시 시작", self.restart_registered_development),
                                     ("기존 Git 문맥 및 준비 상태", self.onboarding_panel)))
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
@@ -998,6 +999,8 @@ class CommandCenter:
         running = bool(job and not job["settled"])
         local = job if job and job["scope"]["project_id"] == view["project_id"] else None
         progress = view.get("registered_progress")
+        if local and local["settled"] and view.get("onboarding_sequence", 0) > local["sequence"]:
+            local = None
         if local and (not progress or progress["approval"] != local["approval"]):
             if progress and local["settled"] and progress["sequence"] > local["sequence"]:
                 local = None
@@ -1695,10 +1698,13 @@ class CommandCenter:
 
         ttk.Button(panel, text="저장" if edit else "프로젝트 등록", command=save).pack(anchor="e")
 
-    def onboarding_panel(self, initial="", *, project=None):
+    def restart_registered_development(self, project=None):
+        self.onboarding_panel(project=project, restart=True)
+
+    def onboarding_panel(self, initial="", *, project=None, restart=False):
         from .gui_onboarding import show_panel
 
-        show_panel(self, initial, project=project)
+        show_panel(self, initial, project=project, restart=restart)
 
     def original_apply_panel(self, project=None):
         from . import original_apply

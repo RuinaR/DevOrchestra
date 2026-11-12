@@ -19,12 +19,12 @@ from .token_reserve import DEFAULT_RESERVE, reserve_status
 REGISTERED_PHASES = ("manager-planning", "developer", "reviewer", "verifier", "manager-final")
 
 
-def registered_progress(events, project):
+def registered_progress(events, project, *, onboarding_sequence=0):
     from .registered_cycle import KIND
 
     start = next((row for row in reversed(events) if row["kind"] == "native_inspection_intent"
                   and row.get("probe_kind") == KIND and row.get("project_id") == project), None)
-    if start is None:
+    if start is None or start["sequence"] <= onboarding_sequence:
         return None
     rows = [row for row in events if row.get("run_id") == start["run_id"]
             and row.get("probe_kind") == KIND and row.get("project_id") == project]
@@ -96,6 +96,9 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
     global_view = project_view(events)
     project_events = [dict(event, sequence=seq) for seq, event in enumerate(events, 1)
                       if event.get("project_id") == project_id]
+    onboarding_sequence = next((event["sequence"] for event in reversed(project_events)
+                                if event["kind"] == "onboarding_result"
+                                and event.get("status") == "REPLICA_READY"), 0)
     start = view["run"]
     requirements = latest_requirements(catalog, project_id)
     current = [e for e in project_events if start and e["run_id"] == start["run_id"]]
@@ -238,7 +241,9 @@ def dashboard_projection_v1(events, tail, project_id, observed_at, catalog=None)
         "project_name": names[project_id],
         "project_names": names,
         "registration": registration,
-        "registered_progress": registered_progress(project_events, project_id),
+        "registered_progress": registered_progress(project_events, project_id,
+                                                   onboarding_sequence=onboarding_sequence),
+        "onboarding_sequence": onboarding_sequence,
         "requirements": requirements,
         "user_question": selected_question,
         "supervised_handoff": latest_handoff(project_events),

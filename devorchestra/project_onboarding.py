@@ -277,7 +277,32 @@ def _registered(ledger, project):
     return catalog, row, source
 
 
-def _review(ledger, project, destination, include, git, identity, catalog, row, source):
+def _overlaps_registered_path(catalog, project, destination, *, restart=False):
+    known = [item["data"]["local_path"] for key, item in catalog["projects"].items() if key != project]
+    known.extend(item["replica"] for key, item in catalog["setups"].items()
+                 if not (restart and key == project and destination == Path(item["replica"])
+                         and not destination.exists()))
+    return any(destination.is_relative_to(Path(path)) or Path(path).is_relative_to(destination)
+               for path in known if path)
+
+
+def restart_destination(ledger, project):
+    """Suggest a fresh sibling and reuse the registered path only when vacant."""
+    catalog, _, source = _registered(ledger, project)
+    previous = catalog["setups"].get(project)
+    base = Path(previous["replica"]) if previous else source.with_name(source.name + "-development-copy")
+    if not base.parent.is_dir():
+        base = source.with_name(source.name + "-development-copy")
+    for number in range(1, 1001):
+        candidate = base if number == 1 else base.with_name(f"{base.name}-{number}")
+        check_path(candidate.parent)
+        if (not candidate.exists() and not candidate.is_symlink()
+                and not _overlaps_registered_path(catalog, project, candidate, restart=True)):
+            return str(candidate)
+    raise Blocked("비어 있는 새 복제본 경로를 직접 지정하세요.")
+
+
+def _review(ledger, project, destination, include, git, identity, catalog, row, source, *, restart=False):
     if type(include) is not list or len(include) > 16 or any(type(path) is not str for path in include):
         raise Blocked("Specify up to sixteen exact local example paths")
     if len({path.casefold() for path in include}) != len(include):
@@ -287,10 +312,9 @@ def _review(ledger, project, destination, include, git, identity, catalog, row, 
     setup = {"project": row["data"], "replica": str(destination), "wait_seconds": 10}
     validate_setup(setup, ledger.state_boundary, allow_file_proposals=True)
     check_path(destination)
-    known = [item["data"]["local_path"] for key, item in catalog["projects"].items() if key != project]
-    known.extend(item["replica"] for item in catalog["setups"].values())
-    if any(destination.is_relative_to(Path(path)) or Path(path).is_relative_to(destination)
-           for path in known if path):
+    previous = catalog["setups"].get(project)
+    previous_path = Path(previous["replica"]) if previous else None
+    if _overlaps_registered_path(catalog, project, destination, restart=restart):
         raise Blocked("Destination overlaps a registered original or replica")
     if destination.exists() or not destination.parent.is_dir():
         raise Blocked("Choose a new worktree path within an existing parent")
@@ -316,6 +340,8 @@ def _review(ledger, project, destination, include, git, identity, catalog, row, 
                           if any(part.casefold() in {"test", "tests", "spec", "specs"}
                                  for part in PurePosixPath(name).parts[:-1]))
     return {"contract": "existing-git-onboarding-v1", "status": "CONTEXT_READY",
+            **({"restart": {"previous_replica": str(previous_path) if previous_path else None}}
+               if restart else {}),
             "project_id": project, "project_revision": row["revision"], "source": str(source),
             "destination": str(destination), "git_tool_sha256": identity, "baseline": evidence,
             "context": {"goal_sha256": digest(row["data"]["goal"]), "acceptance_sha256": digest(row["data"]["acceptance"]),
@@ -329,15 +355,16 @@ def _review(ledger, project, destination, include, git, identity, catalog, row, 
                        "original_write": False, "network": "OFF", "development_authority": False}}
 
 
-def review(runner, project, destination, include):
+def review(runner, project, destination, include, *, restart=False):
     with execution_slot() as abandoned:
         runner._idle_diagnostic(abandoned)
         catalog, row, source = _registered(runner.ledger, project)
         with _git(runner.ledger, source) as (git, identity):
-            return _review(runner.ledger, project, Path(destination), include, git, identity, catalog, row, source)
+            return _review(runner.ledger, project, Path(destination), include, git, identity, catalog, row, source,
+                           restart=restart)
 
 
-def create(runner, project, destination, include, approval):
+def create(runner, project, destination, include, approval, *, restart=False):
     from .runtime import require_admission
 
     ledger = runner.ledger
@@ -346,7 +373,7 @@ def create(runner, project, destination, include, approval):
         events, tail = runner._idle_diagnostic(abandoned)
         catalog, row, source = _registered(ledger, project)
         with _git(ledger, source) as (git, identity):
-            scope = _review(ledger, project, destination, include, git, identity, catalog, row, source)
+            scope = _review(ledger, project, destination, include, git, identity, catalog, row, source, restart=restart)
         if digest(scope) != approval:
             raise Blocked("Git onboarding preview or approval changed")
         run_id = uuid4().hex
@@ -414,7 +441,8 @@ def create(runner, project, destination, include, approval):
         runner._check_diagnostic_fence(count, fence)
         check_path(destination)
         staging.rename(destination)
-        saved = Catalog(ledger).save_setup({"project": row["data"], "replica": str(destination), "wait_seconds": 10},
+        wait = catalog["setups"].get(project, {}).get("wait_seconds", 10) if restart else 10
+        saved = Catalog(ledger).save_setup({"project": row["data"], "replica": str(destination), "wait_seconds": wait},
                                            row["revision"], held=True)
         result = {**binding, "kind": "onboarding_result", "status": "REPLICA_READY",
                   "project_revision": saved, "replica": str(destination), "original_head": baseline["head"],

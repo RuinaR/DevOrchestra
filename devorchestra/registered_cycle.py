@@ -1243,7 +1243,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
 def _resume_contract(runner, events, head, project, expires, seconds, tokens, renew=False, *,
                      require_proof=True, graceful=False):
     now = time()
-    rows = history(runner.ledger, project)
+    rows = history(runner.ledger, project, current_replica=True)
     if rows and can_review_postprocess(rows[-1]):
         return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
     if renew:
@@ -1900,8 +1900,16 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
         return receipt
 
 
-def history(ledger, project):
-    events = [event for event in ledger.read()
+def history(ledger, project, *, current_replica=False):
+    events = ledger.read()
+    if current_replica:
+        # A newly registered replica starts a fresh active session without removing audit history.
+        boundary = next((index for index in range(len(events) - 1, -1, -1)
+                         if events[index]["kind"] == "onboarding_result"
+                         and events[index].get("project_id") == project
+                         and events[index].get("status") == "REPLICA_READY"), -1)
+        events = events[boundary + 1:]
+    events = [event for event in events
               if event.get("probe_kind") == KIND and event.get("project_id") == project]
     start = next((event for event in reversed(events) if event["kind"] == "native_inspection_intent"), None)
     return [event for event in events if start and event["run_id"] == start["run_id"]]

@@ -61,7 +61,7 @@ def _open_visual_report(center, runner, project):
     panel.geometry("740x600")
     display = center.editor_box(panel, height=20)
     try:
-        report = next((row for row in reversed(registered_cycle.history(runner.ledger, project))
+        report = next((row for row in reversed(registered_cycle.history(runner.ledger, project, current_replica=True))
                        if row["kind"] == "native_inspection_visual_review"), None)
         if report is None:
             display.insert("end", "시각 검토 응답이 아직 없습니다.")
@@ -170,6 +170,14 @@ def show(center, project, *, resume_only=False):
         state.set("작업 복제본이 없습니다. Git 온보딩에서 복제본을 먼저 준비하세요."
                   if str(error) == "An established Git onboarding baseline is required" else
                   f"작업 복제본을 확인할 수 없습니다. Git 온보딩에서 상태를 확인하세요.\n{error}")
+
+    def restart():
+        panel.destroy()
+        center.restart_registered_development(project)
+
+    restart_button = ttk.Button(body, text="처음부터 다시 시작 · 새 복제본", command=restart)
+    if baseline is not None:
+        restart_button.pack(anchor="w", pady=(0, 4))
     is_godot = baseline is not None and any(name.casefold() == "project.godot" for name in baseline["files"])
     draft = center.development_budget_drafts.setdefault(project, {})
     grants = _permission_checkboxes(body, draft)
@@ -180,7 +188,7 @@ def show(center, project, *, resume_only=False):
         ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
                         variable=use_images).pack(anchor="w", pady=(0, 6))
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
-        _game_preflight(center, panel, body, footer, runner, state, grants, use_images)
+        _game_preflight(center, panel, body, footer, runner, state, grants, use_images, restart_button)
         return
     ttk.Button(body, text="등록 목표·기준 편집",
                command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
@@ -211,6 +219,8 @@ def show(center, project, *, resume_only=False):
     def save_budget():
         draft.update((key, entries[key].get()) for key in budget_keys)
 
+    restart_button.configure(command=lambda: (save_budget(), restart()))
+
     if baseline is None:
         def close_preflight():
             save_budget()
@@ -220,6 +230,8 @@ def show(center, project, *, resume_only=False):
             close_preflight()
             show(center, project)
 
+        ttk.Button(footer, text="처음부터 다시 시작", command=lambda: (save_budget(), restart()),
+                   style="Primary.TButton").pack(anchor="w")
         ttk.Button(footer, text="Git 온보딩 · 작업 복제본 준비",
                    command=lambda: center.onboarding_panel(project=project)).pack(anchor="w")
         ttk.Button(footer, text="복제본 준비 상태 다시 확인", command=reopen).pack(anchor="w")
@@ -327,7 +339,7 @@ def show(center, project, *, resume_only=False):
     active = False
 
     def render():
-        rows = registered_cycle.history(runner.ledger, project)
+        rows = registered_cycle.history(runner.ledger, project, current_replica=True)
         roles = [row for row in rows if row["kind"] in {"native_inspection_role_intent", "native_inspection_role_result"}]
         end = next((row for row in reversed(rows) if row["kind"] == "native_inspection_result"), None)
         stop = next((row for row in rows if row["kind"] == "native_inspection_stop_requested"), None)
@@ -376,6 +388,7 @@ def show(center, project, *, resume_only=False):
         active = True
         button.configure(state="disabled")
         resume_button.configure(state="disabled")
+        restart_button.configure(state="disabled")
         state.set("승인 범위 확인 중")
         options = ({"graceful": graceful} if resume else
                    {"soft_limits": soft_limits, "visual_review": visual_review})
@@ -419,6 +432,7 @@ def show(center, project, *, resume_only=False):
             active = False
             button.configure(state="normal")
             resume_button.configure(state="normal")
+            restart_button.configure(state="normal")
             error = future.exception()
             if error:
                 state.set(str(error))
@@ -559,7 +573,7 @@ def show(center, project, *, resume_only=False):
 
     def resume():
         try:
-            rows = registered_cycle.history(runner.ledger, project)
+            rows = registered_cycle.history(runner.ledger, project, current_replica=True)
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             state.set("저장된 개발 기록을 읽지 못했습니다. 기록·복구 화면에서 상태를 확인하세요.")
             return
@@ -664,7 +678,7 @@ def show(center, project, *, resume_only=False):
         panel.after_idle(resume)
 
 
-def _game_preflight(center, panel, body, footer, runner, state, grants, use_images):
+def _game_preflight(center, panel, body, footer, runner, state, grants, use_images, restart_button):
     cancelled = Event()
     future = None
 
@@ -704,7 +718,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
         resume_args = (game_pilot.PROJECT, expires, 360, 120000)
         graceful = False
         if resume:
-            rows = registered_cycle.history(runner.ledger, game_pilot.PROJECT)
+            rows = registered_cycle.history(runner.ledger, game_pilot.PROJECT, current_replica=True)
             if rows and (rows[-1].get("outcome") == registered_cycle.MANUAL_CHECKPOINT
                          or registered_cycle.can_review_postprocess(rows[-1])):
                 panel.destroy()
@@ -719,7 +733,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
         def submit():
             nonlocal future
             future = Future()
-            for control in (button, export_button, online_button, resume_button):
+            for control in (button, export_button, online_button, resume_button, restart_button):
                 control.configure(state="disabled")
             state.set("온라인 실행 범위 검토 중" if online else "오프라인 MXC 검사 실행 중")
 
@@ -741,7 +755,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                 if not future.done():
                     panel.after(150, poll)
                     return
-                for control in (button, export_button, online_button, resume_button):
+                for control in (button, export_button, online_button, resume_button, restart_button):
                     control.configure(state="normal")
                 try:
                     result = future.result()

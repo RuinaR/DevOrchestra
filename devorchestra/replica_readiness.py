@@ -26,7 +26,14 @@ def baseline(ledger, project):
             or row["revision"] != last["project_revision"]
             or catalog["setups"].get(project, {}).get("replica") != last["replica"]):
         raise Blocked("Onboarding baseline or registered paths changed")
-    return source, Path(last["replica"]), intent["scope"]["baseline"], last
+    replica = Path(last["replica"])
+    check_path(replica)
+    if not replica.is_dir():
+        raise Blocked("등록된 복제본 폴더가 없습니다. ‘처음부터 다시 시작’으로 복제본을 만드세요.")
+    check_path(replica / ".git")
+    if not (replica / ".git").is_dir():
+        raise Blocked("등록된 복제본의 Git 기준이 없습니다. ‘처음부터 다시 시작’으로 복제본을 만드세요.")
+    return source, replica, intent["scope"]["baseline"], last
 
 
 def original_matches(source, frozen):
