@@ -245,7 +245,8 @@ class RegisteredCycleTests(unittest.TestCase):
                          if isinstance(widget, tk.Toplevel) and "Codex 개발 세션" in widget.title())
             children = list(descendants(panel))
             entries = [widget for widget in children if isinstance(widget, ttk.Entry)]
-            for entry, value in zip(entries, (params[1], ",".join(params[6]), "300", "270000", "2", "45000"),
+            for entry, value in zip(entries, (params[1], ",".join(params[6]), "300", "270000", "2", "45000",
+                                              "60000", "55000", "45000"),
                                     strict=True):
                 entry.delete(0, "end")
                 entry.insert(0, value)

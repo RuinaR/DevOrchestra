@@ -64,7 +64,7 @@ def validate_limits(limits, *, maximum_seconds=SESSION_SECONDS, maximum_tokens=S
             raise Blocked(f"역할별 {unit} 기준 항목을 확인하세요.")
         for role, cap in maxima.items():
             if type(values[role]) is not int or not 1 <= values[role] <= min(cap, total):
-                name = "Manager" if role.startswith("manager-") else role.title()
+                name = {"manager-planning": "계획 Manager", "manager-final": "최종 Manager"}.get(role, role.title())
                 raise Blocked(f"{name} 호출당 기준은 1~{min(cap, total):,}{unit}으로 입력하세요.")
 MANUAL_CHECKS = {
     CRITERIA[1]: "In the exported game, observe movement, walls and single-count pickups under keyboard input.",

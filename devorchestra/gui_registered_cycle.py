@@ -17,6 +17,10 @@ LABELS = {
     "replica-read": "작업 복제본 읽기", "replica-edit": "지정 파일 생성·수정",
     "offline-shell": "복제본에서 오프라인 명령 실행", "pinned-verifier": "지정된 독립 검증 명령 실행",
 }
+ROLE_LABELS = {"manager-planning": "계획 Manager", "developer": "Developer",
+               "reviewer": "Reviewer", "manager-final": "최종 Manager"}
+ROLE_TOKEN_FIELDS = {"manager-planning": "manager_tokens", "developer": "developer_tokens",
+                     "reviewer": "reviewer_tokens", "manager-final": "final_manager_tokens"}
 
 
 def _permission_checkboxes(panel, draft):
@@ -141,12 +145,15 @@ def show(center, project):
     inputs = ttk.Frame(body)
     inputs.pack(fill="x")
     entries = {}
-    budget_keys = ("seconds", "tokens", "cycles", "manager_tokens")
+    budget_keys = ("seconds", "tokens", "cycles", *ROLE_TOKEN_FIELDS.values())
     for index, (key, label, default) in enumerate((
             ("archive", "공식 Codex ZIP", ""), ("files", "수정 파일 경로 (쉼표 구분)", ""),
             ("seconds", "전체 시간 기준 (초)", str(game_pilot.SESSION_SECONDS)),
             ("tokens", "전체 토큰 기준", str(game_pilot.SESSION_TOKENS)), ("cycles", "사이클 상한 (선택)", ""),
-            ("manager_tokens", "Manager 호출당 토큰 기준", str(game_pilot.ROLE_TOKENS["manager-planning"])))):
+            ("manager_tokens", "계획 Manager 호출당 토큰", str(game_pilot.ROLE_TOKENS["manager-planning"])),
+            ("developer_tokens", "Developer 호출당 토큰", ""),
+            ("reviewer_tokens", "Reviewer 호출당 토큰", ""),
+            ("final_manager_tokens", "최종 Manager 호출당 토큰", ""))):
         ttk.Label(inputs, text=label).grid(row=index, column=0, sticky="w")
         entry = entries[key] = ttk.Entry(inputs)
         entry.insert(0, draft.get(key, default))
@@ -156,6 +163,9 @@ def show(center, project):
         entries["files"].insert(0, "docs/PROJECT-PLAN.md")
     ttk.Label(body, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
               wraplength=580).pack(anchor="w", pady=4)
+    ttk.Label(body, text="빈 역할 입력은 기본값을 사용합니다. 최종 Manager 기본값은 계획 Manager와 같습니다. "
+                         "독립 Verifier는 모델을 호출하지 않습니다.",
+              wraplength=580).pack(anchor="w", pady=(0, 5))
 
     def save_budget():
         draft.update((key, entries[key].get()) for key in budget_keys)
@@ -366,11 +376,13 @@ def show(center, project):
                                 "Windows EXE를 내보내 소유 창에 키 입력과 클릭을 보내고 입력 전후 화면을 캡처합니다.\n")
             else:
                 verification = f"검증 EXE {verifier['executable']}\n{checks}\n"
+            role_budget = " · ".join(f"{ROLE_LABELS[role]} {result['role_tokens'][role]:,}토큰"
+                                     for role in ROLE_LABELS)
             summary = (f"{project}\n{result['goal']}\n복제본 {result['replica']}\n"
                        f"파일 {', '.join(result['files'])}\n"
                        "사전 권한 · " + " · ".join(LABELS[key] for key in result["permissions"]) + "\n"
                        f"{result['seconds']}초 / {result['tokens']} 토큰 / 사이클 {result['cycles'] or '예산까지'}\n"
-                       f"{result['model']} · {result['role_tokens']}\n"
+                       f"{result['model']}\n{role_budget}\n"
                        f"{verification}"
                        "Developer는 MXC 안에서 복제본 쓰기와 셸 권한을 사용합니다. "
                        "Controller가 역할 종료 후 지정 파일 밖의 변경을 차단합니다. "
@@ -411,17 +423,25 @@ def show(center, project):
             values = {key: entry.get().strip() for key, entry in entries.items()}
             seconds, tokens = int(values["seconds"]), int(values["tokens"])
             cycles = int(values["cycles"]) if values["cycles"] else None
-            manager = int(values["manager_tokens"])
-            role_tokens = game_pilot.ROLE_TOKENS if tokens >= 750000 else registered_cycle.ROLE_TOKENS
+            role_defaults = game_pilot.ROLE_TOKENS if tokens >= 750000 else registered_cycle.ROLE_TOKENS
+            role_tokens = {role: min(cap, tokens) for role, cap in role_defaults.items()}
+            for role, field in ROLE_TOKEN_FIELDS.items():
+                if not values[field]:
+                    continue
+                try:
+                    role_tokens[role] = int(values[field])
+                except ValueError as error:
+                    raise ValueError(f"{ROLE_LABELS[role]} 호출당 토큰은 정수로 입력하세요.") from error
+            if not values["final_manager_tokens"]:
+                role_tokens["manager-final"] = role_tokens["manager-planning"]
             limits = {"seconds": seconds, "tokens": tokens, "cycles": cycles,
                       "role_seconds": {role: min(cap, seconds) for role, cap in game_pilot.ROLE_SECONDS.items()},
-                      "role_tokens": {role: manager if role.startswith("manager-") else min(cap, tokens)
-                                      for role, cap in role_tokens.items()}}
+                      "role_tokens": role_tokens}
             registered_cycle.validate_limits(limits)
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     [name.strip() for name in values["files"].split(",") if name.strip()],
                     permissions, verifier,
-                    int(values["manager_tokens"]))
+                    role_tokens["manager-planning"])
         except (RuntimeError, ValueError) as error:
             state.set(str(error))
             return
@@ -655,7 +675,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants):
     ttk.Label(budget, text="역할 초").grid(row=3, column=1, sticky="w")
     ttk.Label(budget, text="역할 토큰").grid(row=3, column=2, sticky="w")
     for row, role in enumerate(defaults["role_seconds"], 4):
-        ttk.Label(budget, text=role).grid(row=row, column=0, sticky="w")
+        ttk.Label(budget, text=ROLE_LABELS[role]).grid(row=row, column=0, sticky="w")
         for column, key in enumerate(role_entries, 1):
             entry = role_entries[key][role] = ttk.Entry(budget, width=12)
             entry.insert(0, str(defaults[key][role]))
