@@ -487,6 +487,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                            f"최종 Manager {result['role_tokens']['manager-final']:,}토큰\n"
                            f"{_remaining_signoff(checkpoint)} · 모델 최대 {result['model_calls_max']}회. "
                            "Developer 재호출과 원본 반영은 없습니다.")
+                if checkpoint.get("mode") == "review-size-stopped-candidate":
+                    summary += ("\n이전 실행은 변경 후 파일 해시를 확정하기 전에 멈췄습니다. "
+                                "지금 복제본의 파일을 새 후보로 승인하고 최초 등록 기준과 비교해 검토합니다.")
                 if result.get("visual_review") and not checkpoint.get("review"):
                     summary += "\n소유 테스트 창 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                 if center.confirm("추가 예산 및 중단 작업 재개 승인", summary, parent=panel):
@@ -587,18 +590,22 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             state.set("저장된 개발 기록을 읽지 못했습니다. 기록·복구 화면에서 상태를 확인하세요.")
             return
-        if rows and registered_cycle.can_review_postprocess(rows[-1]):
+        if rows and (registered_cycle.can_review_postprocess(rows[-1]) or registered_cycle.can_review_size_stop(rows[-1])):
             prior, result = rows[0]["scope"], rows[-1]
+            size_recovery = registered_cycle.can_review_size_stop(result)
             seconds, tokens, calls = registered_cycle.manual_remaining(prior, result)
             dialog = tk.Toplevel(panel, padx=12, pady=12)
-            dialog.title("보존된 모델 응답 재개 예산")
+            dialog.title("현재 후보 검토 재개 예산" if size_recovery else "보존된 모델 응답 재개 예산")
             dialog.transient(panel)
             ttk.Label(dialog, text=f"기존 잔여 {max(0, seconds):,}초 · {max(0, tokens):,}토큰 · "
                       f"모델 최대 {max(0, calls)}회").pack(anchor="w", pady=(0, 8))
             limits = {}
+            suggested_tokens = (prior["role_tokens"]["reviewer"] + prior["role_tokens"]["manager-final"]
+                                if size_recovery else sum(prior["role_tokens"].values()) + prior["role_tokens"]["manager-final"])
+            minimum_tokens = suggested_tokens if size_recovery else max(prior["role_tokens"].values())
             for field, title, default in (
                     ("seconds", "새 시간 예산(초)", 1800),
-                    ("tokens", "새 토큰 예산", sum(prior["role_tokens"].values()) + prior["role_tokens"]["manager-final"])):
+                    ("tokens", "새 토큰 예산", suggested_tokens)):
                 ttk.Label(dialog, text=title).pack(anchor="w")
                 entry = limits[field] = ttk.Entry(dialog)
                 entry.insert(0, str(min(default, registered_cycle.MAX_SESSION_TOKENS)))
@@ -611,11 +618,11 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     use_seconds, use_tokens = ((int(limits[key].get()) for key in ("seconds", "tokens"))
                                                if renew else (seconds, tokens))
                     if renew and not (60 <= use_seconds <= registered_cycle.MAX_SESSION_SECONDS
-                                      and max(prior["role_tokens"].values()) <= use_tokens
+                                      and minimum_tokens <= use_tokens
                                       <= registered_cycle.MAX_SESSION_TOKENS):
                         raise ValueError
                 except ValueError:
-                    hint.configure(text="시간과 토큰을 확인하세요. 토큰은 가장 큰 역할 한도 이상이어야 합니다.")
+                    hint.configure(text=f"시간과 토큰을 확인하세요. 최소 {minimum_tokens:,}토큰이 필요합니다.")
                     return
                 args = (project, int(time()) + use_seconds + 2940, use_seconds, use_tokens, renew)
                 dialog.destroy()

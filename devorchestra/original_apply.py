@@ -15,6 +15,8 @@ from .replica_evidence import _git_identity, changes, fingerprint, snapshot
 from .replica_readiness import baseline, original_matches
 from .subscription_cycle import _find
 
+REGISTERED_APPLY_BYTES = 512 * 1024
+
 
 def _prepare(runner, project, expires):
     from .runtime import require_admission
@@ -166,9 +168,10 @@ def _prepare_registered(events, head, project, expires, source, replica, frozen,
                     end["replica_sha256"] == digest(image)) or not original_matches(source, frozen)):
         raise Blocked("Registered review, verification or source evidence changed")
     paths = changes({**image, "files": frozen["files"]}, image, set(scope["files"]))
-    if (any(value["after"] is None for value in paths.values())
-            or sum(sum(part["bytes"] for part in row.values() if part) for row in paths.values()) > BATCH_LIMIT):
+    if any(value["after"] is None for value in paths.values()):
         raise Blocked("Registered result exceeds the original write scope")
+    if sum(part["bytes"] for row in paths.values() for part in row.values() if part) > REGISTERED_APPLY_BYTES:
+        raise Blocked(f"원본 반영의 변경 전후 파일 합계가 {REGISTERED_APPLY_BYTES // 1024}KiB를 넘습니다.")
     before, after = {}, {}
     for name, row in paths.items():
         path = source / _relative(name)
@@ -182,11 +185,9 @@ def _prepare_registered(events, head, project, expires, source, replica, frozen,
             if aliases and aliases != [part]:
                 raise Blocked("Original path casing is ambiguous")
             parent /= part
-        before[name] = path.read_bytes() if row["before"] else None
-        after[name] = (replica / name).read_bytes()
-        if ((row["before"] is None and path.exists())
-                or any(sha256(data).hexdigest() != expected["sha256"] for data, expected in
-                       ((before[name], row["before"]), (after[name], row["after"])) if expected)):
+        before[name] = _read_bound(path, row["before"]) if row["before"] else None
+        after[name] = _read_bound(replica / name, row["after"])
+        if row["before"] is None and path.exists():
             raise Blocked("Original or registered replica bytes changed")
     return {"project_id": project, "original": str(source), "replica": str(replica), "expires": expires,
             "original_head": frozen["head"], "original_git": frozen["git"],
@@ -199,6 +200,15 @@ def _identity(path):
     check_path(path)
     info = path.stat()
     return info.st_dev, info.st_ino
+
+
+def _read_bound(path, expected):
+    check_path(path)
+    with path.open("rb") as stream:
+        data = stream.read(expected["bytes"] + 1)
+    if len(data) != expected["bytes"] or sha256(data).hexdigest() != expected["sha256"]:
+        raise Blocked("Original or registered replica bytes changed")
+    return data
 
 
 def review(runner, project, expires):

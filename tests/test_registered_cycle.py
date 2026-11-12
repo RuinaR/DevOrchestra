@@ -327,7 +327,10 @@ class RegisteredCycleTests(unittest.TestCase):
     def test_windows_final_decision_conflict_recovers_without_replaying_developer(self):
         self._exercise(False, recover="invalid-manager")
 
-    def _exercise(self, resume, *, recover=False):
+    def test_windows_large_source_and_diff_reach_reviewer_without_argument_limit(self):
+        self._exercise(False, large=True)
+
+    def _exercise(self, resume, *, recover=False, large=False):
         manager_recovery = recover in {"manager", "invalid-manager"}
         retry_decision = recover == "invalid-manager"
         approved = Path(__file__).resolve().parents[1] / ".ai-local" / "temp"
@@ -355,6 +358,8 @@ class RegisteredCycleTests(unittest.TestCase):
                 (original / "greeting.txt").write_text("old\n", encoding="ascii")
                 (original / "closing.txt").write_text("old\n", encoding="ascii")
             (original / "README.md").write_text("Text formatting utility\n", encoding="utf-8")
+            if large:
+                (original / "design.md").write_text("Initial design\n", encoding="utf-8")
             def git(*args):
                 subprocess.run(["git", *args], cwd=original, check=True, timeout=15, capture_output=True)
 
@@ -383,9 +388,11 @@ class RegisteredCycleTests(unittest.TestCase):
                     keys[1]: {"args": ["/d", "/q", "/c", "type", "closing.txt"], "stdout": "goodbye", "inputs": []}}}
             params = ("registered-test", os.environ["DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"], int(time()) + 600,
                       300, 270000, 1 if manager_recovery and not retry_decision else 2,
-                      ["formatting.py", "closing.py"] if resume else ["greeting.txt", "closing.txt"],
+                      ["formatting.py", "closing.py"] if resume else
+                      ["greeting.txt", "closing.txt"] + (["design.md"] if large else []),
                       list(registered_cycle.PERMISSIONS), tests)
             calls = []
+            large_text = "Documented fixture behavior with UTF-8 입력.\n" * 900
             developer_observed = Event() if not resume and not recover and os.environ.get("DEVORCHESTRA_REGISTERED_GUI_QA") else None
 
             def transport(binary, argv, work, logs, env, **options):
@@ -426,12 +433,18 @@ class RegisteredCycleTests(unittest.TestCase):
                     elif not resume:
                         filename, value = ("greeting.txt", "hello") if cycle == 1 else ("closing.txt", "goodbye")
                         (work / filename).write_text(value + "\n", encoding="ascii")
+                        if large and cycle == 1:
+                            (work / "design.md").write_text(large_text, encoding="utf-8")
                     elif cycle == 2:
                         (work / "closing.py").write_text('SIGNOFF = "goodbye"\n', encoding="utf-8")
                     else:
                         code = 'GREETING = "hello"\nSIGNOFF = "old"\n' if cycle == 1 else (
                             'GREETING = "hello"\nSIGNOFF = "goodbye"\n')
                         (work / "formatting.py").write_text(code, encoding="utf-8")
+                if large and (cycle, phase) == (1, "reviewer"):
+                    self.assertEqual(argv[-1], "-")
+                    self.assertIn("+Documented fixture behavior with UTF-8 입력.", options["stdin_bytes"].decode("utf-8"))
+                    self.assertGreater(len(options["stdin_bytes"]), 32767)
                 message = {"manager-planning": json.dumps({"criterion": keys[0 if recover else cycle - 1],
                                                            "plan": "Update the text"}),
                            "developer": "Edited",
@@ -542,9 +555,28 @@ class RegisteredCycleTests(unittest.TestCase):
                 self.assertEqual((original / "greeting.txt").read_text(), "old\n")
                 self.assertEqual((original / "closing.txt").read_text(), "old\n")
             self.assertEqual((original / "README.md").read_text(), "User working change\n")
-            apply, patch_text = original_apply.review(runner, "registered-test", int(time()) + 120)
+            if large:
+                from hashlib import sha256
+                from devorchestra.mxc_host_probe import _observe
+
+                stdin = large_text.encode("utf-8")
+                io = base / "stdin-check"
+                io.mkdir()
+                receipt = _observe(Path(sys.executable), ["-I", "-c",
+                    "import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"],
+                    base, io, os.environ.copy(), stdin_bytes=stdin)
+                self.assertEqual((receipt["exitCode"], receipt["job_active"]), (0, 0))
+                self.assertEqual(receipt["stdout"].strip(), sha256(stdin).hexdigest())
+            expires = int(time()) + 120
+            apply, patch_text = original_apply.review(runner, "registered-test", expires)
             self.assertEqual(set(apply["paths"]), set(params[6]))
             self.assertIn('SIGNOFF = "goodbye"' if resume else "+goodbye", patch_text)
+            if large:
+                self.assertEqual((original / "design.md").read_text(encoding="utf-8"), "Initial design\n")
+                applied = original_apply.run(runner, "registered-test", expires, digest(apply))
+                self.assertEqual(applied["result"], "APPLIED")
+                self.assertEqual((original / "design.md").read_text(encoding="utf-8"), large_text)
+                self.assertEqual((original / "README.md").read_text(encoding="utf-8"), "User working change\n")
 
     def _drive_gui(self, ledger, params, developer_observed):
         import tkinter as tk

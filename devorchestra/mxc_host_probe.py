@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from shutil import copyfile
 import socket
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
 from time import monotonic
 from uuid import uuid4
 
@@ -74,11 +74,13 @@ def _args(child, *arguments, profile=PROFILE):
 
 
 def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=512 * 1024 * 1024,
-             check=None, output_limit=256, encoding="ascii", interact=None, process_limit=8):
+             check=None, output_limit=256, encoding="ascii", interact=None, process_limit=8, stdin_bytes=None):
     import msvcrt
 
     if type(process_limit) is not int or not 1 <= process_limit <= CODEX_DEVELOPER_PROCESS_LIMIT:
         raise Blocked("Owned command process limit is out of range")
+    if stdin_bytes is not None and (type(stdin_bytes) is not bytes or len(stdin_bytes) > 2 * 1024**2):
+        raise Blocked("Owned command input exceeds its UTF-8 byte limit")
     api = _api()
     job = _require(api.CreateJobObjectW(None, None))
     info, drained = ProcessInfo(), False
@@ -91,7 +93,11 @@ def _observe(launcher, argv, work, scratch, environment, *, seconds=15, memory=5
         limits.basic.active_limit = process_limit
         limits.job_memory = memory
         _require(api.SetInformationJobObject(job, 9, c.byref(limits), c.sizeof(limits)))
-        with open(os.devnull, "rb") as stdin, stdout.open("xb") as out, stderr.open("xb") as err:
+        input_stream = open(os.devnull, "rb") if stdin_bytes is None else TemporaryFile(dir=scratch)
+        with input_stream as stdin, stdout.open("xb") as out, stderr.open("xb") as err:
+            if stdin_bytes is not None:
+                stdin.write(stdin_bytes)
+                stdin.seek(0)
             stdio = tuple(msvcrt.get_osfhandle(stream.fileno()) for stream in (stdin, out, err))
             for handle in stdio:
                 os.set_handle_inheritable(handle, True)

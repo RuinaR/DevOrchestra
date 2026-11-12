@@ -1392,7 +1392,8 @@ class CommandCenter:
             return False
         if CommandCenter.can_continue_progress_stop(progress):
             return True
-        if registered_cycle.can_review_postprocess(end) or registered_cycle.can_review_registered_plan(end):
+        if (registered_cycle.can_review_postprocess(end) or registered_cycle.can_review_registered_plan(end)
+                or registered_cycle.can_review_size_stop(end)):
             return end.get("staging_cleanup", {}).get("status") == "RETAINED_FOR_RECOVERY"
         if end["outcome"] == registered_cycle.MANUAL_CHECKPOINT:
             scope = progress["scope"]

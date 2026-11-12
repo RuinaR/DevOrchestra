@@ -46,7 +46,7 @@ def recommended_limits():
 
 
 def validate_limits(limits, *, maximum_seconds=SESSION_SECONDS, maximum_tokens=SESSION_TOKENS,
-                    role_token_caps=None):
+                    role_token_caps=None, role_seconds_caps=None, maximum_cycles=50):
     if type(limits) is not dict or limits.keys() != recommended_limits().keys():
         raise Blocked("세션 한도 항목을 확인하세요.")
     seconds, tokens, cycles = (limits[key] for key in ("seconds", "tokens", "cycles"))
@@ -54,10 +54,10 @@ def validate_limits(limits, *, maximum_seconds=SESSION_SECONDS, maximum_tokens=S
         raise Blocked(f"전체 시간 기준은 60~{maximum_seconds:,}초로 입력하세요.")
     if type(tokens) is not int or not 1 <= tokens <= maximum_tokens:
         raise Blocked(f"전체 토큰 기준은 1~{maximum_tokens:,}토큰으로 입력하세요.")
-    if cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50):
-        raise Blocked("사이클 상한은 비워두거나 1~50으로 입력하세요.")
+    if cycles is not None and (type(cycles) is not int or not 1 <= cycles <= maximum_cycles):
+        raise Blocked(f"사이클 상한은 비워두거나 1~{maximum_cycles}으로 입력하세요.")
     for key, maxima, total, unit in (
-            ("role_seconds", ROLE_SECONDS, seconds, "초"),
+            ("role_seconds", role_seconds_caps or ROLE_SECONDS, seconds, "초"),
             ("role_tokens", role_token_caps or ROLE_TOKENS, tokens, "토큰")):
         values = limits[key]
         if type(values) is not dict or values.keys() != maxima.keys():

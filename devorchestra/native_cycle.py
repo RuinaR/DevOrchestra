@@ -3,6 +3,7 @@ from difflib import unified_diff
 import json
 from pathlib import Path
 import re
+from subprocess import list2cmdline
 from time import monotonic, time
 
 from . import cycle_progress
@@ -526,15 +527,21 @@ class _FixtureSession:
         report = (lambda label: activity(cycle, phase, label)) if activity else None
         observed_check = (self.progress_check(phase, role_started, role_log, output_limit, report=report)
                           if graceful or report else self.check)
+        argv = _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
+                          tool_root=tool_root, shell_tools=shell_tools, extra_read_roots=extra_read_roots,
+                          scratch_root=scratch_root, images=images, output_schema=output_schema)
+        stdin = {}
+        # Leave room for the executable path and Windows quoting expansion.
+        if len(list2cmdline(argv).encode("utf-16-le")) >= 48000:
+            argv[-1] = "-"
+            stdin["stdin_bytes"] = prompt.encode("utf-8")
         stop_cause = None
         try:
-            result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
-                                                      tool_root=tool_root, shell_tools=shell_tools,
-                                                      extra_read_roots=extra_read_roots, scratch_root=scratch_root,
-                                                      images=images, output_schema=output_schema),
+            result = _observe(self.binary, argv,
                               self.work, role_log, self.env, seconds=timeout, check=observed_check,
                               output_limit=output_limit, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
-                              memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2)
+                              memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2,
+                              **stdin)
         except OwnedMxcStopped as stopped:
             stop_cause = str(stopped)
             self.owned_verified = True
