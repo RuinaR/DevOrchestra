@@ -239,7 +239,7 @@ def show(center, project):
 
     ttk.Button(inputs, text="찾기", command=archive).grid(row=0, column=2)
     ttk.Label(body, text="독립 검증 설정").pack(anchor="w")
-    ttk.Label(body, text="기본 검증은 원본 Git, 복제본과 변경 범위를 확인합니다. 앱 실행·입력·화면 검증에는 실행 설정이 필요합니다.",
+    ttk.Label(body, text="기본 검증은 원본 Git, 복제본과 변경 범위를 확인합니다. 입력·동작 검증은 실행 검사를 설정하세요.",
               wraplength=580).pack(anchor="w")
     ttk.Label(body, text="실행 검사에 screen_changed를 설정하면 소유 창의 입력 전후 화면을 비교합니다.",
               wraplength=580).pack(anchor="w")
@@ -272,10 +272,13 @@ def show(center, project):
             return
         spec.edit_modified(False)
         try:
-            problem = registered_cycle.visual_review_problem(read_spec())
+            configured = registered_cycle.visual_capture_configured(read_spec())
         except ValueError:
-            problem = "검증 설정 JSON을 확인하세요."
-        visual_hint.configure(text=problem or "현재 검증 설정은 AI 시각 검토에 필요한 화면을 캡처합니다.")
+            visual_hint.configure(text="검증 설정 JSON을 확인하세요.")
+            return
+        visual_hint.configure(text="설정된 소유 창 검사의 화면을 Reviewer에게 전달합니다." if configured else
+                              "화면 없이도 시작합니다. Developer가 실행 가능한 Windows 앱을 빌드하면 "
+                              "소유 창의 시작 화면을 Reviewer가 확인합니다.")
 
     spec.bind("<<Modified>>", update_visual_hint, add="+")
 
@@ -341,6 +344,9 @@ def show(center, project):
             lines.append(f"종료 예약 · {stop['reason']} · 현재 작업 마무리")
         for row in rows:
             if row["kind"] == "native_inspection_visual_review":
+                if row["status"] == "NOT_VERIFIED" and not row["frames"]:
+                    lines.append(f"{row['cycle']} · 시각 검토 미확인 · 캡처한 실행 화면 없음")
+                    continue
                 lines.append(f"{row['cycle']} · {row['status']} · {row['verdict']} · 발견 {len(row['findings'])}건")
                 lines.extend(f"{item['severity']} · {item['frame']} · {item['observed']}" for item in row["findings"])
             elif row["kind"] == "native_inspection_visual_integrity":
@@ -459,8 +465,11 @@ def show(center, project):
                             "마무리 최대 1,800초·300,000토큰. 역할 유예 최대 900초. "
                             "무응답 600초, 도구 실행 중 무응답 1,200초에서 소유 Job을 회수합니다.")
             if result.get("visual_review"):
-                summary += ("\n사이클마다 소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다. "
+                summary += ("\n캡처에 성공하면 소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다. "
                             "검토는 Reviewer 토큰 기준에 포함됩니다.")
+                if result.get("visual_preview"):
+                    summary += ("\nDeveloper가 세션 임시 폴더에 빌드한 Windows 앱을 오프라인 샌드박스에서 실행해 "
+                                "시작 화면을 캡처합니다. 화면이 준비되기 전에는 코드 검토를 계속합니다.")
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary, parent=panel):
                 submit(args, digest(result), soft_limits=soft_limits, visual_review=visual_review)
             else:
@@ -477,10 +486,6 @@ def show(center, project):
             return
         try:
             verifier = read_spec()
-            if use_images.get() and (problem := registered_cycle.visual_review_problem(verifier)):
-                state.set(problem)
-                body.master.yview_moveto(verifier_actions.winfo_y() / max(1, body.winfo_height()))
-                return
             if verifier != default_verifier and not registered_cycle.godot_verifier_spec(verifier):
                 if not isinstance(verifier.get("executable"), str) or not verifier["executable"].strip():
                     raise ValueError("검증 도구를 선택하거나 ‘기본 검증 사용’을 누르세요.")

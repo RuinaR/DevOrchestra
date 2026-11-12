@@ -176,6 +176,10 @@ class RegisteredCycleTests(unittest.TestCase):
             with patch.object(native_cycle, "_observe", side_effect=transport), patch.object(
                     registered_cycle, "_diagnostic", return_value={"request_id": "offline"}):
                 scope = registered_cycle.review(runner, *params)
+                preview = registered_cycle.review(runner, *params[:-1],
+                                                  {"mode": registered_cycle.BASELINE_VERIFIER},
+                                                  visual_review=True)
+                self.assertEqual(preview["visual_preview"], "scratch-windows-exe")
                 self.assertEqual(calls, [])
                 if resume:
                     stopped = registered_cycle.run(runner, *params, approval=digest(scope))

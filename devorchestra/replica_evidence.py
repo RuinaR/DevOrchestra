@@ -64,7 +64,7 @@ def _git_identity(root):
     return result
 
 
-def snapshot(root, *, owned_staging=None):
+def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2):
     """Capture files without following links or invoking Git or a build tool."""
     if owned_staging is not None:
         check_path(owned_staging)
@@ -99,7 +99,7 @@ def snapshot(root, *, owned_staging=None):
                 if item.is_dir(follow_symlinks=False):
                     directories.append(path)
                     continue
-                file = fingerprint(path, min(64 * 1024 * 1024, 256 * 1024 * 1024 - total))
+                file = fingerprint(path, min(max_file_bytes, 256 * 1024**2 - total))
                 total += file["bytes"]
                 files[relative] = file
     if _git_identity(root) != git:

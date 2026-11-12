@@ -55,7 +55,7 @@ def safe_unverified(items):
     return [_safe_text(item) for item in items]
 
 
-def frames(ledger, receipt, run_id, cycle, source):
+def frames(ledger, receipt, run_id, cycle, source, *, allow_empty=False):
     if (not re.fullmatch(r"[a-f0-9]{32}", run_id) or receipt.get("source_sha256") != source
             or receipt.get("phase") != "verifier" or receipt.get("outcome") != "COMPLETED"
             or receipt.get("owned_tree") != "DRAINED"):
@@ -68,18 +68,29 @@ def frames(ledger, receipt, run_id, cycle, source):
                          game["executable"]["sha256"], "Windows export", "GamePilot.exe"))
     for row in receipt.get("observations", ()):
         if "gui" in row:
+            if len(captures) >= MAX_FRAMES // 2:
+                break
             gui = row["gui"]
             captures.append((f"gui-{run_id}-{cycle}-{row['title']}", gui["artifact_directory"],
                              gui, gui["image"], row.get("executable_sha256"), row["title"], None))
-    if not captures or len(captures) * 2 > MAX_FRAMES:
-        raise Blocked("Visual Reviewer requires one or two approved pairs of owned GUI captures")
+    preview = receipt.get("visual_preview")
+    if preview and preview.get("artifact_directory"):
+        captures.append((f"gui-{run_id}-{cycle}-preview", preview["artifact_directory"], None,
+                         preview["image"], preview["executable_sha256"], "Developer GUI preview", None))
+    if not captures and allow_empty:
+        return []
+    frame_count = sum(2 if detail is not None else 1 for _, _, detail, *_ in captures)
+    if not 1 <= frame_count <= MAX_FRAMES:
+        raise Blocked("Visual Reviewer requires one to four approved owned-window captures")
     result = []
     for expected, folder, detail, after, executable, scenario, executable_file in captures:
         if folder != expected or Path(folder).name != folder or not executable:
             raise Blocked("Visual evidence artifact identity does not match")
-        for step, image in (("before-input", detail.get("before_input")), ("after-input", after)):
+        images = (("before-input", detail.get("before_input")), ("after-input", after)) if detail is not None else (
+            ("startup", after),)
+        for step, image in images:
             if not isinstance(image, dict) or image.get("file") not in {
-                    "before-input.png", "after-input.png", "exported-window.png"}:
+                    "before-input.png", "after-input.png", "exported-window.png", "preview.png"}:
                 raise Blocked("Missing owned GUI capture")
             result.append({**image, "id": f"F{len(result) + 1}", "step": step, "folder": folder,
                            "scenario": scenario, "source_sha256": source, "executable_sha256": executable,

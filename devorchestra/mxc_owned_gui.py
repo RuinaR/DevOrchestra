@@ -199,7 +199,7 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
         _require(api.CloseHandle(process))
 
 
-def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None):
+def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None, input_probe=True):
     user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
     callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
     enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
@@ -230,7 +230,7 @@ def inspect_owned_window(api, job, deadline, check, image_path, workers, *, befo
         if len(windows) == 1:
             pid, hwnd = windows[0]
             sleep(0.4)
-            return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=True,
+            return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=input_probe,
                                    before_input=before_input)
         sleep(0.05)
 

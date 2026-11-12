@@ -90,3 +90,19 @@ class VisualReviewTests(unittest.TestCase):
         self.assertEqual((image,), session.call.call_args.kwargs["images"])
         session.verify_registered.assert_called_once_with(1)
         recheck.assert_called_once_with(ledger, evidence)
+
+    def test_missing_preview_still_runs_code_review(self):
+        criteria = {"C1": {"text": "Show complete labels", "checks": []}}
+        receipt = {"verdict": "NOT_VALIDATED", "phase": "verifier", "outcome": "COMPLETED",
+                   "owned_tree": "DRAINED", "observations": [], "user_test_required": ["C1"],
+                   "visual_preview": {"reason": "NO_RUNNABLE_GUI"}, "source_sha256": "source"}
+        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True},
+                                  fields={"run_id": "a" * 32}, source=lambda: "source",
+                                  runner=SimpleNamespace(ledger=None), verify_registered=Mock(return_value=receipt),
+                                  record=Mock(), phases=[], signoff_state={}, call=Mock(return_value="ACCEPT"))
+        _, review, _, _, comparison = registered_cycle._review_and_verify(
+            session, 1, "C1", "bounded diff", {"C1": "NOT_STARTED"})
+        self.assertEqual(review, "ACCEPT")
+        self.assertIn("Visual quality is NOT_VERIFIED", session.call.call_args.args[3])
+        self.assertEqual(comparison["criteria"], {"C1": "USER_TEST_REQUIRED"})
+        session.verify_registered.assert_called_once_with(1)
