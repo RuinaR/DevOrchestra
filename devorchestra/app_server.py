@@ -376,7 +376,7 @@ class AppServer:
                 self._fail("INVALID_RESULT", matches=True, valid=True, size=size)
             self._note("MATCHED_RESPONSE", matches=True, valid=True, size=size)
 
-    def _informational(self, message):
+    def _informational(self, message, *, discard_account_updates=False):
         method, params = message["method"], message.get("params")
         category = NOTIFICATION_CATEGORIES.get(method)
         if method == REMOTE_STATUS:
@@ -392,6 +392,8 @@ class AppServer:
                 self._fail("REMOTE_CONTROL_REQUIRES_REVIEW", method=method, valid=True)
             return True
         if category == "ACCOUNT":
+            if discard_account_updates and method in ("account/updated", "account/rateLimits/updated"):
+                return True
             self._fail("ACCOUNT_NOTIFICATION_BLOCKED", method=method, valid=True)
         if category == "SECURITY":
             self._fail("SECURITY_NOTIFICATION_REQUIRES_REVIEW", method=method, valid=True)
@@ -419,8 +421,15 @@ class AppServer:
             self._fail("INVALID_NOTIFICATION_METADATA", method=method, valid=True)
         self._fail("CONFIG_WARNING_REQUIRES_REVIEW", method=method, valid=True)
 
-    def request(self, request_id, method, params, on_notification=None, *, allowed_notifications=()):
+    def request(self, request_id, method, params, on_notification=None, *, allowed_notifications=(),
+                discard_account_updates=False):
         self._check_outbound_method(method)
+        if discard_account_updates and (
+                method not in ("account/read", "account/rateLimits/read", "model/list")
+                or self._outbound_methods is None
+                or self._outbound_methods - {"initialize", "initialized", "account/read",
+                                             "account/rateLimits/read", "model/list"}):
+            raise Blocked("Account updates require a read-only App Server scope")
         if type(request_id) is not int or request_id in self.request_ids or self.request_method is not None:
             self._fail("INVALID_REQUEST_ID")
         self.request_ids.add(request_id)
@@ -435,7 +444,7 @@ class AppServer:
                 if "method" not in reply:
                     self.completed_ids.add(request_id)
                     return reply["result"]
-                if self._informational(reply):
+                if self._informational(reply, discard_account_updates=discard_account_updates):
                     continue
                 if on_notification is None or reply["method"] not in allowed_notifications:
                     self._fail("UNSUPPORTED_NOTIFICATION", method=reply["method"], valid=True)

@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 from shutil import copyfile
 
+from .ai_usage import codex_snapshot
 from .app_server import open_app_server
 from .lease import Blocked, execution_slot
 from .ledger import check_path
@@ -11,7 +12,7 @@ from .mxc_host_probe import OwnedMxcStopped, _observe
 from .mxc_launcher import _known_folder
 from .native_command_probe import ARCHIVE_SHA256, RELEASE_SHA256, _stage_release, _staging, _verify_code_mode_host
 from .native_developer_trial import DEFAULT_MODEL, _check_dedicated_config, _diagnostic, _read_observation
-from .native_exec_probe import run_native_exec_probe
+from .native_exec_probe import recover_undispatched_exec_probe, run_native_exec_probe
 
 
 RELEASE_URL = "https://github.com/openai/codex/releases/tag/rust-v0.167.1"
@@ -30,46 +31,54 @@ def _checksum(path):
         return file_digest(stream, "sha256").hexdigest()
 
 
-def _provider(binary, lab, environment, cancelled):
-    result = {"plan": "UNKNOWN", "model": "UNKNOWN", "limits": []}
+def _provider(binary, lab, environment, cancelled, *, limits_only=False):
+    result = {"plan": "UNKNOWN", "model": "UNKNOWN", "limits": [], "windows": []}
     try:
         with open_app_server(binary, lab, environment, 25, cancelled, approved_sha256=RELEASE_SHA256) as server:
-            server.restrict_outbound({"initialize", "initialized", "account/read", "model/list",
-                                      "account/rateLimits/read"})
+            server.restrict_outbound(frozenset({"initialize", "initialized", "account/read", "model/list",
+                                                "account/rateLimits/read"}))
             server.initialize()
-            account = server.request(1, "account/read", {"refreshToken": False}).get("account")
+            account = server.request(1, "account/read", {"refreshToken": False},
+                                     discard_account_updates=True).get("account")
             if not isinstance(account, dict) or account.get("type") != "chatgpt":
                 return result
             plan = account.get("planType")
             if isinstance(plan, str) and re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,23}", plan):
                 result["plan"] = plan
-            page = server.request(2, "model/list", {"limit": 100})
-            data = page.get("data")
-            if isinstance(data, list) and all(isinstance(item, dict) and isinstance(item.get("id"), str)
-                                             for item in data):
-                if any(item["id"] == DEFAULT_MODEL for item in data):
-                    result["model"] = "LISTED"
-                elif not page.get("nextCursor"):
-                    result["model"] = "NOT_LISTED"
-            limits = server.request(3, "account/rateLimits/read", {}).get("rateLimits")
-            if isinstance(limits, dict):
-                for key in ("primary", "secondary"):
-                    bucket = limits.get(key)
-                    if isinstance(bucket, dict) and type(bucket.get("usedPercent")) in (int, float):
-                        used = bucket["usedPercent"]
-                        if 0 <= used <= 100:
-                            minutes = bucket.get("windowDurationMins")
-                            result["limits"].append((minutes if type(minutes) is int and minutes > 0 else None, used))
+            try:
+                payload = server.request(2, "account/rateLimits/read", {}, discard_account_updates=True)
+                result["windows"] = codex_snapshot(payload)["windows"]
+                result["limits"] = [(row["minutes"], row["used"])
+                                    for row in result["windows"] if row["used"] is not None]
+            except (Blocked, ValueError):
+                pass
+            if not limits_only:
+                page = server.request(3, "model/list", {"limit": 100}, discard_account_updates=True)
+                data = page.get("data")
+                if isinstance(data, list) and all(isinstance(item, dict) and isinstance(item.get("id"), str)
+                                                 for item in data):
+                    if any(item["id"] == DEFAULT_MODEL for item in data):
+                        result["model"] = "LISTED"
+                    elif not page.get("nextCursor"):
+                        result["model"] = "NOT_LISTED"
     except (Blocked, OSError, ValueError):
         pass
     return result
 
 
 def run(runner, action, *, archive=None, cancelled=lambda: False):
-    if action not in {"install", "status", "login", "logout", "provider", "verify"}:
+    if action not in {"install", "status", "login", "logout", "provider", "limits", "verify", "recover"}:
         raise ValueError("Unknown Codex setup action")
     ledger = runner.ledger
+    if action == "recover":
+        recover_undispatched_exec_probe(ledger)
+        return {"status": "RECOVERED"}
     saved = archive_path(ledger)
+    if action == "limits":
+        credentials = ledger.local_directory("state") / "codex-developer-home" / "auth.json"
+        check_path(credentials)
+        if not saved.is_file() or not credentials.is_file():
+            return {"status": "SIGNED_OUT"}
     if action == "verify":
         return {"verification": run_native_exec_probe(ledger, saved, code_mode=True)["status"]}
     with execution_slot() as abandoned:
@@ -145,9 +154,9 @@ def run(runner, action, *, archive=None, cancelled=lambda: False):
                           else "OTHER_AUTH" if response["exitCode"] == 0
                           else "SIGNED_OUT" if "not logged in" in output.casefold() else "STATUS_UNKNOWN")
             result = {"status": status, "verification": verified, "version": "0.167.1"}
-            if action == "provider" and status == "CONNECTED":
+            if action in {"provider", "limits"} and status == "CONNECTED":
                 check()
-                result["provider"] = _provider(binary, lab, env, cancelled)
+                result["provider"] = _provider(binary, lab, env, cancelled, limits_only=action == "limits")
         if cleanup.get("status") != "REMOVED":
             raise Blocked("Codex 임시 실행 폴더의 정리를 확인할 수 없습니다.")
         return result

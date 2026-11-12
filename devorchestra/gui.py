@@ -159,6 +159,9 @@ class CommandCenter:
         label(wordmark, "DevOrchestra", 17, bg=BG, bold=True).pack(anchor="w")
         label(wordmark, "COMMAND CENTER  /  개발 운영실", 9, bg=BG, fg=MUTED).pack(anchor="w")
         self.global_badge = label(header, fg=CYAN, bg=BG, bold=True)
+        from .gui_usage import UsageBadge
+
+        self.usage_badge = UsageBadge(self, header)
         self.global_badge.pack(side="right")
         self.project = ttk.Combobox(header, state="readonly", width=19,
                                     values=[PROJECTS[key].name for key in self.project_ids])
@@ -309,7 +312,7 @@ class CommandCenter:
         label(rail, "단일 실행 슬롯", 9, bg=ui_design.RAIL, fg=MUTED).pack(anchor="w", pady=(12, 0))
         self.navigate("dashboard")
         root.bind("<Control-k>", lambda _: self.search_projects())
-        root.bind("<F5>", lambda _: self.refresh())
+        root.bind("<F5>", lambda _: self.request_refresh())
         root.protocol("WM_DELETE_WINDOW", self.close_requested)
         self.refresh()
         self.poll_timer = root.after(POLL_MS, self.poll)
@@ -362,10 +365,10 @@ class CommandCenter:
         layout(0)
 
     def navigate(self, page):
+        details_changed = getattr(self, "details_visible", False) != (page == "operations")
         visible = set(self.page_frames[page])
-        for group in self.page_frames.values():
-            for frame in group:
-                (frame.grid if frame in visible else frame.grid_remove)()
+        for frame in {frame for group in self.page_frames.values() for frame in group}:
+            (frame.grid if frame in visible else frame.grid_remove)()
         self.page = page
         self.details_visible = page == "operations"
         (self.command_frame.grid if page in ("dashboard", "projects", "operations")
@@ -375,8 +378,10 @@ class CommandCenter:
         for key, item in self.navigation.items():
             item.configure(style="RailActive.TButton" if key == page else "Rail.TButton")
         self.workspace_canvas.yview_moveto(0)
-        if self.view:
+        if self.view and details_changed:
             self.render()
+        elif self.view and page == "records":
+            self.render_audit()
 
     def search_projects(self):
         dialog = self.panel()
@@ -404,7 +409,7 @@ class CommandCenter:
         def choose(_event=None):
             if selected := matches.curselection():
                 self.project.current(found[selected[0]][0])
-                self.select_project(None)
+                self.select_project(_event)
                 dialog.destroy()
                 self.navigate("projects")
 
@@ -571,7 +576,16 @@ class CommandCenter:
         self.run_filter.set("")
         self.role_filter.current(0)
         self.view = None
-        self.refresh()
+        if _event is None:
+            self.refresh()
+            return
+        self.development_button.configure(state="disabled")
+        self.request_refresh()
+
+    def request_refresh(self):
+        self.refresh_generation += 1
+        self.root.after_cancel(self.poll_timer)
+        self.poll_timer = self.root.after_idle(self.poll)
 
     def poll(self):
         if self.poll_future:
@@ -586,11 +600,7 @@ class CommandCenter:
                     self.clear(storage_message(storage), first_run=storage["status"] == "NOT_INITIALIZED")
                 else:
                     self.publish_view(project, view)
-            self.poll_timer = self.root.after(POLL_MS, self.poll)
-            return
-        if self.view is None:
-            self.refresh()
-            self.poll_timer = self.root.after(POLL_MS, self.poll)
+            self.poll_timer = self.root.after(POLL_MS if generation == self.refresh_generation else 0, self.poll)
             return
         if self.project.current() < 0:
             self.poll_timer = self.root.after(POLL_MS, self.poll)
@@ -600,7 +610,10 @@ class CommandCenter:
         self.poll_future = (self.refresh_generation, project, future)
 
         def work():
-            future.set_result(self.read_projection(project))
+            if not self.reader.ledger.path.is_file():
+                future.set_result((None, self.reader.ledger.storage_status()))
+            else:
+                future.set_result(self.read_projection(project))
 
         Thread(target=work, daemon=True).start()
         self.poll_timer = self.root.after(80, self.poll)
@@ -846,7 +859,8 @@ class CommandCenter:
         self.run_filter.configure(values=tuple(self.run_options))
         if self.run_filter.get() not in self.run_options:
             self.run_filter.current(0)
-        self.render_audit()
+        if getattr(self, "page", "records") == "records":
+            self.render_audit()
 
     def answer_question(self):
         pending = self.view.get("user_question") if self.view else None

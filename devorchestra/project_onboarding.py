@@ -65,6 +65,18 @@ def _git_tools():
     roots = [programs / "Git", _known_folder(0x1C) / "Programs" / "Git"]
     if packaged.is_relative_to(programs / "WindowsApps") and packaged.parent.name.casefold() == "cmd":
         roots.insert(0, packaged.parent.parent)
+    # Explorer-launched executables do not inherit the Codex terminal's PATH.
+    import winreg
+
+    repository = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, repository) as key:
+            for index in range(winreg.QueryInfoKey(key)[0]):
+                package = winreg.EnumKey(key, index)
+                if re.fullmatch(r"OpenAI\.CodexPrimaryRuntime\.[A-Za-z0-9.-]+_[0-9.]+_x64__3k8sg7r9htsxt", package):
+                    roots.append(programs / "WindowsApps" / package / "dependencies" / "native" / "git")
+    except OSError:
+        pass
     for root in roots:
         entry = root / "cmd" / "git.exe"
         for runtime in ("ucrt64", "mingw64"):

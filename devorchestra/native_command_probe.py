@@ -94,9 +94,13 @@ def _fixture_git_binary():
     return _git_tools()[1]
 
 
-def _prepare_git_fixture(work, original, scratch, environment, check):
+class GitFixtureFailed(Blocked):
+    """The Git fixture exited with a verified empty Job and failed to set up."""
+
+
+def _prepare_git_fixture(work, original, scratch, environment, check, *, tool=None):
     # This fixed Git sequence touches only the two disposable fixture roots.
-    tool = _fixture_git_binary()
+    tool = tool or _fixture_git_binary()
     env = {**environment, "HOME": environment["USERPROFILE"], "GIT_CONFIG_NOSYSTEM": "1",
            "GIT_CONFIG_GLOBAL": "NUL", "GIT_TERMINAL_PROMPT": "0"}
     commands = (
@@ -113,8 +117,10 @@ def _prepare_git_fixture(work, original, scratch, environment, check):
         output.mkdir()
         result = _observe(tool, ["-c", "core.hooksPath=NUL", "-c", "core.autocrlf=false", *args],
                           cwd, output, env, seconds=5, check=check, output_limit=4096, encoding="utf-8")
-        if result["exitCode"] != 0 or result["job_active"]:
-            raise Blocked("Local Git fixture command failed")
+        if result["job_active"]:
+            raise Blocked("Local Git fixture Job drain is unverified")
+        if result["exitCode"] != 0:
+            raise GitFixtureFailed("Local Git fixture command failed")
     return snapshot(original)
 
 

@@ -18,6 +18,7 @@ STATUS = {
     "AUTH_FAILED": "계정 연결에 실패했습니다. 브라우저에서 취소 여부와 네트워크를 확인한 뒤 다시 시도하세요.",
     "CANCELLED": "연결 요청을 취소했습니다.",
     "TIMEOUT": "로그인 시간이 초과됐습니다. 브라우저 안내를 확인한 뒤 다시 시작하세요.",
+    "RECOVERED": "이전 실행이 시작되기 전에 중단된 기록을 정리했습니다.",
 }
 
 
@@ -42,9 +43,6 @@ def show(center):
         nonlocal pending
         if pending and not pending.done():
             return
-        if runner.ledger.storage_status()["status"] != "READY":
-            state.set("먼저 초기 설정에서 사용자 저장소를 준비하세요.")
-            return
         archive = None
         if action == "install":
             archive = filedialog.askopenfilename(parent=panel, filetypes=[("공식 Codex ZIP", "*.zip")])
@@ -61,6 +59,8 @@ def show(center):
 
         def work():
             try:
+                if runner.ledger.storage_status()["status"] != "READY":
+                    raise RuntimeError("먼저 초기 설정에서 사용자 저장소를 준비하세요.")
                 pending.set_result(codex_setup.run(runner, action, archive=archive, cancelled=cancelled.is_set))
             except Exception as error:
                 pending.set_exception(error)
@@ -74,8 +74,14 @@ def show(center):
             try:
                 result = pending.result()
             except (RuntimeError, OSError, ValueError, sqlite3.Error) as error:
+                if str(error) == "Native process ownership requires recovery":
+                    state.set("이전 실행이 정상적으로 닫히지 않았습니다. ‘복구 확인’을 눌러 기록을 확인하세요.")
+                    recover_button.pack(side="left")
+                    return
                 state.set(f"준비를 완료하지 못했습니다. 공식 ZIP, 로컬 Git 및 실행 상태를 확인하세요.\n{error}")
                 return
+            if result.get("status") == "RECOVERED":
+                recover_button.pack_forget()
             lines = [STATUS.get(result.get("status"), "로컬 실행 확인을 마쳤습니다.")]
             verified = result.get("verification")
             if verified:
@@ -90,6 +96,11 @@ def show(center):
                 lines.extend(f"제공자 한도 · {minutes or '?'}분 사용률 {used:g}%" for minutes, used in provider["limits"])
                 if not provider["limits"]:
                     lines.append("제공자 한도 조회 불가. 개발 세션의 시간·토큰 예산은 별도입니다.")
+            badge = getattr(center, "usage_badge", None)
+            if badge and ("provider" in result or action == "logout" and result.get("status") == "SIGNED_OUT"):
+                badge.update(result)
+            elif badge and action == "login" and result.get("status") == "CONNECTED":
+                badge.refresh()
             state.set("\n".join(lines))
 
         Thread(target=work, daemon=False).start()
@@ -111,5 +122,7 @@ def show(center):
     bottom = ttk.Frame(panel)
     bottom.pack(fill="x", pady=(8, 0))
     ttk.Button(bottom, text="로그인 취소", command=cancelled.set).pack(side="left")
+    recover_button = ttk.Button(bottom, text="복구 확인", command=lambda: submit("recover"))
+    buttons.append(recover_button)
     ttk.Button(bottom, text="프로젝트 등록", command=lambda: (panel.destroy(), center.register_project())).pack(side="right")
     panel.bind("<Destroy>", lambda event: cancelled.set() if event.widget is panel else None, add="+")

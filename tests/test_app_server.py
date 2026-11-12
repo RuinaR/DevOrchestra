@@ -109,6 +109,23 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(1, len(output.getvalue().splitlines()))
         self.assertNotIn("private fixture", str(connection.diagnostic_receipt()))
 
+    def test_quota_scope_discards_account_updates_without_allowing_auth_or_tools(self):
+        messages = (b'{"method":"account/updated","params":{"private":"fixture"}}\n'
+                    b'{"method":"account/rateLimits/updated","params":{}}\n'
+                    b'{"id":1,"result":{"rateLimits":{}}}\n'
+                    b'{"method":"account/login/completed","params":{}}\n')
+        output = BytesIO()
+        connection = AppServer(BytesIO(messages), output, 1, lambda: False)
+        connection.restrict_outbound(frozenset({"account/rateLimits/read"}))
+        read = lambda request_id: connection.request(
+            request_id, "account/rateLimits/read", {}, discard_account_updates=True)
+        self.assertEqual({"rateLimits": {}}, read(1))
+        with self.assertRaisesRegex(Blocked, "ACCOUNT_NOTIFICATION_BLOCKED"):
+            read(2)
+        with self.assertRaisesRegex(Blocked, "outbound RPC denied"):
+            connection.request(3, "command/exec", {})
+        self.assertNotIn("fixture", str(connection.diagnostic_receipt()))
+
     def test_disabled_remote_status_before_response_is_bounded_and_redacted(self):
         messages = REMOTE_DISABLED + b'{"id":1,"result":{"config":{}}}\n'
         connection = AppServer(BytesIO(messages), BytesIO(), 1, lambda: False)

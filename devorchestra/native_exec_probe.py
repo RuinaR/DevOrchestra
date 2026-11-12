@@ -7,12 +7,13 @@ from uuid import uuid4
 
 from .job_probe import CODEX_DEVELOPER_PROCESS_LIMIT
 
-from .lease import execution_slot
+from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_host_probe import OwnedMxcStopped, _observe
 from .mxc_launcher import _known_folder
 from .native_command_probe import (
-    CODE_MODE_HOST_SHA256, GENERAL_MODEL, RELEASE_SHA256, SOURCE_NAMES, SUBTOTAL, TOTAL, _prepare_git_fixture,
+    CODE_MODE_HOST_SHA256, GENERAL_MODEL, RELEASE_SHA256, SOURCE_NAMES, SUBTOTAL, TOTAL,
+    GitFixtureFailed, _fixture_git_binary, _prepare_git_fixture,
     _release_fixture_git_objects, _stage_release, _staging, _verify_code_mode_host,
 )
 from .replica_evidence import snapshot
@@ -132,6 +133,7 @@ def run_native_exec_probe(ledger, archive, *, code_mode=False):
     with execution_slot() as abandoned:
         runner = Runner(ledger)
         events, head = runner._idle_diagnostic(abandoned)
+        git = _fixture_git_binary()
         fields = {"state": "DIAGNOSTIC", "request_id": uuid4().hex, "project_id": None, "run_id": None,
                   "probe_kind": "GENERAL_CODEX_CODE_MODE" if code_mode else "GENERAL_CODEX_EXEC_STARTUP",
                   "development_mode": "general",
@@ -156,7 +158,8 @@ def run_native_exec_probe(ledger, archive, *, code_mode=False):
                 "ProgramData": str(_known_folder(0x23)), "PATH": str(windows / "System32"),
                 "CODEX_HOME": str(home), "TEMP": str(scratch), "TMP": str(scratch),
             }
-            count, fence = ledger.append(len(events), head, {**fields, "kind": "native_inspection_intent"},
+            count, fence = ledger.append(len(events), head, {**fields, "kind": "native_inspection_intent",
+                                                            "workspace": lab.name},
                                          admission=require_admission)
             cleanup["preserve"] = True
 
@@ -164,20 +167,21 @@ def run_native_exec_probe(ledger, archive, *, code_mode=False):
                 runner._check_diagnostic_fence(count, fence)
                 return False
 
-            baseline = _prepare_git_fixture(work, original, scratch, environment, check)
-            before = snapshot(work)
-            test_logs = scratch / "baseline"
-            test_logs.mkdir()
+            unchanged = False
             try:
+                baseline = _prepare_git_fixture(work, original, scratch, environment, check, tool=git)
+                before = snapshot(work)
+                test_logs = scratch / "baseline"
+                test_logs.mkdir()
                 verified = _verify_output(binary, work, test_logs, environment, check)
                 result = _observe_exec(binary, work, scratch, environment, check, code_mode=code_mode)
                 result["independent_baseline_observed"] = (
                     verified["exitCode"] == 0 and verified["stdout"].strip() == "9" and not verified["stderr"])
-            except OwnedMxcStopped:
+                unchanged = snapshot(work) == before and snapshot(original) == baseline
+            except (OwnedMxcStopped, GitFixtureFailed) as error:
                 check()
-                result = {"process_result": "TERMINATED_AND_DRAINED", "job_active": 0,
-                          "independent_baseline_observed": False}
-            unchanged = snapshot(work) == before and snapshot(original) == baseline
+                result = {"process_result": "DRAINED", "job_active": 0,
+                          "independent_baseline_observed": False, "reason": str(error)}
             _release_fixture_git_objects(work, original)
             cleanup["preserve"] = False
         ready = (unchanged and result["independent_baseline_observed"] and result["responses_path"]
@@ -198,3 +202,46 @@ def run_native_exec_probe(ledger, archive, *, code_mode=False):
                               else ("CLI_STARTUP_OBSERVED" if passed else "CLI_STARTUP_UNVERIFIED"))}
         ledger.append(count, fence, receipt, allow_shutdown=True)
         return receipt
+
+
+def recover_undispatched_exec_probe(ledger):
+    """Close the original first-run intent only if no fixture command could have started."""
+    from .app_server import verify_app_server_binary
+    from .native_developer_trial import code_mode_flags_sha256
+
+    with execution_slot() as abandoned:
+        events, head = ledger.snapshot(recover_journal=True)
+        if (abandoned or len(events) != 1 or events[0].get("kind") != "native_inspection_intent"
+                or events[0].get("probe_kind") != "GENERAL_CODEX_CODE_MODE"
+                or events[0].get("candidate_sha256") != RELEASE_SHA256
+                or events[0].get("code_mode_host_sha256") != CODE_MODE_HOST_SHA256
+                or events[0].get("flags_sha256") != code_mode_flags_sha256()):
+            raise Blocked("실행 전 중단으로 확인할 수 있는 첫 설정 기록이 없습니다.")
+        candidates = list(ledger.local_directory("temp").glob("native-command-*"))
+        if len(candidates) != 1:
+            raise Blocked("첫 설정의 임시 폴더를 식별할 수 없습니다.")
+        lab = candidates[0]
+        check_path(lab)
+        if {path.name for path in lab.iterdir()} != {"package", "work", "original", "home", "tmp"}:
+            raise Blocked("첫 설정의 실행 전 상태를 확인할 수 없습니다.")
+        for name in ("work", "home", "tmp"):
+            path = lab / name
+            check_path(path)
+            if not path.is_dir() or any(path.iterdir()):
+                raise Blocked("작업이 시작됐을 수 있어 실행 기록을 보존했습니다.")
+        original = lab / "original"
+        check_path(original)
+        if {path.name for path in original.iterdir()} != set(SOURCE_NAMES):
+            raise Blocked("첫 설정의 시험 파일이 예상과 다릅니다.")
+        for name, expected in zip(SOURCE_NAMES, (SUBTOTAL.format(factor=2), TOTAL.format(fee=3))):
+            path = original / name
+            check_path(path)
+            if path.stat().st_size > 1024 or path.read_text(encoding="ascii") != expected:
+                raise Blocked("첫 설정의 시험 파일이 예상과 다릅니다.")
+        binary = lab / "package" / "codex.exe"
+        verify_app_server_binary(binary, approved_sha256=RELEASE_SHA256)
+        _verify_code_mode_host(binary)
+        # The old runner created tmp/git-0 before dispatching its first Job.
+        ledger.append(len(events), head, {**events[0], "kind": "native_inspection_result",
+                      "status": "RECOVERED_BEFORE_DISPATCH", "owned_tree": "NOT_STARTED",
+                      "workspace": lab.name, "provider_model_turn": "NOT_STARTED"}, allow_shutdown=True)

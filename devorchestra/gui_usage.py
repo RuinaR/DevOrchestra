@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import Thread
+from time import monotonic
 import tkinter as tk
 from tkinter import filedialog, ttk
 from webbrowser import open as open_browser
@@ -14,6 +15,116 @@ from .chatgpt_subscription import AccountStore
 from .lease import Blocked
 from .ledger import check_path
 from .runtime import Runner
+
+
+class UsageBadge:
+    """Always-visible Codex quota with detail on pointer or keyboard focus."""
+
+    def __init__(self, center, parent):
+        self.center = center
+        self.root = center.root
+        self.button = ttk.Button(parent, text="Codex 잔여 · —", command=self.refresh)
+        self.button.pack(side="right", padx=(6, 0))
+        self.future = self.tip = None
+        self.cancelled = False
+        self.last_query = float("-inf")
+        self.detail = "Codex 제공자 사용량을 확인하는 중입니다."
+        self.has_snapshot = False
+        self.button.bind("<Enter>", self.show)
+        self.button.bind("<FocusIn>", self.show)
+        self.button.bind("<Leave>", self.hide)
+        self.button.bind("<FocusOut>", self.hide)
+        self.button.bind("<Destroy>", self.stop)
+        self.root.after(2000, self.tick)
+
+    def tick(self):
+        if not self.cancelled:
+            if monotonic() - self.last_query >= 300:
+                self.refresh()
+            self.root.after(30000, self.tick)
+
+    def refresh(self):
+        from .codex_setup import run
+
+        if self.future is not None or self.cancelled:
+            return
+        self.last_query = monotonic()
+        future = self.future = Future()
+
+        def work():
+            try:
+                future.set_result(run(self.center.controller, "limits", cancelled=lambda: self.cancelled))
+            except Exception as error:
+                future.set_exception(error)
+
+        Thread(target=work, daemon=False).start()
+        self.root.after(150, self.poll)
+
+    def poll(self):
+        if self.cancelled:
+            return
+        if not self.future.done():
+            self.root.after(150, self.poll)
+            return
+        future, self.future = self.future, None
+        if future.exception():
+            self.unavailable()
+            return
+        self.update(future.result())
+
+    def unavailable(self):
+        notice = "최신 사용량 조회 불가 · 클릭하여 다시 확인"
+        self.detail = f"{self.detail.split(notice, 1)[0].rstrip()}\n{notice}" if self.has_snapshot else notice
+        self.update_tip()
+
+    def update(self, result):
+        rows = [row for row in result.get("provider", {}).get("windows", []) if row["remaining"] is not None]
+        if rows:
+            self.has_snapshot = True
+            bars = " / ".join("▰" * round(row["remaining"] / 25)
+                              + "▱" * (4 - round(row["remaining"] / 25)) for row in rows[:2])
+            self.button.configure(text=f"Codex 잔여 · {bars}")
+            lines = []
+            for row in rows:
+                window = f'{row["minutes"]}분 구간' if row["minutes"] else row["window"]
+                reset = f' · 초기화 {_local_time(row["resets_at"])}' if row["resets_at"] else ""
+                lines.append(f'{row["bucket"]} · {window} · 잔여 {row["remaining"]:g}%{reset}')
+            self.detail = "\n".join(lines + [f"조회 {_local_time()}"])
+        else:
+            if self.has_snapshot and result.get("status") == "CONNECTED":
+                self.unavailable()
+                return
+            self.has_snapshot = False
+            self.button.configure(text="Codex 잔여 · —")
+            self.detail = ("설정에서 ChatGPT 계정을 연결하세요." if result.get("status") == "SIGNED_OUT"
+                           else "제공자가 잔여 사용량을 반환하지 않았습니다.")
+        self.update_tip()
+
+    def show(self, _event=None):
+        if self.tip is not None:
+            return
+        self.tip = tip = tk.Toplevel(self.root)
+        tip.overrideredirect(True)
+        self.tip_label = ttk.Label(tip, text=self.detail, padding=8, wraplength=430)
+        self.tip_label.pack()
+        self.update_tip()
+
+    def update_tip(self):
+        if self.tip is None:
+            return
+        self.tip_label.configure(text=self.detail)
+        right = self.button.winfo_rootx() + self.button.winfo_width()
+        top = self.button.winfo_rooty() + self.button.winfo_height() + 4
+        self.tip.geometry(f"+{max(0, right - self.tip_label.winfo_reqwidth())}+{top}")
+
+    def hide(self, _event=None):
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+
+    def stop(self, _event=None):
+        self.cancelled = True
+        self.hide()
 
 
 def _display(value):
