@@ -35,9 +35,14 @@ MAX_DIFF = 24000
 BASELINE_VERIFIER = "replica-integrity"
 MAX_SESSION_SECONDS = 86400
 MAX_SESSION_TOKENS = 10000000
-MAX_MANAGER_TOKENS = 300000
-REGISTERED_ROLE_TOKEN_CAPS = {**game_pilot.ROLE_TOKENS, "manager-planning": MAX_MANAGER_TOKENS,
-                              "manager-final": MAX_MANAGER_TOKENS}
+REGISTERED_ROLE_TOKEN_CAPS = {"manager-planning": 500000, "developer": 1000000,
+                              "reviewer": 500000, "manager-final": 500000}
+MAX_SIGNOFF_TOKENS = REGISTERED_ROLE_TOKEN_CAPS["reviewer"] + REGISTERED_ROLE_TOKEN_CAPS["manager-final"]
+
+
+def recommended_limits():
+    return {"seconds": MAX_SESSION_SECONDS, "tokens": MAX_SESSION_TOKENS, "cycles": None,
+            "role_seconds": dict(game_pilot.ROLE_SECONDS), "role_tokens": dict(REGISTERED_ROLE_TOKEN_CAPS)}
 
 
 def validate_limits(limits):
@@ -926,7 +931,7 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, *,
     if (type(expires) is not int or not now < expires <= now + (4800 if graceful else 1800)
             or type(seconds) is not int or not 120 <= seconds <= (1800 if graceful else 1500)
             or (graceful and expires < now + seconds + 2700)
-            or type(tokens) is not int or not 1 <= tokens <= 400000):
+            or type(tokens) is not int or not 1 <= tokens <= (MAX_SIGNOFF_TOKENS if graceful else 400000)):
         raise Blocked("Invalid additional review budget")
     rows = history(runner.ledger, project)
     if len(rows) < 4 or rows[-1]["kind"] != "native_inspection_result":
@@ -1082,17 +1087,20 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
         raise Blocked("The signoff diff no longer matches the checkpoint")
     review = checkpoint.get("review")
     pending_roles = ("reviewer", "manager-final") if review is None else ("manager-final",)
-    if tokens < sum(prior["role_tokens"][role] for role in pending_roles):
+    reservation = sum(prior["role_tokens"][role] for role in pending_roles)
+    if tokens < reservation:
         raise Blocked("Additional budget must cover the remaining model role reservations")
     resume = {k: checkpoint[k] for k in ("cycle", "criterion", "criteria_status", "changed", "diff_sha256")}
     resume.update(mode="signoff", parent_run_id=start["run_id"], review=review,
                   comparison=checkpoint.get("comparison"), parent_reported_tokens=end["known_reported_tokens"])
     if checkpoint.get("visual"):
         resume["visual"] = checkpoint["visual"]
+    policy = game_pilot.graceful_policy(followup=True)
+    policy["signoff_tokens"] = max(policy["signoff_tokens"], reservation)
     return ({**prior, "resume": resume, "replica_sha256": image, "ledger_head": head,
              "expires": expires, "seconds": seconds, "tokens": tokens, "model_calls_max": len(pending_roles),
              "files": end["changed"], "permissions": ["replica-read", "offline-shell", "pinned-verifier"],
-             "shell_roles": ["reviewer"], "graceful_stop": game_pilot.graceful_policy(followup=True)}, diff)
+             "shell_roles": ["reviewer"], "graceful_stop": policy}, diff)
 
 
 def game_plan_remaining(rows):

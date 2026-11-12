@@ -188,14 +188,13 @@ def show(center, project):
     inputs.pack(fill="x")
     entries = {}
     budget_keys = ("seconds", "tokens", "cycles", *ROLE_TOKEN_FIELDS.values())
+    defaults = registered_cycle.recommended_limits()
     for index, (key, label, default) in enumerate((
             ("archive", "공식 Codex ZIP", ""), ("files", "수정 파일 경로 (쉼표 구분)", ""),
-            ("seconds", "전체 시간 기준 (초)", str(game_pilot.SESSION_SECONDS)),
-            ("tokens", "전체 토큰 기준", str(game_pilot.SESSION_TOKENS)), ("cycles", "사이클 상한 (선택)", ""),
-            ("manager_tokens", "계획 Manager 호출당 토큰", str(game_pilot.ROLE_TOKENS["manager-planning"])),
-            ("developer_tokens", "Developer 호출당 토큰", ""),
-            ("reviewer_tokens", "Reviewer 호출당 토큰", ""),
-            ("final_manager_tokens", "최종 Manager 호출당 토큰", ""))):
+            ("seconds", "전체 시간 기준 (초)", str(defaults["seconds"])),
+            ("tokens", "전체 토큰 기준", str(defaults["tokens"])), ("cycles", "사이클 상한 (선택)", ""),
+            *((field, f"{ROLE_LABELS[role]} 호출당 토큰", str(defaults["role_tokens"][role]))
+              for role, field in ROLE_TOKEN_FIELDS.items()))):
         ttk.Label(inputs, text=label).grid(row=index, column=0, sticky="w")
         entry = entries[key] = ttk.Entry(inputs)
         entry.insert(0, draft.get(key, default))
@@ -205,7 +204,7 @@ def show(center, project):
         entries["files"].insert(0, "docs/PROJECT-PLAN.md")
     ttk.Label(body, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
               wraplength=580).pack(anchor="w", pady=4)
-    ttk.Label(body, text="빈 역할 입력은 기본값을 사용합니다. 최종 Manager 기본값은 계획 Manager와 같습니다. "
+    ttk.Label(body, text="빈 역할 입력은 전체 토큰 기준 내에서 해당 역할의 기본값을 사용합니다. "
                          "독립 Verifier는 모델을 호출하지 않습니다.",
               wraplength=580).pack(anchor="w", pady=(0, 5))
 
@@ -477,8 +476,7 @@ def show(center, project):
             values = {key: entry.get().strip() for key, entry in entries.items()}
             seconds, tokens = int(values["seconds"]), int(values["tokens"])
             cycles = int(values["cycles"]) if values["cycles"] else None
-            role_defaults = game_pilot.ROLE_TOKENS if tokens >= 750000 else registered_cycle.ROLE_TOKENS
-            role_tokens = {role: min(cap, tokens) for role, cap in role_defaults.items()}
+            role_tokens = {role: min(cap, tokens) for role, cap in defaults["role_tokens"].items()}
             for role, field in ROLE_TOKEN_FIELDS.items():
                 if not values[field]:
                     continue
@@ -486,10 +484,8 @@ def show(center, project):
                     role_tokens[role] = int(values[field])
                 except ValueError as error:
                     raise ValueError(f"{ROLE_LABELS[role]} 호출당 토큰은 정수로 입력하세요.") from error
-            if not values["final_manager_tokens"]:
-                role_tokens["manager-final"] = role_tokens["manager-planning"]
             limits = {"seconds": seconds, "tokens": tokens, "cycles": cycles,
-                      "role_seconds": {role: min(cap, seconds) for role, cap in game_pilot.ROLE_SECONDS.items()},
+                      "role_seconds": {role: min(cap, seconds) for role, cap in defaults["role_seconds"].items()},
                       "role_tokens": role_tokens}
             registered_cycle.validate_limits(limits)
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
@@ -512,6 +508,7 @@ def show(center, project):
             state.set("재개할 검토 단계가 없습니다. 중단 원인은 기록·복구 화면에서 확인하세요.")
             return
         graceful = rows[-1]["outcome"] == "SIGNOFF_PENDING"
+        max_tokens = registered_cycle.MAX_SIGNOFF_TOKENS if graceful else 400000
         prior_limits = rows[0]["scope"]["role_tokens"]
         reserve = prior_limits["reviewer"] + prior_limits["manager-final"]
         dialog = tk.Toplevel(panel, padx=12, pady=12)
@@ -529,10 +526,10 @@ def show(center, project):
         def review():
             try:
                 seconds, tokens = (int(values[key].get()) for key in ("seconds", "tokens"))
-                if not 120 <= seconds <= (1800 if graceful else 1500) or not 1 <= tokens <= 400000:
+                if not 120 <= seconds <= (1800 if graceful else 1500) or not 1 <= tokens <= max_tokens:
                     raise ValueError
             except ValueError:
-                hint.configure(text="추가 시간은 120초부터, 토큰은 1~400,000 사이로 입력하세요.")
+                hint.configure(text=f"추가 시간은 120초부터, 토큰은 1~{max_tokens:,} 사이로 입력하세요.")
                 return
             args = (project, int(time()) + (4740 if graceful else 1700), seconds, tokens)
             dialog.destroy()
