@@ -15,6 +15,7 @@ from .role_contract import _unique_object
 MAX_FRAMES = 4
 MAX_FINDINGS = 4
 MAX_NOT_VERIFIED = 8
+MAX_DESCRIPTION_CHARS = 240
 SENSITIVE = re.compile(r"https?://|\b(?:bearer|password|secret|credential|api[ _-]?key|token|cookie)\b"
                        r"|\b[A-Za-z0-9_+/=-]{32,}\b", re.I)
 
@@ -222,5 +223,5 @@ def parse(message, frame_ids, changed_files=()):
 
 
 def _description(value):
-    return (type(value) is str and 1 <= len(value) <= 240 and bool(value.strip())
+    return (type(value) is str and 1 <= len(value) <= MAX_DESCRIPTION_CHARS and bool(value.strip())
             and all(32 <= ord(char) and not 0xD800 <= ord(char) <= 0xDFFF for char in value))
