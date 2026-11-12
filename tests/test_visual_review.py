@@ -12,12 +12,28 @@ from devorchestra.native_developer_trial import _exec_argv
 
 
 class VisualReviewTests(unittest.TestCase):
+    def test_fresh_resume_approval_updates_instructions_without_changing_checkpoint(self):
+        saved = {"mode": "postprocess", "saved_response": {"message_sha256": "old-response"}}
+        scope = {"instructions": {role: public_instruction(role)["sha256"] for role in registered_cycle.ROLES},
+                 "resume": saved, "permissions": ["replica-read"]}
+        scope["instructions"]["reviewer"] = "old-instruction"
+        with patch.object(registered_cycle, "_resume_contract", return_value=(scope, "verified diff")):
+            approved, diff = registered_cycle._approved_resume_contract(None, [], "head", (), True)
+        self.assertEqual("old-instruction", scope["instructions"]["reviewer"])
+        self.assertEqual(public_instruction("reviewer")["sha256"], approved["instructions"]["reviewer"])
+        self.assertEqual(["reviewer"], approved["resume"]["updated_role_instructions"])
+        self.assertEqual(saved["saved_response"], approved["resume"]["saved_response"])
+        self.assertEqual(scope["permissions"], approved["permissions"])
+        self.assertEqual("verified diff", diff)
+
     def test_exec_delimits_the_prompt_from_variadic_image_arguments(self):
         root = Path.cwd()
         images = (root / "F1.png", root / "F2.png")
         args = _exec_argv(root, "test", "Inspect both frames", writable=False, shell_tools=False, images=images)
         self.assertEqual(["--image", str(images[0]), "--image", str(images[1]), "--", "Inspect both frames"],
                          args[-6:])
+        self.assertIn("features.computer_use=false", args)
+        self.assertIn("features.shell_tool=false", args)
 
     def report(self, verdict="REWORK", kind="defect", uncertainty="low"):
         return dumps({"verdict": verdict, "observations": [{"frame": "F1", "visible": "Label clips at right edge"}],
@@ -88,6 +104,13 @@ class VisualReviewTests(unittest.TestCase):
         self.assertIn("Allow the label to wrap", decision)
         self.assertEqual({"C1": "USER_TEST_REQUIRED"}, comparison["criteria"])
         self.assertEqual((image,), session.call.call_args.kwargs["images"])
+        self.assertIn("Do not claim to have played", session.call.call_args.args[3])
+        review_record = next(call.kwargs for call in session.record.call_args_list
+                             if call.args[0] == "native_inspection_visual_review")
+        self.assertEqual("CODEX_CLI_IMAGE", review_record["review_backend"])
+        self.assertEqual("NOT_VERIFIED", review_record["autonomous_play"])
+        self.assertEqual("CONTROLLER_SCENARIO",
+                         visual_review.observation_provenance([{"step": "after-input"}])["input_source"])
         session.verify_registered.assert_called_once_with(1)
         recheck.assert_called_once_with(ledger, evidence)
 
@@ -104,5 +127,9 @@ class VisualReviewTests(unittest.TestCase):
             session, 1, "C1", "bounded diff", {"C1": "NOT_STARTED"})
         self.assertEqual(review, "ACCEPT")
         self.assertIn("Visual quality is NOT_VERIFIED", session.call.call_args.args[3])
+        review_record = next(call.kwargs for call in session.record.call_args_list
+                             if call.args[0] == "native_inspection_visual_review")
+        self.assertEqual(("NO_CAPTURE", "NOT_VERIFIED"),
+                         (review_record["observation_source"], review_record["autonomous_play"]))
         self.assertEqual(comparison["criteria"], {"C1": "USER_TEST_REQUIRED"})
         session.verify_registered.assert_called_once_with(1)

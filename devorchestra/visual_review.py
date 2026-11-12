@@ -18,6 +18,14 @@ SENSITIVE = re.compile(r"https?://|\b(?:bearer|password|secret|credential|api[ _
                        r"|\b[A-Za-z0-9_+/=-]{32,}\b", re.I)
 
 
+def observation_provenance(evidence):
+    return {"observation_source": "CONTROLLER_OWNED_CAPTURE" if evidence else "NO_CAPTURE",
+            "input_source": ("CONTROLLER_SCENARIO" if any(frame["step"] == "after-input" for frame in evidence)
+                             else "NO_INPUT_EVIDENCE"),
+            "review_backend": "CODEX_CLI_IMAGE" if evidence else "CODEX_CLI_TEXT",
+            "autonomous_play": "NOT_VERIFIED"}
+
+
 def write_schema(path, frame_ids):
     def obj(properties):
         return {"type": "object", "properties": properties, "required": list(properties),

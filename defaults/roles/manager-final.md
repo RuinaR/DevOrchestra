@@ -5,3 +5,5 @@ Match trusted verification receipts to acceptance criteria. Decide whether to re
 Verify final deliverables, retained evidence, and recorded cleanup before deciding completion.
 
 When the approved execution contract permits another cycle, name the remaining in-scope work after a verified partial result. Mark the overall goal complete only after checking its full acceptance criteria.
+
+Use actual gameplay evidence when a frozen criterion requires it. Consider Reviewer observations and independent Verifier receipts separately. Keep unobserved gameplay or rework verification pending.

@@ -5,3 +5,5 @@ Use only deterministic checks exposed by the active Controller backend and appro
 Check actual tool identity, owned-workspace cleanup, and retention of required evidence and deliverables.
 
 For a visual review, verify the source and executable identities, owned-window capture provenance, PNG bytes and the deterministic run results. Keep the Reviewer’s visual findings separate from criterion-level execution evidence. Record unavailable visual or behavioral evidence as NOT_VERIFIED.
+
+Attribute GUI actions to their actual source. A preconfigured scenario can establish its observed transitions. A claim of autonomous play requires evidence of model-selected actions and their results on the owned candidate.

@@ -38,6 +38,8 @@ DevOrchestra는 코딩 에이전트의 실행 순서, 권한, 예산, 감사와 
 
 사용자가 AI 시각 검토를 승인하면 개발을 먼저 시작할 수 있다. Controller는 Developer가 준비한 Windows 미리보기의 시작 화면을 캡처하거나, 설정된 검증 도구로 소유 창의 입력 전후 화면을 수집한다. 화면이 없으면 코드 검토를 진행하고 시각 검토를 미확인으로 기록한다. 읽기 전용 Reviewer는 기존 Codex CLI 호출에 첨부된 PNG 최대 네 장에서 관찰과 결함을 기록한다. 재현 가능한 결함은 다음 계획과 Developer 수정에 전달한다. 결정적 Verifier는 실행 결과와 캡처 무결성을 확인한다. 최종 Manager는 시각 의견과 독립 검증 결과를 각각 근거로 사용한다.
 
+자율 플레이는 Reviewer가 소유 게임 창을 관찰하고 다음 행동을 선택한 뒤, 실행 결과를 다시 관찰해 결함을 재현하는 기능이다. 현재 시각 검토는 소유 창 캡처와 사전 설정된 Controller 검사 결과를 사용한다. 원장은 관측과 입력의 출처를 남기고 자율 플레이는 미검증으로 표시한다. Windows 공식 데스크톱 Computer Use는 활성 데스크톱을 제어하므로 현재 자동 세션의 소유 창 전용 입력으로 연결할 수 없다. [Windows Computer Use](https://learn.chatgpt.com/docs/computer-use#windows-foreground-use)
+
 최종 제품은 복원된 AITrader, AVManager, LumiPeek, MarketCrate 같은 기존 프로젝트를 한 Command Center에 등록해 순차 개발하는 데 사용한다. 현재 네 프로젝트의 준비 상태는 모두 **NOT_VALIDATED**다. EchoMate는 개발 중단으로 활성 후보에서 제외하며 과거 이력은 보존한다. P2.102의 두 C# 산술 파일 실측은 지원하는 한 경로의 증거다.
 
 1. 승인된 범위의 프로젝트 AGENTS.md, 개인 지침, 인수인계 및 Git 상태를 읽고 작업 문맥을 복구한다. 개인 지침과 인증자료는 로컬에 보존한다.

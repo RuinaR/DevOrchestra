@@ -67,6 +67,12 @@ def _open_visual_report(center, runner, project):
             display.insert("end", "시각 검토 응답이 아직 없습니다.")
         else:
             display.insert("end", f"{report['status']} · {report['verdict']} · 발견 {len(report['findings'])}건\n")
+            if report.get("review_backend") == "CODEX_CLI_IMAGE":
+                display.insert("end", "검토 방식 · 소유 창 캡처를 Codex에 첨부\n")
+            if report.get("input_source") == "CONTROLLER_SCENARIO":
+                display.insert("end", "입력 출처 · Controller에 설정한 검사 시나리오\n")
+            if report.get("autonomous_play") == "NOT_VERIFIED":
+                display.insert("end", "자율 플레이 · 검증되지 않음\n")
             for observation in report.get("observations", ()):
                 display.insert("end", f"{observation['frame']} · {observation['visible']}\n")
             for unverified in report.get("not_verified", ()):
@@ -447,6 +453,10 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 return
             if resume:
                 checkpoint = result["resume"]
+                updated_roles = checkpoint.get("updated_role_instructions", ())
+                instruction_note = ("\n새 승인부터 최신 역할 지침을 적용합니다 · "
+                                    + ", ".join(ROLE_LABELS[role] for role in updated_roles)
+                                    if updated_roles else "")
                 if checkpoint.get("mode") == "postprocess":
                     role = ROLE_LABELS[checkpoint["saved_response"]["phase"]]
                     action = (f"저장된 {role} 응답의 판정을 확정할 수 없어 같은 후보로 {role}만 다시 호출합니다. "
@@ -461,7 +471,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                "승인 범위 내에서 판정을 마치고 필요하면 다음 사이클에서 재작업합니다.")
                     if checkpoint.get("renewed_budget"):
                         summary += f"\n이번 추가 승인은 {result['cycles']}사이클까지 유효합니다."
-                    if center.confirm("보존된 모델 응답에서 이어서 개발", summary, parent=panel):
+                    if center.confirm("보존된 모델 응답에서 이어서 개발", summary + instruction_note, parent=panel):
                         launch(result)
                     else:
                         state.set("재개 승인 취소됨")
@@ -474,7 +484,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                "기존 완료 기준, 파일 범위와 실행 권한을 사용합니다.")
                     if checkpoint["mode"] == "after-registered-planning":
                         summary += "\n저장된 Manager 계획을 사용해 Developer부터 실행합니다."
-                    if center.confirm("체크포인트에서 이어서 개발", summary, parent=panel):
+                    if center.confirm("체크포인트에서 이어서 개발", summary + instruction_note, parent=panel):
                         launch(result)
                     else:
                         state.set("재개 승인 취소됨")
@@ -492,7 +502,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                 "지금 복제본의 파일을 새 후보로 승인하고 최초 등록 기준과 비교해 검토합니다.")
                 if result.get("visual_review") and not checkpoint.get("review"):
                     summary += "\n소유 테스트 창 PNG 최대 4장을 Codex Reviewer에 전송합니다."
-                if center.confirm("추가 예산 및 중단 작업 재개 승인", summary, parent=panel):
+                if center.confirm("추가 예산 및 중단 작업 재개 승인", summary + instruction_note, parent=panel):
                     launch(result)
                 else:
                     state.set("재개 승인 취소됨")
@@ -824,6 +834,9 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                                         f"{policy['tool_idle_seconds']:,}초, 마무리 {policy['signoff_seconds']:,}초. "
                                         f"마무리 토큰 {policy['signoff_tokens']:,}은 "
                                         f"{'세션 기준 잔여량 내' if policy['signoff_within_session_tokens'] else '별도 예산'}에서 사용합니다.")
+                        if resume and (updated_roles := result["resume"].get("updated_role_instructions")):
+                            summary += "\n새 승인부터 최신 역할 지침을 적용합니다 · " + ", ".join(
+                                ROLE_LABELS[role] for role in updated_roles)
                         if result.get("visual_review") and (not resume or not result["resume"].get("review")):
                             summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                         if center.confirm(title, summary, parent=panel):

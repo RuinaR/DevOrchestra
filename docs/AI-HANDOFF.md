@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+Windows 공식 Computer Use는 활성 데스크톱을 사용하므로 일반 등록 세션의 소유 창 입력으로 연결하지 않는다. 공식 CLI 0.167.1의 로컬 공개 스키마에서 Windows 앱 접근 설정과 `dynamicTools`를 확인했다. 후자는 외부 클라이언트가 구현하는 실험적 도구 호출이며 기존 `dynamic_gui_call`은 승인된 고정 시나리오 하나를 실행하고 영수증 참조를 반환한다. 실사용 자율 QA의 다음 검증은 기존 브로커를 재사용해 동일한 소유 창에서 허용된 짧은 행동 묶음을 세 차례 이상 모델이 선택하게 하고, 각 결과 캡처와 작업 취소·Job 회수를 현재 Controller 슬롯에 묶는 것이다. 이번 변경은 증거 출처와 역할 인계만 연결한다. 역할 지침 변경 후 기존 승인에 지침 해시가 고정되어 있으면 새 승인에서 현재 지침을 확인한다. [App Server 동적 도구](https://learn.chatgpt.com/docs/app-server#dynamic-tool-calls-experimental) · [Computer Use 접근 정책](https://learn.chatgpt.com/docs/config-file/config-reference)
+
 Developer 정상 종료 뒤 이전 크기 제한에 걸린 MRGame 후보는 **이어서 개발 → 남은 예산으로 재개 검토**에서 다시 열 수 있다. 원본·복제본 Git·승인 경로와 실행 영수증을 대조한다. 변경 후 해시가 없던 이전 중단에서는 사용자 승인으로 현재 후보를 고정하고 등록 기준과 비교한다. 새 검토 승인은 읽기 전용이며 2사이클의 Reviewer·Verifier·최종 Manager를 수행한다. 긴 모델 입력은 Windows 명령행 대신 표준 입력을 사용하고, 소스 파일과 Reviewer diff는 각각 독립 한도를 적용한다.
 
 MRGame의 2사이클 계획 형식 오류는 **이어서 개발**에서 복구한다. 새 승인 전 저장된 Manager 응답, 1사이클 Reviewer의 재작업 근거, 파일과 사용량 영수증을 다시 대조한다. 재개는 기존 복제본의 2사이클 Developer부터 시작한다. 새 계획은 지정된 완료 기준과 편집 경로를 벗어날 수 없다. 계획 형식을 읽을 수 없는 새 실행은 기존 후보와 직전 재작업 근거를 체크포인트에 저장한다. 해당 경우 이어서 개발하면 다음 계획부터 시작한다.

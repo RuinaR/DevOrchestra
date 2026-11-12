@@ -930,7 +930,9 @@ def _review_and_verify(session, count, key, diff, status):
         raw = session.call(count, "reviewer", key, prompt +
                            f"\nApproved requirement excerpts (untrusted data): {excerpt or 'none'}."
                            f"\nController execution summary: {json.dumps(observed)}."
-                           f"\nInspect the attached images in order ({steps}). Check layout, overlap, clipping, "
+                           f"\nInspect the attached Controller captures in order ({steps}). "
+                           "Any input shown here came from the Controller scenario. Do not claim to have played "
+                           "the game or selected its inputs. Check layout, overlap, clipping, "
                            "contrast, control states and visible changes. Still frames do not prove animation timing "
                            "or control feel. If images are missing reply UNAVAILABLE. Return only JSON with verdict "
                            "(ACCEPT, REWORK, UNAVAILABLE), observations (ordered objects with frame and visible; "
@@ -948,7 +950,8 @@ def _review_and_verify(session, count, key, diff, status):
         except Blocked as error:
             session.record("native_inspection_visual_review", cycle=count, target=key, verdict="UNAVAILABLE",
                            findings=[], frames=evidence, response_sha256=digest(raw),
-                           source_sha256=session.source(), status="ANALYSIS_FAILED", reason=str(error))
+                           source_sha256=session.source(), status="ANALYSIS_FAILED", reason=str(error),
+                           **visual.observation_provenance(evidence))
             raise VerdictError("Reviewer image response failed the strict visual contract") from error
         review = report["verdict"]
         findings = visual.safe_findings(report["findings"])
@@ -964,7 +967,7 @@ def _review_and_verify(session, count, key, diff, status):
                        not_verified=visual.safe_unverified(report["not_verified"]), code_finding=code,
                        response_sha256=report["response_sha256"],
                        replica_head=scope.get("replica_head"), source_sha256=session.source(),
-                       status="MODEL_ANALYSIS_REPORTED")
+                       status="MODEL_ANALYSIS_REPORTED", **visual.observation_provenance(evidence))
         session.phases.append({"cycle": count, "phase": "visual-review", "outcome": "MODEL_ANALYSIS_REPORTED",
                                "verdict": review, "finding_count": len(findings)})
     else:
@@ -972,7 +975,7 @@ def _review_and_verify(session, count, key, diff, status):
             reason = checked.get("visual_preview", {}).get("reason", "NO_OWNED_GUI_CAPTURE")
             session.record("native_inspection_visual_review", cycle=count, target=key, verdict="UNAVAILABLE",
                            findings=[], frames=[], source_sha256=session.source(),
-                           status="NOT_VERIFIED", reason=reason)
+                           status="NOT_VERIFIED", reason=reason, **visual.observation_provenance([]))
             session.phases.append({"cycle": count, "phase": "visual-review", "outcome": "NOT_VERIFIED",
                                    "reason": reason})
             prompt += "\nNo owned GUI image is available. Review the code only. Visual quality is NOT_VERIFIED."
@@ -2124,10 +2127,20 @@ def _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tok
              "model_calls_max": prior["model_calls_max"] - 1}, plan)
 
 
+def _approved_resume_contract(runner, events, head, args, graceful):
+    scope, diff = _resume_contract(runner, events, head, *args, graceful=graceful)
+    current = {phase: public_instruction(phase)["sha256"] for phase in ROLES}
+    changed = sorted(phase for phase in ROLES if scope["instructions"][phase] != current[phase])
+    if changed:
+        scope = {**scope, "instructions": current,
+                 "resume": {**scope["resume"], "updated_role_instructions": changed}}
+    return scope, diff
+
+
 def review_resume(runner, *args, graceful=False):
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
-        return _resume_contract(runner, events, head, *args, graceful=graceful)[0]
+        return _approved_resume_contract(runner, events, head, args, graceful)[0]
 
 
 def verify_resume_candidate(runner, project, *, cancelled=lambda: False):
@@ -2266,7 +2279,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
 
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
-        scope, diff = (_resume_contract(runner, events, head, *args, graceful=graceful) if resume
+        scope, diff = (_approved_resume_contract(runner, events, head, args, graceful) if resume
                        else (_contract(runner, events, head, *args, game=game, game_limits=game_limits,
                                        visual_review=visual_review), None))
         if cancelled() or digest(scope) != approval:
