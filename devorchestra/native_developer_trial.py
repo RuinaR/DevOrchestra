@@ -33,7 +33,7 @@ DEFAULT_MODEL = "gpt-6.1-sol"
 
 
 def trial_flags(work, *, writable=True, code_mode=False, tool_root=None, shell_tools=True,
-                extra_read_roots=(), scratch_root=None):
+                extra_read_roots=(), scratch_root=None, web_research=False):
     """Keep every temporary override on the owned process command line."""
     rules = ((":root", "deny"), (":minimal", "read"), (str(work), "write" if writable else "read"),
              (str(work / ".git"), "read"))
@@ -52,7 +52,8 @@ def trial_flags(work, *, writable=True, code_mode=False, tool_root=None, shell_t
         'windows.sandbox="mxc"', 'approval_policy="never"', f'default_permissions="{PROFILE}"',
         f"permissions.{PROFILE}.filesystem={filesystem}", f"permissions.{PROFILE}.network.enabled=false",
         'model_provider="openai"', 'forced_login_method="chatgpt"', 'cli_auth_credentials_store="file"',
-        'web_search="disabled"', "analytics.enabled=false", "mcp_servers={}",
+        'web_search="live"' if web_research else 'web_search="disabled"',
+        "analytics.enabled=false", "mcp_servers={}",
         "tools.update_plan.enabled=false", "tools.experimental_request_user_input.enabled=false",
         *(f"features.{feature}={'true' if feature in enabled else 'false'}" for feature in DISABLED_FEATURES),
     ]
@@ -119,12 +120,13 @@ def _empty_discovery(item, kind, pending):
 
 
 def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expected="11", retain_message=False,
-                  retain_settled=False):
+                  retain_settled=False, web_research=False):
     """Retain only bounded event classes, command hashes and reported counts."""
     thread = started = terminal = message = False
     usage, tests, commands, final_message = None, [], [], None
     discoveries = {}
     empty_discovery_count = 0
+    searches = []
     tool_error = None
 
     def reject_tool(reason):
@@ -157,6 +159,14 @@ def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expec
                 reject_tool(str(error))
             else:
                 empty_discovery_count += int(kind == "item.completed")
+        elif (kind in {"item.started", "item.updated", "item.completed"} and type(row.get("item")) is dict
+              and row["item"].get("type") == "web_search"):
+            item = row["item"]
+            if not web_research or not started:
+                reject_tool("Web search was not approved for this role")
+            elif kind == "item.completed" and len(searches) < 64:
+                # Search text can contain project context. Keep only its evidence fingerprint.
+                searches.append(digest(item))
         elif kind == "item.completed" and started:
             item = row["item"]
             if type(item) is not dict or item.get("type") not in (
@@ -200,6 +210,8 @@ def _cli_evidence(output, *, command_pattern=r"\bcall\s+total\.cmd\s+3\b", expec
             result["empty_discovery_count"] = empty_discovery_count
     if tool_error:
         result["tool_evidence_error"] = tool_error
+    if searches:
+        result["web_search_events"] = searches
     return result
 
 
@@ -268,7 +280,7 @@ def _verify_output(binary, work, output, environment, check, *, test_command="ca
 
 
 def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tools=True,
-               extra_read_roots=(), scratch_root=None, images=(), output_schema=None):
+               extra_read_roots=(), scratch_root=None, images=(), output_schema=None, web_research=False):
     schema_args = ["--output-schema", str(output_schema)] if output_schema is not None else []
     attachments = []
     for path in images:
@@ -278,7 +290,7 @@ def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tool
     if attachments:
         attachments.append("--")  # The final image option accepts multiple positional filenames.
     return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root, shell_tools=shell_tools,
-                         extra_read_roots=extra_read_roots, scratch_root=scratch_root),
+                         extra_read_roots=extra_read_roots, scratch_root=scratch_root, web_research=web_research),
             "exec", "--ignore-user-config", "--json",
             "--ephemeral", "--model", model, "--cd", str(work), *schema_args, *attachments, prompt]
 

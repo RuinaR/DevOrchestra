@@ -1126,6 +1126,8 @@ class CommandCenter:
                 parts.append("사용량 미확정")
             if commands := row.get("command_events"):
                 parts.append(f"도구 명령 {len(commands)}회")
+            if searches := row.get("web_search_events"):
+                parts.append(f"공개 자료 검색 {len(searches)}회")
             if row.get("owned_tree") == "DRAINED":
                 parts.append("소유 프로세스 회수")
             evidence.configure(text="\n".join(parts), wraplength=185)
@@ -1176,10 +1178,17 @@ class CommandCenter:
                 pending.discard(key)
                 outcome = self.registered_role_state(row, None, False)
                 count = len(row.get("command_events", ()))
+                searches = len(row.get("web_search_events", ()))
                 lines.append(f"{cycle}사이클 · {role} · {REGISTERED_STATES.get(outcome, outcome)}"
-                             + (f" · 명령 {count}회" if count else ""))
+                             + (f" · 명령 {count}회" if count else "")
+                             + (f" · 공개 자료 검색 {searches}회" if searches else ""))
             elif kind == "native_inspection_developer_diff":
                 lines.append(f"{cycle}사이클 · 변경 파일 · " + ", ".join(row["changed"]))
+            elif kind == "native_inspection_project_tool_ready":
+                lines.append(f"{cycle}사이클 · 프로젝트 도구 준비 · {row['name']}")
+            elif kind == "native_inspection_project_tools_cleanup":
+                label = "정리 완료" if row["result"] == "REMOVED" else "정리 확인 필요"
+                lines.append(f"{cycle}사이클 · 프로젝트 도구 · {label}")
             elif kind == "native_inspection_review_decision":
                 lines.append(f"{cycle}사이클 · Reviewer 판정 · {row['verdict']}")
             elif kind == "native_inspection_visual_review":

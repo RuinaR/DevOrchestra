@@ -670,13 +670,15 @@ class RegisteredCycleTests(unittest.TestCase):
                                     strict=True):
                 entry.delete(0, "end")
                 entry.insert(0, value)
-            text = next(widget for widget in children if isinstance(widget, tk.Text))
+            text = next(widget for widget in children if isinstance(widget, tk.Text)
+                        and registered_cycle.BASELINE_VERIFIER in widget.get("1.0", "end"))
             text.delete("1.0", "end")
             text.insert("1.0", json.dumps(params[-1]))
             from devorchestra.gui_registered_cycle import LABELS
 
             for checkbox in (widget for widget in children
-                             if isinstance(widget, ttk.Checkbutton) and widget["text"] in LABELS.values()):
+                             if isinstance(widget, ttk.Checkbutton)
+                             and widget["text"] in {LABELS[key] for key in registered_cycle.PERMISSIONS}):
                 if not checkbox.instate(["selected"]):
                     checkbox.invoke()
             confirmations = []

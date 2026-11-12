@@ -69,8 +69,8 @@ def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2):
     if owned_staging is not None:
         check_path(owned_staging)
         if (owned_staging.parent != root or not owned_staging.is_dir()
-                or not owned_staging.name.startswith(".devorchestra-batch-")):
-            raise Blocked("Unrecognized owned batch staging")
+                or not owned_staging.name.startswith((".devorchestra-batch-", ".devorchestra-tools-"))):
+            raise Blocked("Unrecognized owned replica staging")
     files, keys = {}, set()
     total = count = 0
     directories = [root]

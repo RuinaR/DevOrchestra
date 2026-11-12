@@ -1,4 +1,5 @@
 """Owner-approved native development on a registered, onboarded replica."""
+from contextlib import contextmanager
 from difflib import unified_diff
 from hashlib import sha256
 import json
@@ -6,11 +7,12 @@ from math import ceil
 from pathlib import Path
 import re
 from shutil import copyfile
+from tempfile import mkdtemp
 from threading import Lock
 from time import monotonic, time
 from uuid import uuid4
 
-from . import adaptive_play, cycle_progress, game_pilot, visual_review as visual
+from . import adaptive_play, cycle_progress, game_pilot, project_tools, visual_review as visual
 from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .default_instructions import public_instruction
 from .lease import Blocked, execution_slot
@@ -24,6 +26,7 @@ from .native_developer_trial import (
     DEFAULT_MODEL, PROFILE, _check_cached_model, _check_dedicated_config, _cli_evidence,
     _diagnostic, _read_observation, trial_flags,
 )
+from .owned_artifacts import _remove_owned_tree
 from .project_onboarding import _git, _protected, _relative, _scan
 from .replica_evidence import fingerprint, snapshot
 from .replica_readiness import baseline, original_matches
@@ -32,6 +35,7 @@ from .role_contract import _unique_object
 
 KIND = "REGISTERED_CODEX_CYCLE"
 PERMISSIONS = ("replica-read", "replica-edit", "offline-shell", "pinned-verifier")
+OPTIONAL_PERMISSIONS = ("web-research", "portable-tools")
 SHELL_ROLES = ("developer", "reviewer")
 MAX_SOURCE_BYTES = 512 * 1024
 MAX_DIFF = 128 * 1024
@@ -223,7 +227,10 @@ def _expected_observation(check):
 
 
 def prerequisite_scope_hash(scope):
-    return digest([scope.get(key) for key in ("files", "requirements", "verifier", "network", "install")])
+    values = [scope.get(key) for key in ("files", "requirements", "verifier", "network", "install")]
+    if scope.get("research") or scope.get("tool_packages"):
+        values.extend((scope.get("research"), scope.get("tool_packages")))
+    return digest(values)
 
 
 def _settled_integrity_candidate(events, project, replica, onboarding, image):
@@ -297,7 +304,7 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
               manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False, game_limits=None, visual_review=False,
-              play=False):
+              play=False, tools=None):
     now = time()
     if type(play) is not bool or (play and (not visual_review or game_limits is None)):
         raise Blocked("AI 플레이에는 이미지 검토와 역할별 예산 승인이 필요합니다.")
@@ -319,8 +326,13 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     role_tokens = {**ROLE_TOKENS, "manager-planning": manager_tokens, "manager-final": manager_tokens}
     if game_limits is not None:
         role_tokens = dict(game_limits["role_tokens"])
-    if sorted(permissions) != sorted(PERMISSIONS):
+    if (len(permissions) != len(set(permissions)) or not set(PERMISSIONS) <= set(permissions)
+            or not set(permissions) <= set((*PERMISSIONS, *OPTIONAL_PERMISSIONS))):
         raise Blocked("Approve the required replica, offline shell and Verifier permissions")
+    install = "portable-tools" in permissions
+    if not install and tools is not None:
+        raise Blocked("프로젝트 도구 설치 권한을 먼저 승인하세요.")
+    packages = project_tools.manifest(tools) if install else []
     ledger = runner.ledger
     source, replica, frozen, onboarding = baseline(ledger, project)
     if source == replica or source.is_relative_to(replica) or replica.is_relative_to(source):
@@ -428,7 +440,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
                if visual_review and not visual_capture_configured(verifier) else {}),
             "onboarding_sha256": digest(onboarding), "original_head": frozen["head"], "original_git": frozen["git"],
             "original_changes": {key: frozen[key] for key in ("staged", "raw_worktree_changed", "local_examples")},
-            "replica_sha256": digest(image), "files": sorted(files), "permissions": list(PERMISSIONS),
+            "replica_sha256": digest(image), "files": sorted(files),
+            "permissions": [key for key in (*PERMISSIONS, *OPTIONAL_PERMISSIONS) if key in permissions],
             **({"prior_replica_candidate": prior_replica_candidate} if prior_replica_candidate else {}),
             "verifier": verifier, "archive": str(archive), "archive_sha256": ARCHIVE_SHA256,
             "binary_sha256": RELEASE_SHA256, "code_mode_host_sha256": CODE_MODE_HOST_SHA256,
@@ -444,13 +457,16 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
                 "graceful_stop": game_pilot.graceful_policy()}
                if game_limits else {}),
             **({"candidate_base": candidate_base} if candidate_base else {}),
-            "ledger_head": head, "network": "COMMANDS_OFF", "install": False, "original_apply": False}
+            "ledger_head": head, "network": "COMMANDS_OFF", "install": install, "original_apply": False,
+            **({"research": "CODEX_LIVE"} if "web-research" in permissions else {}),
+            **({"tool_packages": packages} if packages else {})}
 
 
-def review(runner, *args, soft_limits=None, visual_review=False, play=False):
+def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None):
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
-        return _contract(runner, events, head, *args, game_limits=soft_limits, visual_review=visual_review, play=play)
+        return _contract(runner, events, head, *args, game_limits=soft_limits, visual_review=visual_review,
+                         play=play, tools=tools)
 
 
 def _game_args(archive, expires, limits=None):
@@ -629,7 +645,8 @@ class RegisteredSession(_FixtureSession):
             self.game_scratch.mkdir()
 
     def check_image(self):
-        if snapshot(self.work) != self.image or not original_matches(self.original, self.original_image):
+        if (snapshot(self.work, owned_staging=getattr(self, "portable_root", None)) != self.image
+                or not original_matches(self.original, self.original_image)):
             raise Blocked("Replica or original changed outside the admitted role")
         catalog = Catalog(self.runner.ledger).read()
         if catalog["projects"][self.scope["project_id"]]["revision"] != self.scope["project_revision"]:
@@ -642,6 +659,59 @@ class RegisteredSession(_FixtureSession):
                 raise Blocked("Approved game tool identity changed")
         elif "executable" in tool and fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
             raise Blocked("Approved executable identity changed")
+
+    @contextmanager
+    def portable_tools(self, cycle, phase):
+        packages = self.scope.get("tool_packages")
+        if phase != "developer" or not packages:
+            yield None
+            return
+        if not self.scope.get("install") or "portable-tools" not in self.scope["permissions"]:
+            raise Blocked("Project tool installation was not approved")
+        self.check()
+        self.check_image()
+        if self.calls >= self.scope["model_calls_max"]:
+            raise Blocked("TOKEN_LIMIT")
+        if "graceful_stop" in self.scope:
+            self.admit_graceful(phase, self.scope["role_tokens"][phase])
+        elif self.scope["tokens"] - self.usage < self.scope["role_tokens"][phase]:
+            raise Blocked("TOKEN_LIMIT")
+        root = self.work / f"{project_tools.PREFIX}{uuid4().hex}"
+        self.record("native_inspection_project_tools_intent", cycle=cycle, directory=root.name,
+                    packages=[package["name"] for package in packages])
+        self.check()
+        check_path(root)
+        root.mkdir()
+        identity = root.stat()
+        self.portable_root = root
+        try:
+            cache = self.scratch / "portable-zips"
+            check_path(cache)
+            cache.mkdir(exist_ok=True)
+            for package in packages:
+                name = package["name"]
+                archive = cache / f"{name}.zip"
+                if archive.exists():
+                    info = fingerprint(archive, project_tools.MAX_DOWNLOAD)
+                    if info["sha256"] != package["sha256"]:
+                        raise Blocked("보존된 프로젝트 도구 ZIP SHA-256 불일치")
+                    size = info["bytes"]
+                else:
+                    size = project_tools.download(package, archive, self.check)
+                destination = root / name
+                destination.mkdir()
+                project_tools.extract(archive, destination, self.check)
+                self.record("native_inspection_project_tool_ready", cycle=cycle, name=name,
+                            sha256=package["sha256"], bytes=size, directory=root.name)
+            yield root
+        finally:
+            if self.owned_verified:
+                cleanup = _remove_owned_tree(root, identity.st_ino)
+                self.portable_root = None
+                self.record("native_inspection_project_tools_cleanup", cycle=cycle, directory=root.name,
+                            result=cleanup["status"])
+                if cleanup["status"] != "REMOVED":
+                    raise Blocked("복제본의 프로젝트 도구 폴더가 정리되지 않았습니다. 소유권 확인이 필요합니다.")
 
     def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=(), allowed_paths=None,
              response_schema=None):
@@ -687,18 +757,25 @@ class RegisteredSession(_FixtureSession):
                 "continue the planned development and leave the preview absent."
             )
         try:
-            response, recovered = self.dispatch(cycle, phase, key, prompt,
-                                                tool_root=Path(tool["root"]) if "root" in tool and
-                                                (not game or phase == "developer") else None,
-                                                extra_read_roots=(Path(tool["template"]).parent,)
-                                                if game and phase == "developer" else (),
-                                                scratch_root=scratch_root,
-                                                shell_tools=phase in self.scope["shell_roles"] and not images,
-                                                images=images, image_evidence=image_evidence,
-                                                response_schema=response_schema,
-                                                decision_parser=(_final_decision if phase == "manager-final" else None),
-                                                raw_decision=True,
-                                                context="Work on this registered Git replica using the approved scope.")
+            with self.portable_tools(cycle, phase) as portable:
+                extra_roots = (Path(tool["template"]).parent,) if game and phase == "developer" else ()
+                if portable is not None:
+                    extra_roots += (portable,)
+                    prompt += (f"\nThe Controller provisioned approved portable tools in {portable}. "
+                               "Inspect the package folders and invoke tools by full path if useful. "
+                               "Do not modify them, run installers, alter global settings, or download dependencies "
+                               "from the command shell. Keep build outputs in approved paths.")
+                response, recovered = self.dispatch(cycle, phase, key, prompt,
+                                                    tool_root=Path(tool["root"]) if "root" in tool and
+                                                    (not game or phase == "developer") else None,
+                                                    extra_read_roots=extra_roots,
+                                                    scratch_root=scratch_root,
+                                                    shell_tools=phase in self.scope["shell_roles"] and not images,
+                                                    images=images, image_evidence=image_evidence,
+                                                    response_schema=response_schema,
+                                                    decision_parser=(_final_decision if phase == "manager-final" else None),
+                                                    raw_decision=True,
+                                                    context="Work on this registered Git replica using the approved scope.")
         except Blocked as error:
             last = self.phases[-1] if self.phases else {}
             if (tool.get("mode") == "godot-game" and phase == "developer" and str(error) == "TOKEN_LIMIT"
@@ -1432,7 +1509,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         context = json.dumps({"goal": scope["goal"], "criteria": criteria, "status": status,
                               "approved_paths": scope["files"],
                               "approved_capabilities": {"command_network": scope.get("network", "COMMANDS_OFF"),
-                                                        "dependency_install": scope.get("install", False)},
+                                                        "web_research": scope.get("research", "OFF"),
+                                                        "portable_tools": [package["name"]
+                                                                           for package in scope.get("tool_packages", ())]},
                               "reviewed_without_functional_check": sorted(accepted),
                               "deferred_criteria": deferred,
                               "project_files": sorted(session.image["files"])[:60],
@@ -1974,7 +2053,8 @@ def _read_cli_role_evidence(ledger, ref, scope):
         raw = _read_observation(path, limit + 1)
         if len(raw) > limit:
             raise ValueError("Output limit exceeded")
-        return _cli_evidence(raw.decode("utf-8"), command_pattern=r"(?!)", retain_message=True)
+        return _cli_evidence(raw.decode("utf-8"), command_pattern=r"(?!)", retain_message=True,
+                             web_research=scope.get("research") == "CODEX_LIVE" and phase == "manager-planning")
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
         raise Blocked("보존된 모델 응답을 읽거나 완료 이벤트를 확인할 수 없습니다.") from error
 
@@ -2461,9 +2541,9 @@ def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False,
 
 
 def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None,
-        pause=None, play=False):
+        pause=None, play=False, tools=None):
     return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits,
-                visual_review=visual_review, activity=activity, pause=pause, play=play)
+                visual_review=visual_review, activity=activity, pause=pause, play=play, tools=tools)
 
 
 def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False,
@@ -2475,14 +2555,14 @@ def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambd
 
 
 def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False,
-         visual_review=False, activity=None, pause=None, play=False):
+         visual_review=False, activity=None, pause=None, play=False, tools=None):
     from .runtime import require_admission
 
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
         scope, diff = (_approved_resume_contract(runner, events, head, args, graceful) if resume
                        else (_contract(runner, events, head, *args, game=game, game_limits=game_limits,
-                                       visual_review=visual_review, play=play), None))
+                                       visual_review=visual_review, play=play, tools=tools), None))
         if cancelled() or digest(scope) != approval:
             raise Blocked("Registered development approval changed")
         if any(event.get("approval_sha256") == approval for event in events):
