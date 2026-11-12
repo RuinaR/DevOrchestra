@@ -1,5 +1,6 @@
 from json import dumps
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -7,9 +8,17 @@ from unittest.mock import Mock, patch
 from devorchestra import native_cycle, registered_cycle, visual_review
 from devorchestra.default_instructions import public_instruction
 from devorchestra.lease import Blocked
+from devorchestra.native_developer_trial import _exec_argv
 
 
 class VisualReviewTests(unittest.TestCase):
+    def test_exec_delimits_the_prompt_from_variadic_image_arguments(self):
+        root = Path.cwd()
+        images = (root / "F1.png", root / "F2.png")
+        args = _exec_argv(root, "test", "Inspect both frames", writable=False, shell_tools=False, images=images)
+        self.assertEqual(["--image", str(images[0]), "--image", str(images[1]), "--", "Inspect both frames"],
+                         args[-6:])
+
     def report(self, verdict="REWORK", kind="defect", uncertainty="low"):
         return dumps({"verdict": verdict, "observations": [{"frame": "F1", "visible": "Label clips at right edge"}],
                       "not_verified": ["Animation timing"], "code_finding": None,
@@ -38,12 +47,15 @@ class VisualReviewTests(unittest.TestCase):
                                          "instructions": {"reviewer": instruction["sha256"]}},
                                   binary=Path.cwd() / "codex.exe", work=Path.cwd())
         image = Path.cwd() / "F1.png"
-        with patch.object(native_cycle, "_observe") as launch, patch.object(
-                native_cycle, "_exec_argv", side_effect=Blocked("fixture boundary")) as argv:
+        with (TemporaryDirectory() as folder,
+              patch.object(native_cycle, "_observe") as launch,
+              patch.object(native_cycle, "_exec_argv", side_effect=Blocked("fixture boundary")) as argv):
+            session.logs = lambda _: Path(folder)
             with self.assertRaisesRegex(Blocked, "fixture boundary"):
                 native_cycle._FixtureSession.dispatch(
                     session, 1, "reviewer", "C1", "Inspect the image", shell_tools=False,
                     images=(image,), image_evidence=({"id": "F1"},))
+            self.assertTrue(argv.call_args.kwargs["output_schema"].is_file())
         self.assertIn(instruction["text"], argv.call_args.args[2])
         self.assertIn("NOT_VERIFIED", argv.call_args.args[2])
         self.assertEqual((image,), argv.call_args.kwargs["images"])

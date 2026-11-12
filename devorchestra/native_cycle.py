@@ -455,6 +455,12 @@ class _FixtureSession:
         instructions = public_instruction(phase)
         if instructions["sha256"] != self.scope["instructions"][phase]:
             raise Blocked("Approved role instructions changed")
+        output_schema = None
+        if images:
+            from .visual_review import write_schema
+
+            output_schema = write_schema(self.logs(f"{cycle}-visual-schema") / "review.json",
+                                         [frame["id"] for frame in image_evidence])
         prompt = (f"{instructions['text']}\n{context} "
                   "Use only the approved fixture scope. No external actions.\n" + prompt)
         self.calls += 1
@@ -483,7 +489,7 @@ class _FixtureSession:
             result = _observe(self.binary, _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
                                                       tool_root=tool_root, shell_tools=shell_tools,
                                                       extra_read_roots=extra_read_roots, scratch_root=scratch_root,
-                                                      images=images),
+                                                      images=images, output_schema=output_schema),
                               self.work, role_log, self.env, seconds=timeout, check=observed_check,
                               output_limit=output_limit, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
                               memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2)

@@ -1,5 +1,7 @@
 # 개발 인수인계
 
+온라인 합성 시험의 Codex 역할은 한 번 완료됐지만, 응답이 시각 JSON 계약을 통과하지 않았다. 원장에는 실제 사용량과 응답 해시를 보존했다. 새 빌드는 이미지 인자 뒤에 프롬프트 구분자를 넣고 `--output-schema`로 시각 응답 구조를 지정한다. 다음 실제 시험은 별도 승인 후 같은 두 화면에서 제목과 오른쪽 잘림을 다시 확인한다.
+
 등록 개발 창에서 **AI 시각 검토**를 선택하면 승인 범위에 이미지 전달이 포함된다. Godot 소유 창 검사나 기준별 소유 창 검사 한두 개를 사용한다. 개발자가 끝나면 기존 Verifier 실행 경로로 캡처를 수집하고, Reviewer 호출 뒤 후보 해시와 이미지를 재확인한다. 결과와 캡처는 개발 세션 창에서 조회한다. 화면 비교는 승인된 고정 입력 시나리오를 사용한다. 실제 온라인 결함 발견과 재작업을 검증하려면 별도 승인된 합성 프로젝트에서 전후 캡처로 한 번의 수정을 관측한다. 이전에 승인한 Reviewer 지침 해시와 현재 지침이 다르면 기존 승인으로 새 Reviewer를 실행할 수 없다.
 
 공식 Codex 0.167.1에서 CLI는 `codex exec --image FILE`, App Server는 `turn/start.input`의 `localImage`, TypeScript SDK는 `thread.run`의 `local_image`를 사용한다. 이 구현은 기존 ChatGPT 구독 로그인과 CLI JSON 이벤트를 유지한다. 모델별 입력 형식은 App Server의 `model/list.inputModalities`에서 확인할 수 있다. DevOrchestra는 내부 캡처 PNG를 최대 네 장, 각 4 MiB와 2048×2048 이내로 제한한다. 이미지 비용은 Reviewer 호출에서 제공자가 보고한 사용량으로 관리하며 이미지 전용 토큰을 추정하지 않는다. [CLI 옵션](https://learn.chatgpt.com/docs/cli/reference) · [App Server](https://learn.chatgpt.com/docs/app-server) · [0.167.1 TypeScript SDK](https://github.com/openai/codex/blob/rust-v0.167.1/sdk/typescript/src/thread.ts)

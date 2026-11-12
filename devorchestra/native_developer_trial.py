@@ -206,16 +206,19 @@ def _verify_output(binary, work, output, environment, check, *, test_command="ca
 
 
 def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tools=True,
-               extra_read_roots=(), scratch_root=None, images=()):
+               extra_read_roots=(), scratch_root=None, images=(), output_schema=None):
+    schema_args = ["--output-schema", str(output_schema)] if output_schema is not None else []
     attachments = []
     for path in images:
         if not path.is_absolute() or "," in str(path):
             raise Blocked("Codex image attachment path is ambiguous")
         attachments.extend(("--image", str(path)))
+    if attachments:
+        attachments.append("--")  # The final image option accepts multiple positional filenames.
     return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root, shell_tools=shell_tools,
                          extra_read_roots=extra_read_roots, scratch_root=scratch_root),
             "exec", "--ignore-user-config", "--json",
-            "--ephemeral", "--model", model, "--cd", str(work), *attachments, prompt]
+            "--ephemeral", "--model", model, "--cd", str(work), *schema_args, *attachments, prompt]
 
 
 def _diagnostic(events):

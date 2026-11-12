@@ -663,10 +663,10 @@ def _review_and_verify(session, count, key, diff, status):
                            images=inputs, image_evidence=evidence)
         try:
             report, blockers = visual.parse(raw, ids, session.signoff_state.get("changed", ()))
-        except Blocked:
+        except Blocked as error:
             session.record("native_inspection_visual_review", cycle=count, target=key, verdict="UNAVAILABLE",
                            findings=[], frames=evidence, response_sha256=digest(raw),
-                           source_sha256=session.source(), status="NOT_VERIFIED")
+                           source_sha256=session.source(), status="NOT_VERIFIED", reason=str(error))
             raise
         review = report["verdict"]
         findings = visual.safe_findings(report["findings"])

@@ -18,6 +18,31 @@ SENSITIVE = re.compile(r"https?://|\b(?:bearer|password|secret|credential|api[ _
                        r"|\b[A-Za-z0-9_+/=-]{32,}\b", re.I)
 
 
+def write_schema(path, frame_ids):
+    def obj(properties):
+        return {"type": "object", "properties": properties, "required": list(properties),
+                "additionalProperties": False}
+
+    def choices(*values):
+        return {"type": "string", "enum": list(values)}
+
+    string = {"type": "string"}
+    frame = choices(*frame_ids)
+    finding = obj({"id": choices("V1", "V2", "V3", "V4"), "kind": choices("defect", "suggestion"),
+                   "severity": choices("low", "medium", "high", "critical"), "frame": frame,
+                   **{key: string for key in ("observed", "expected", "reproduce", "fix", "basis")},
+                   "uncertainty": choices("low", "medium", "high")})
+    schema = obj({"verdict": choices("ACCEPT", "REWORK", "UNAVAILABLE"),
+                  "observations": {"type": "array", "items": obj({"frame": frame, "visible": string})},
+                  "findings": {"type": "array", "items": finding},
+                  "not_verified": {"type": "array", "items": string},
+                  "code_finding": {"anyOf": [{"type": "null"}, obj({"file": string, "observed": string})]}})
+    check_path(path)
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(schema, stream, separators=(",", ":"))
+    return path
+
+
 def _safe_text(value):
     return "[omitted: possible sensitive text]" if SENSITIVE.search(value) else value
 
@@ -135,6 +160,11 @@ def stage(ledger, evidence, directory):
 def parse(message, frame_ids, changed_files=()):
     try:
         result = json.loads(message, object_pairs_hook=_unique_object)
+    except (ValueError, TypeError, RecursionError, Blocked):
+        raise Blocked("Visual Reviewer did not return a unique JSON object") from None
+    try:
+        if type(result) is dict and result.get("verdict") == "UNAVAILABLE":
+            raise Blocked("Visual Reviewer reported unavailable images")
         if (type(result) is not dict or set(result) != {"verdict", "observations", "findings", "not_verified", "code_finding"}
                 or result["verdict"] not in ("ACCEPT", "REWORK", "UNAVAILABLE")
                 or type(result["observations"]) is not list or len(result["observations"]) != len(frame_ids)
@@ -164,10 +194,10 @@ def parse(message, frame_ids, changed_files=()):
             seen.add(item["id"])
         blockers = [item for item in result["findings"] if item["kind"] == "defect"
                     and item["severity"] in ("medium", "high", "critical") and item["uncertainty"] == "low"]
-        if result["verdict"] == "UNAVAILABLE" or (result["verdict"] == "REWORK") != bool(blockers or code):
-            raise ValueError
-    except (ValueError, TypeError, KeyError, RecursionError, Blocked):
-        raise Blocked("Visual Reviewer response was unavailable or did not cite valid evidence") from None
+        if (result["verdict"] == "REWORK") != bool(blockers or code):
+            raise Blocked("Visual Reviewer verdict did not match its cited defects")
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise Blocked("Visual Reviewer response did not match the evidence schema") from None
     return {**result, "response_sha256": digest(message)}, blockers
 
 
