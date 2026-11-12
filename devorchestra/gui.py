@@ -511,7 +511,12 @@ class CommandCenter:
         dialog.transient(parent)
         dialog.resizable(False, False)
         label(dialog, "승인 범위 검토", size=15, fg=CYAN, bg=BG, bold=True).pack(fill="x", pady=(0, 8))
-        label(dialog, text, size=11, bg=BG, wraplength=460).pack(fill="x", pady=(0, 12))
+        if len(text) > 650 or text.count("\n") > 12:
+            summary = self.editor_box(dialog, height=14)
+            summary.insert("1.0", text)
+            summary.configure(state="disabled")
+        else:
+            label(dialog, text, size=11, bg=BG, wraplength=460).pack(fill="x", pady=(0, 12))
         result = False
 
         def finish(value=False):

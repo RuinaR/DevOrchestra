@@ -45,20 +45,27 @@ def recommended_limits():
             "role_seconds": dict(ROLE_SECONDS), "role_tokens": dict(ROLE_TOKENS)}
 
 
-def validate_limits(limits):
+def validate_limits(limits, *, maximum_seconds=SESSION_SECONDS, maximum_tokens=SESSION_TOKENS,
+                    role_token_caps=None):
     if type(limits) is not dict or limits.keys() != recommended_limits().keys():
-        raise Blocked("Invalid game budget fields")
+        raise Blocked("세션 한도 항목을 확인하세요.")
     seconds, tokens, cycles = (limits[key] for key in ("seconds", "tokens", "cycles"))
-    if (type(seconds) is not int or not 60 <= seconds <= SESSION_SECONDS
-            or type(tokens) is not int or not 1 <= tokens <= SESSION_TOKENS
-            or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50))):
-        raise Blocked("Invalid game session budget")
-    for key, maxima, total in (("role_seconds", ROLE_SECONDS, seconds), ("role_tokens", ROLE_TOKENS, tokens)):
+    if type(seconds) is not int or not 60 <= seconds <= maximum_seconds:
+        raise Blocked(f"전체 시간 기준은 60~{maximum_seconds:,}초로 입력하세요.")
+    if type(tokens) is not int or not 1 <= tokens <= maximum_tokens:
+        raise Blocked(f"전체 토큰 기준은 1~{maximum_tokens:,}토큰으로 입력하세요.")
+    if cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50):
+        raise Blocked("사이클 상한은 비워두거나 1~50으로 입력하세요.")
+    for key, maxima, total, unit in (
+            ("role_seconds", ROLE_SECONDS, seconds, "초"),
+            ("role_tokens", role_token_caps or ROLE_TOKENS, tokens, "토큰")):
         values = limits[key]
-        if (type(values) is not dict or values.keys() != maxima.keys()
-                or any(type(values[role]) is not int or not 1 <= values[role] <= min(cap, total)
-                       for role, cap in maxima.items())):
-            raise Blocked(f"Invalid game {key} budget")
+        if type(values) is not dict or values.keys() != maxima.keys():
+            raise Blocked(f"역할별 {unit} 기준 항목을 확인하세요.")
+        for role, cap in maxima.items():
+            if type(values[role]) is not int or not 1 <= values[role] <= min(cap, total):
+                name = "Manager" if role.startswith("manager-") else role.title()
+                raise Blocked(f"{name} 호출당 기준은 1~{min(cap, total):,}{unit}으로 입력하세요.")
 MANUAL_CHECKS = {
     CRITERIA[1]: "In the exported game, observe movement, walls and single-count pickups under keyboard input.",
     CRITERIA[2]: "Play through a hazard failure and a reachable victory and observe the game states.",

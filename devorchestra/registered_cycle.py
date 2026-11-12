@@ -33,6 +33,16 @@ PERMISSIONS = ("replica-read", "replica-edit", "offline-shell", "pinned-verifier
 SHELL_ROLES = ("developer", "reviewer")
 MAX_DIFF = 24000
 BASELINE_VERIFIER = "replica-integrity"
+MAX_SESSION_SECONDS = 86400
+MAX_SESSION_TOKENS = 10000000
+MAX_MANAGER_TOKENS = 300000
+REGISTERED_ROLE_TOKEN_CAPS = {**game_pilot.ROLE_TOKENS, "manager-planning": MAX_MANAGER_TOKENS,
+                              "manager-final": MAX_MANAGER_TOKENS}
+
+
+def validate_limits(limits):
+    game_pilot.validate_limits(limits, maximum_seconds=MAX_SESSION_SECONDS,
+                               maximum_tokens=MAX_SESSION_TOKENS, role_token_caps=REGISTERED_ROLE_TOKEN_CAPS)
 
 
 def _verdict(message, options):
@@ -127,14 +137,16 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
               manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False, game_limits=None):
     now = time()
     if game_limits is not None:
-        game_pilot.validate_limits(game_limits)
+        (game_pilot.validate_limits if game else validate_limits)(game_limits)
         if (seconds, tokens, cycles) != tuple(game_limits[key] for key in ("seconds", "tokens", "cycles")):
             raise Blocked("Invalid registered budget scope")
     elif (type(seconds) is not int or not 60 <= seconds <= 1500 or type(tokens) is not int
           or not 60000 <= tokens <= 400000
           or (cycles is not None and (type(cycles) is not int or not 1 <= cycles <= 50))):
         raise Blocked("Invalid registered session time, token or cycle limit")
-    if (type(expires) is not int or not now < expires <= now + (17400 if game_limits else 1800)
+    expiry_limit = ((game_pilot.SESSION_SECONDS if game else MAX_SESSION_SECONDS) + 3000
+                    if game_limits else 1800)
+    if (type(expires) is not int or not now < expires <= now + expiry_limit
             or (game_limits is not None and expires < now + seconds + 2700)):
         raise Blocked("Approval expiry does not cover the session window")
     if game_limits is None and (type(manager_tokens) is not int or not 1 <= manager_tokens <= min(tokens, 60000)):

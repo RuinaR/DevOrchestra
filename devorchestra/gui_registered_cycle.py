@@ -50,20 +50,63 @@ def _remaining_signoff(checkpoint):
     return "Reviewer → 독립 Verifier → 최종 Manager"
 
 
+def _session_layout(panel, state):
+    width = min(740, panel.winfo_screenwidth() - 60)
+    height = min(780, panel.winfo_screenheight() - 120)
+    panel.geometry(f"{width}x{height}")
+    panel.minsize(min(540, width), min(380, height))
+    footer = ttk.Frame(panel)
+    footer.pack(side="bottom", fill="x", pady=(8, 0))
+    status = ttk.Label(footer, textvariable=state, wraplength=width - 40)
+    status.pack(fill="x", pady=(0, 5))
+    footer.bind("<Configure>", lambda event: status.configure(wraplength=max(250, event.width)))
+    viewport = ttk.Frame(panel)
+    viewport.pack(fill="both", expand=True)
+    canvas = tk.Canvas(viewport, bg=panel.cget("bg"), highlightthickness=0, takefocus=True,
+                       yscrollincrement=20)
+    scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+    scrollbar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    body = ttk.Frame(canvas)
+    embedded = canvas.create_window(0, 0, window=body, anchor="nw")
+    canvas.bind("<Configure>", lambda event: canvas.itemconfigure(embedded, width=event.width))
+    body.bind("<Configure>", lambda event: canvas.configure(scrollregion=(0, 0, event.width, event.height)))
+
+    def wheel(event):
+        widget = event.widget
+        if widget is not canvas and not str(widget).startswith(f"{body}.") and widget is not body:
+            return
+        if isinstance(widget, (tk.Text, tk.Listbox, ttk.Combobox)):
+            return
+        if event.delta:
+            direction = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(direction * max(1, abs(event.delta) // 120), "units")
+            return "break"
+
+    panel.bind("<MouseWheel>", wheel, add="+")
+    canvas.bind("<Button-1>", lambda _event: canvas.focus_set())
+    canvas.bind("<Prior>", lambda _event: canvas.yview_scroll(-1, "pages"))
+    canvas.bind("<Next>", lambda _event: canvas.yview_scroll(1, "pages"))
+    canvas.bind("<Home>", lambda _event: canvas.yview_moveto(0))
+    canvas.bind("<End>", lambda _event: canvas.yview_moveto(1))
+    return body, footer
+
+
 def show(center, project):
     runner = center.controller
     panel = center.panel()
     panel.title("등록 프로젝트 · Codex 개발 세션")
-    state = tk.StringVar(value="등록된 복제본과 검증 조건을 확인하세요.")
-    ttk.Label(panel, textvariable=state, wraplength=580).pack(fill="x", pady=4)
+    state = tk.StringVar(panel, value="세션 검토를 누른 뒤 승인하면 자동 개발이 시작됩니다.")
+    body, footer = _session_layout(panel, state)
     try:
         data = Catalog(runner.ledger).read()["projects"][project]["data"]
     except (OSError, ValueError, RuntimeError, sqlite3.Error, KeyError):
         state.set("프로젝트 등록 정보를 읽지 못했습니다. 프로젝트 목록을 새로고침하세요.")
         return
     criteria = cycle_progress.freeze(data["acceptance"], None)
-    ttk.Label(panel, text=f"{data['name']} · 완료 기준 {len(criteria)}개").pack(anchor="w")
-    ttk.Label(panel, text="등록 목표와 완료 기준으로 계획을 세웁니다. 요구사항 문서는 선택 사항입니다.",
+    ttk.Label(body, text=f"{data['name']} · 완료 기준 {len(criteria)}개").pack(anchor="w")
+    ttk.Label(body, text="등록 목표와 완료 기준으로 계획을 세웁니다. 요구사항 문서는 선택 사항입니다.",
               wraplength=580).pack(anchor="w")
 
     def show_criteria():
@@ -74,12 +117,12 @@ def show(center, project):
             f"{key} · {item['text']}" for key, item in criteria.items()))
         content.configure(state="disabled")
 
-    ttk.Button(panel, text="목표와 완료 기준 보기", command=show_criteria).pack(anchor="w", pady=(0, 4))
+    ttk.Button(body, text="목표와 완료 기준 보기", command=show_criteria).pack(anchor="w", pady=(0, 4))
     baseline = None
     try:
         original, replica, baseline, _ = replica_readiness.baseline(runner.ledger, project)
         original_head = baseline["head"][:12] if baseline["head"] else "첫 커밋 전"
-        ttk.Label(panel, text=f"원본 {original}\n복제본 {replica}\n"
+        ttk.Label(body, text=f"원본 {original}\n복제본 {replica}\n"
                   f"원본 Git {original_head} · 스테이징 {len(baseline['staged'])} · "
                   f"작업 트리 변경 {len(baseline['raw_worktree_changed'])}", wraplength=580).pack(fill="x")
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
@@ -88,14 +131,14 @@ def show(center, project):
                   f"작업 복제본을 확인할 수 없습니다. Git 온보딩에서 상태를 확인하세요.\n{error}")
     is_godot = baseline is not None and any(name.casefold() == "project.godot" for name in baseline["files"])
     draft = center.development_budget_drafts.setdefault(project, {})
-    grants = _permission_checkboxes(panel, draft)
+    grants = _permission_checkboxes(body, draft)
     if is_godot and project == game_pilot.PROJECT:
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
-        _game_preflight(center, panel, runner, state, grants)
+        _game_preflight(center, panel, body, footer, runner, state, grants)
         return
-    ttk.Button(panel, text="등록 목표·기준 편집",
+    ttk.Button(body, text="등록 목표·기준 편집",
                command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
-    inputs = ttk.Frame(panel)
+    inputs = ttk.Frame(body)
     inputs.pack(fill="x")
     entries = {}
     budget_keys = ("seconds", "tokens", "cycles", "manager_tokens")
@@ -111,7 +154,7 @@ def show(center, project):
     inputs.columnconfigure(1, weight=1)
     if baseline is not None and baseline["head"] is None and not baseline["files"]:
         entries["files"].insert(0, "docs/PROJECT-PLAN.md")
-    ttk.Label(panel, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
+    ttk.Label(body, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
               wraplength=580).pack(anchor="w", pady=4)
 
     def save_budget():
@@ -126,10 +169,10 @@ def show(center, project):
             close_preflight()
             show(center, project)
 
-        ttk.Button(panel, text="Git 온보딩 · 작업 복제본 준비",
+        ttk.Button(footer, text="Git 온보딩 · 작업 복제본 준비",
                    command=lambda: center.onboarding_panel(project=project)).pack(anchor="w")
-        ttk.Button(panel, text="복제본 준비 상태 다시 확인", command=reopen).pack(anchor="w")
-        ttk.Button(panel, text="닫기", command=close_preflight).pack(anchor="e")
+        ttk.Button(footer, text="복제본 준비 상태 다시 확인", command=reopen).pack(anchor="w")
+        ttk.Button(footer, text="닫기", command=close_preflight).pack(anchor="e")
         panel.protocol("WM_DELETE_WINDOW", close_preflight)
         panel.bind("<Escape>", lambda _event: (close_preflight(), "break")[1])
         return
@@ -144,14 +187,14 @@ def show(center, project):
             entries["archive"].insert(0, path)
 
     ttk.Button(inputs, text="찾기", command=archive).grid(row=0, column=2)
-    ttk.Label(panel, text="독립 검증 설정").pack(anchor="w")
-    ttk.Label(panel, text="Godot은 Windows 실행·소유 창 입력·캡처를 검증합니다. 실행 대상이 없는 프로젝트는 복제본과 변경 범위를 검사합니다.",
+    ttk.Label(body, text="독립 검증 설정").pack(anchor="w")
+    ttk.Label(body, text="기본 검증은 원본 Git, 복제본과 변경 범위를 확인합니다. 앱 실행·입력·화면 검증에는 실행 설정이 필요합니다.",
               wraplength=580).pack(anchor="w")
-    ttk.Label(panel, text="다른 도구에서도 완료 기준에 screen_changed를 설정하면 소유 창 입력 전후 화면을 비교합니다.",
+    ttk.Label(body, text="실행 검사에 screen_changed를 설정하면 소유 창의 입력 전후 화면을 비교합니다.",
               wraplength=580).pack(anchor="w")
-    verifier_actions = ttk.Frame(panel)
+    verifier_actions = ttk.Frame(body)
     verifier_actions.pack(fill="x")
-    spec = center.editor_box(panel, height=6)
+    spec = center.editor_box(body, height=6)
     template = {"executable": "", "checks": {key: {"args": [], "stdout": "", "inputs": []} for key in criteria}}
     default_verifier = {"mode": registered_cycle.BASELINE_VERIFIER}
     godot_verifier = {"mode": game_pilot.REGISTERED_GUI}
@@ -208,7 +251,7 @@ def show(center, project):
                command=lambda: write_spec(godot_verifier if is_godot else default_verifier)).pack(side="left")
     ttk.Button(verifier_actions, text="Godot GUI 검증", command=select_godot).pack(side="left")
     ttk.Button(verifier_actions, text="Windows 텍스트 검사 예제", command=windows_text_check).pack(side="left", padx=4)
-    detail = center.editor_box(panel, height=8, state="disabled")
+    detail = center.editor_box(body, height=8, state="disabled")
     cancelled = Event()
     future = None
     active = False
@@ -346,6 +389,8 @@ def show(center, project):
         panel.after(150, poll)
 
     def start():
+        if active:
+            return
         permissions = _checked_permissions(grants, state)
         if permissions is None:
             return
@@ -372,7 +417,7 @@ def show(center, project):
                       "role_seconds": {role: min(cap, seconds) for role, cap in game_pilot.ROLE_SECONDS.items()},
                       "role_tokens": {role: manager if role.startswith("manager-") else min(cap, tokens)
                                       for role, cap in role_tokens.items()}}
-            game_pilot.validate_limits(limits)
+            registered_cycle.validate_limits(limits)
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     [name.strip() for name in values["files"].split(",") if name.strip()],
                     permissions, verifier,
@@ -426,20 +471,22 @@ def show(center, project):
         dialog.grab_set()
         values["seconds"].focus_set()
 
-    buttons = ttk.Frame(panel)
+    buttons = ttk.Frame(footer)
     buttons.pack(fill="x")
-    button = ttk.Button(buttons, text="세션 검토 및 시작", command=start)
-    button.pack(side="left")
+    button = ttk.Button(buttons, text="세션 검토 및 시작", command=start, style="Primary.TButton")
     resume_button = ttk.Button(buttons, text="중단 작업 재개 검토", command=resume)
-    resume_button.pack(side="left")
-    ttk.Button(buttons, text="닫기 / 중단", command=close).pack(side="right")
-    ttk.Button(buttons, text="원본 반영 검토", command=lambda: center.original_apply_panel(project)).pack(side="left")
+    close_button = ttk.Button(buttons, text="닫기 / 중단", command=close)
+    apply_button = ttk.Button(buttons, text="원본 반영 검토", command=lambda: center.original_apply_panel(project))
+    for index, control in enumerate((button, resume_button, apply_button, close_button)):
+        control.grid(row=index // 2, column=index % 2, sticky="ew", padx=2, pady=2)
+    for column in range(2):
+        buttons.columnconfigure(column, weight=1, uniform="actions")
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: (close(), "break")[1])
     render()
 
 
-def _game_preflight(center, panel, runner, state, grants):
+def _game_preflight(center, panel, body, footer, runner, state, grants):
     cancelled = Event()
     future = None
 
@@ -592,9 +639,9 @@ def _game_preflight(center, panel, runner, state, grants):
 
         submit()
 
-    ttk.Label(panel, text="등록 기준의 PNG 가져오기, 리소스 팩 실행, 소유 테스트 창 캡처를 검사합니다.",
+    ttk.Label(body, text="등록 기준의 PNG 가져오기, 리소스 팩 실행, 소유 테스트 창 캡처를 검사합니다.",
               wraplength=580).pack(anchor="w")
-    budget = ttk.Frame(panel)
+    budget = ttk.Frame(body)
     budget.pack(fill="x", pady=4)
     defaults = game_pilot.recommended_limits()
     session_entries = {}
@@ -613,18 +660,19 @@ def _game_preflight(center, panel, runner, state, grants):
             entry = role_entries[key][role] = ttk.Entry(budget, width=12)
             entry.insert(0, str(defaults[key][role]))
             entry.grid(row=row, column=column, sticky="w")
-    button = ttk.Button(panel, text="게임 오프라인 사전 검증", command=start)
+    button = ttk.Button(body, text="게임 오프라인 사전 검증", command=start)
     button.pack(anchor="w")
-    export_button = ttk.Button(panel, text="Windows EXE 내보내기 및 오프라인 검증", command=lambda: start(True))
+    export_button = ttk.Button(body, text="Windows EXE 내보내기 및 오프라인 검증", command=lambda: start(True))
     export_button.pack(anchor="w")
-    online_button = ttk.Button(panel, text="게임 온라인 개발 검토", command=lambda: start(online=True))
-    online_button.pack(anchor="w")
-    resume_button = ttk.Button(panel, text="게임 중단 후보 재개 검토",
+    online_button = ttk.Button(footer, text="게임 온라인 개발 검토", command=lambda: start(online=True),
+                               style="Primary.TButton")
+    online_button.pack(side="left")
+    resume_button = ttk.Button(footer, text="게임 중단 후보 재개 검토",
                                command=lambda: start(online=True, resume=True))
-    resume_button.pack(anchor="w")
-    ttk.Button(panel, text="검증된 EXE · 사용자 플레이 기록",
+    resume_button.pack(side="left")
+    ttk.Button(body, text="검증된 EXE · 사용자 플레이 기록",
                command=lambda: _player_panel(center, runner)).pack(anchor="w")
-    ttk.Button(panel, text="닫기 / 중단", command=close).pack(anchor="w")
+    ttk.Button(footer, text="닫기 / 중단", command=close).pack(side="right")
     panel.protocol("WM_DELETE_WINDOW", close)
     panel.bind("<Escape>", lambda _event: (close(), "break")[1])
 
