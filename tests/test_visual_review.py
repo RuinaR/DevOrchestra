@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from devorchestra import native_cycle, registered_cycle, visual_review
+from devorchestra import adaptive_play, native_cycle, registered_cycle, visual_review
 from devorchestra.default_instructions import public_instruction
 from devorchestra.lease import Blocked
 from devorchestra.native_developer_trial import _exec_argv
@@ -82,7 +82,8 @@ class VisualReviewTests(unittest.TestCase):
             approved, diff = registered_cycle._approved_resume_contract(None, [], "head", (), True)
         self.assertEqual("old-instruction", scope["instructions"]["reviewer"])
         self.assertEqual(public_instruction("reviewer")["sha256"], approved["instructions"]["reviewer"])
-        self.assertEqual(["reviewer"], approved["resume"]["updated_role_instructions"])
+        self.assertEqual(public_instruction("global")["sha256"], approved["instructions"]["global"])
+        self.assertEqual(["global", "reviewer"], approved["resume"]["updated_role_instructions"])
         self.assertEqual(saved["saved_response"], approved["resume"]["saved_response"])
         self.assertEqual(scope["permissions"], approved["permissions"])
         self.assertEqual("verified diff", diff)
@@ -127,24 +128,31 @@ class VisualReviewTests(unittest.TestCase):
 
     def test_runtime_freezes_reviewer_document_and_passes_real_attachment_arguments(self):
         instruction = public_instruction("reviewer")
+        common = public_instruction("global")
         session = SimpleNamespace(check=Mock(), check_image=Mock(), calls=0, usage=0, record=Mock(),
                                   source=lambda: "source", logs=lambda _: Path.cwd(), seconds=lambda _: 10,
                                   progress_check=Mock(),
                                   scope={"role_tokens": {"reviewer": 100}, "model_calls_max": 1,
                                          "tokens": 100, "model": "test", "visual_review": True,
-                                         "instructions": {"reviewer": instruction["sha256"]}},
+                                         "instructions": {"reviewer": instruction["sha256"], "global": common["sha256"]}},
                                   binary=Path.cwd() / "codex.exe", work=Path.cwd())
         image = Path.cwd() / "F1.png"
         with (TemporaryDirectory() as folder,
               patch.object(native_cycle, "_observe") as launch,
               patch.object(native_cycle, "_exec_argv", side_effect=Blocked("fixture boundary")) as argv):
             session.logs = lambda _: Path(folder)
+            session.scope["instructions"]["global"] = "stale"
+            with self.assertRaisesRegex(Blocked, "global instructions changed"):
+                native_cycle._FixtureSession.dispatch(session, 1, "reviewer", "C1", "Inspect the image")
+            argv.assert_not_called()
+            session.scope["instructions"]["global"] = common["sha256"]
             with self.assertRaisesRegex(Blocked, "fixture boundary"):
                 native_cycle._FixtureSession.dispatch(
                     session, 1, "reviewer", "C1", "Inspect the image", shell_tools=False,
                     images=(image,), image_evidence=({"id": "F1"},))
             self.assertTrue(argv.call_args.kwargs["output_schema"].is_file())
         self.assertIn(instruction["text"], argv.call_args.args[2])
+        self.assertTrue(argv.call_args.args[2].startswith(common["text"] + "\n\n"))
         self.assertIn("NOT_VERIFIED", argv.call_args.args[2])
         self.assertEqual((image,), argv.call_args.kwargs["images"])
         self.assertFalse(argv.call_args.kwargs["writable"])
@@ -215,7 +223,8 @@ class VisualReviewTests(unittest.TestCase):
         actions = [{"step": 1, "action": {"action": "click", "x": 10, "y": 12}, "result": "SCREEN_CHANGED",
                     "before": "hash-0", "after": "hash-1"}]
         ledger = SimpleNamespace(state_boundary=Path.cwd())
-        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True, "adaptive_play": True,
+        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True,
+                                         "adaptive_play": adaptive_play.approval(),
                                          "project_id": "fixture", "requirements": []},
                                   check=Mock(), check_image=Mock(), record=Mock(), phases=[],
                                   verify_registered=Mock(), call=Mock(return_value=dumps({

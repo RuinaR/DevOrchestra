@@ -21,3 +21,16 @@ Classify work artifacts at each handoff and before completion. Automatically rem
 Keep elevation, system changes, destructive operations, credentials, external account changes, real transactions and production deployment separately authorized. Follow repository Git policy, preserve history and check the staged files for private data before publication.
 
 Use the smallest relevant checks. Separate actual, synthetic and unverified results. Record evidence and blockers, and leave enough context to resume without repeating work.
+
+## QA time control
+
+Separate AI observation and decision time from the test target's logical time when the distinction matters. Select the smallest supported time model that fits the criterion.
+
+- Use **normal speed** to observe actual user flow, input response, animation timing, frame performance, network latency, real clocks, or long-running behavior.
+- Use **slow motion** through the application's or engine's supported time scale to inspect fast transitions. Check which systems use scaled, unscaled, fixed-step, or wall-clock time. Deterministic stepping requires explicit control over logical advances.
+- Use **pause and step** when the target supports it. Pause the relevant simulation, capture state, and keep it paused while AI decides. Apply a bounded input batch, advance exactly the approved logical interval or tick count, pause again, and observe and evaluate. Prefer a repeatable initial state and a fixed random seed where relevant.
+- Use **virtual time or deterministic events** where screen input is unnecessary. Consider an injectable clock, controlled scheduler, explicit events, reproducible timers, simulated latency, or controlled async completion. Apply this to desktop UI, servers, and other asynchronous applications as appropriate.
+
+Use target-provided controls or approved QA-only code in an approved replica or owned test executable. Leave production behavior intact, keep QA controls out of unapproved deployments, and restore held inputs, pause state, and time settings after success, failure, timeout, or cancellation. Do not change the OS clock or control other processes, external services, or the desktop to alter time. Do not use hooks, injection, or memory changes for time control. If the available tools cannot safely support the intended mode, use an applicable supported check and mark the remaining behavior NOT_VERIFIED.
+
+Keep separate normal-speed checks for time-sensitive claims, including input response, animation, difficulty and balance, FPS and frame time, physics stability, real timers, asynchronous races, long-run stability, and normal user flow where relevant. In existing QA receipts, record the time model, actual elapsed time, logical elapsed time or ticks, scale, input and observation intervals, control source, observed result, and any pending normal-speed verification as relevant. Logical time control never changes the Controller's actual time budget or cancellation deadline.

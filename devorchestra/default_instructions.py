@@ -2,7 +2,7 @@
 from hashlib import sha256
 from pathlib import Path
 
-VERSION = "public-v4"
+VERSION = "public-v5"
 ROOT = Path(__file__).resolve().parent.parent / "defaults"
 SOURCES = {
     "global": "global/AGENTS.md",

@@ -52,7 +52,7 @@ class RequirementWorkflowTests(unittest.TestCase):
         self.assertEqual(["", "", ""], json.loads(envelope)["approved_local_instructions"])
         self.assertEqual(before, self.catalog.read()["projects"]["sample"])
         self.assertEqual([self.document], list(self.source.iterdir()))
-        self.assertEqual("public-v4", public_instruction("manager-planning")["version"])
+        self.assertEqual("public-v5", public_instruction("manager-planning")["version"])
 
     def test_supervised_manager_import_and_developer_handoff_after_restart(self):
         envelope = self.supervised_result()

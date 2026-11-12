@@ -28,6 +28,19 @@ DevOrchestra는 코딩 에이전트의 실행 순서, 권한, 예산, 감사와 
 
 완전자동 개발은 단일 슬롯에서 계획, 구현, 독립 검토, 결정적 검증, 최종 판정을 순차 실행하는 것을 목표로 한다. 개발 세션에 테스트 앱과 도구 범위를 묶어 승인하고 범위 안에서 반복 QA한다. UI가 바뀌면 실제 렌더링과 동작을 확인하고 소유 자원 회수를 기록한다. 금융 거래, 외부 계정 변경과 운영 배포에는 각각 별도 승인이 필요하다.
 
+## 시간에 민감한 GUI·실시간 QA
+
+게임, 데스크톱 앱, 서버에서 AI가 화면을 읽고 판단하는 동안 대상 상태가 변하면 검증 목적에 맞는 시간 모델을 계획한다. 정상 속도는 실제 조작감, 반응성, 애니메이션, 프레임 성능, 네트워크 지연과 실제 시계를 검사할 때 사용한다. 대상이 제공하는 감속은 빠른 상태 전이를 관찰하는 데 쓴다. 논리적 시간이 중요한 기능은 정지·단계 실행이나 가상 시계, 결정적 이벤트를 우선 검토한다.
+
+단계 실행을 지원하는 QA 대상에서는 관련 시뮬레이션을 정지한 뒤 화면과 상태를 관찰한다. AI의 판단이 끝날 때까지 상태를 유지하고, 승인된 입력 묶음을 적용한 뒤 지정한 논리 시간 또는 틱만 진행한다. 다시 정지해 결과를 확인한다. 재현 가능한 초기 상태를 사용하고 필요하면 난수 시드를 고정한다. WPF·WinForms·서버·비동기 앱에서 화면 조작보다 직접적인 방법이 있다면 주입 가능한 시계, 결정적 스케줄러, 수동 이벤트, 모의 지연 또는 비동기 완료 제어를 선택한다.
+
+- **Unity**에서는 프로젝트가 실제 사용하는 엔진 버전의 `Time.timeScale`, `Time.deltaTime`, `Time.unscaledDeltaTime`, `FixedUpdate`와 물리 간격을 확인한다. 배율을 0으로 설정하면 `FixedUpdate`와 `WaitForSeconds` 대기가 멈추므로, 실제 코루틴의 대기 유형과 Animator의 업데이트 모드도 확인한다. QA 틱이 필요하면 별도의 진행 계약을 검증한다. [Unity Time.timeScale](https://docs.unity.com/en-us/engine/6000.0/script-reference/unityengine/time/timescale) · [Unity Time.unscaledDeltaTime](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/Time-unscaledDeltaTime.html) · [Unity AnimatorUpdateMode](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/AnimatorUpdateMode.html)
+- **Godot**에서는 `SceneTree.paused`와 노드의 `ProcessMode`, 물리 서버 상태, `Engine.time_scale`을 확인한다. `Always`나 `WhenPaused` 노드와 신호 처리, Timer·SceneTreeTimer·Tween의 정지·실시간 설정을 실제 코드와 대조한다. 시간 배율 변경과 결정적 단계 실행은 각각 필요한 증거를 확보한다. [Godot Pausing games and process mode](https://docs.godotengine.org/en/stable/tutorials/scripting/pausing_games.html) · [Godot Engine](https://docs.godotengine.org/en/stable/classes/class_engine.html) · [Godot Timer](https://docs.godotengine.org/en/stable/classes/class_timer.html) · [Godot SceneTree](https://docs.godotengine.org/en/stable/classes/class_scenetree.html) · [Godot Tween](https://docs.godotengine.org/en/stable/classes/class_tween.html)
+
+사용자 반응성, 실제 애니메이션 속도, 게임 난이도와 밸런스, FPS·프레임 시간, 물리 안정성, 실제 타이머, 비동기 경쟁 상태, 장시간 안정성과 사용자 플레이 흐름은 해당 기준에 필요할 때 정상 속도에서 별도로 확인한다. QA 보고에는 적용 시간 모델, 실제·논리 경과나 틱 수, 배율, 입력·관찰 구간, 제어 출처, 관측 결과 및 남은 정상 속도 검증 중 필요한 항목을 기록한다.
+
+시간 제어는 승인된 복제본이나 소유 시험 실행 파일에서 대상이 제공하는 제어 또는 승인된 QA 코드로 한정한다. 정상 배포 동작을 보존하고 시험 종료 시 입력·시간 설정을 복원한다. 기존 Controller의 실제 시간 한도, 중단·회수 계약과 완료 기준은 계속 적용한다. 현재 변경은 QA 작업 지침과 프롬프트에 적용되며 각 프로젝트의 일시정지나 단계 실행은 그 프로젝트에서 지원 여부와 실제 증거를 별도로 확인한다.
+
 ## 제품 완성 우선 원칙
 
 ### 실제 기존 프로젝트의 인수 기준

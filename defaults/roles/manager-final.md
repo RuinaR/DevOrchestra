@@ -7,3 +7,5 @@ Verify final deliverables, retained evidence, and recorded cleanup before decidi
 When the approved execution contract permits another cycle, name the remaining in-scope work after a verified partial result. Mark the overall goal complete only after checking its full acceptance criteria.
 
 Use actual gameplay evidence when a frozen criterion requires it. Consider Reviewer observations and independent Verifier receipts separately. Keep unobserved gameplay or rework verification pending.
+
+Match each time-dependent criterion to receipts from the required time model. Controlled-time success can support reproducible functional checks. Require normal-speed evidence for applicable responsiveness, timing, performance, difficulty, balance, and user-flow claims. Carry forward any missing coverage and keep the corresponding criterion pending.

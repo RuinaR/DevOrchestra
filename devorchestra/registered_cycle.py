@@ -420,7 +420,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "binary_sha256": RELEASE_SHA256, "code_mode_host_sha256": CODE_MODE_HOST_SHA256,
             "diagnostic": diagnostic["request_id"], "auth_home": str(home), "model": DEFAULT_MODEL,
             "shell_roles": list(SHELL_ROLES),
-            "instructions": {phase: public_instruction(phase)["sha256"] for phase in ROLES},
+            "instructions": {section: public_instruction(section)["sha256"] for section in ("global", *ROLES)},
             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles,
             "role_seconds": 120, "role_tokens": role_tokens,
             "model_calls_max": cycles * (4 + (play_policy["steps"] if play_policy else 0)) if cycles else tokens,
@@ -2212,8 +2212,8 @@ def _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tok
 
 def _approved_resume_contract(runner, events, head, args, graceful):
     scope, diff = _resume_contract(runner, events, head, *args, graceful=graceful)
-    current = {phase: public_instruction(phase)["sha256"] for phase in ROLES}
-    changed = sorted(phase for phase in ROLES if scope["instructions"][phase] != current[phase])
+    current = {section: public_instruction(section)["sha256"] for section in ("global", *ROLES)}
+    changed = sorted(section for section, checksum in current.items() if scope["instructions"].get(section) != checksum)
     if changed:
         scope = {**scope, "instructions": current,
                  "resume": {**scope["resume"], "updated_role_instructions": changed}}

@@ -492,8 +492,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             if resume:
                 checkpoint = result["resume"]
                 updated_roles = checkpoint.get("updated_role_instructions", ())
-                instruction_note = ("\n새 승인부터 최신 역할 지침을 적용합니다 · "
-                                    + ", ".join(ROLE_LABELS[role] for role in updated_roles)
+                instruction_note = ("\n새 승인부터 최신 개발 지침을 적용합니다 · "
+                                    + ", ".join("전역" if role == "global" else ROLE_LABELS[role] for role in updated_roles)
                                     if updated_roles else "")
                 instruction_note += _play_approval(result)
                 if checkpoint.get("mode") == "postprocess":
@@ -875,8 +875,8 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                                         f"마무리 토큰 {policy['signoff_tokens']:,}은 "
                                         f"{'세션 기준 잔여량 내' if policy['signoff_within_session_tokens'] else '별도 예산'}에서 사용합니다.")
                         if resume and (updated_roles := result["resume"].get("updated_role_instructions")):
-                            summary += "\n새 승인부터 최신 역할 지침을 적용합니다 · " + ", ".join(
-                                ROLE_LABELS[role] for role in updated_roles)
+                            summary += "\n새 승인부터 최신 개발 지침을 적용합니다 · " + ", ".join(
+                                "전역" if role == "global" else ROLE_LABELS[role] for role in updated_roles)
                         if result.get("visual_review") and (not resume or not result["resume"].get("review")):
                             summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                         if center.confirm(title, summary + _play_approval(result), parent=panel):

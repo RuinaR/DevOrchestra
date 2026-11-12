@@ -103,7 +103,7 @@ def _review(ledger, events, head, archive, request, expires, seconds, tokens, cy
         "goal": GOAL, "criteria": CRITERIA, "fixture_contract_sha256": digest(TASKS),
         "files": list(SOURCE_NAMES), "approved_commands": [task["command"] for task in TASKS.values()],
         "roles": list(ROLES), "model": DEFAULT_MODEL, "auth": "CHATGPT_ONLY",
-        "instructions": {role: public_instruction(role)["sha256"] for role in ROLES},
+        "instructions": {section: public_instruction(section)["sha256"] for section in ("global", *ROLES)},
         "sandbox": "MXC_REPLICA_WRITE_DEVELOPER_ONLY_GIT_READ_COMMAND_NETWORK_OFF",
         "developer_file_scope": "CHECKED_AFTER_TOOL_EXECUTION",
         "command_scope": "MXC_SHELL_WITHIN_REPLICA_FIXED_TESTS_REQUIRED",
@@ -511,6 +511,12 @@ class _FixtureSession:
         instructions = public_instruction(phase)
         if instructions["sha256"] != self.scope["instructions"][phase]:
             raise Blocked("Approved role instructions changed")
+        instruction_text = instructions["text"]
+        if "global" in self.scope["instructions"]:
+            common = public_instruction("global")
+            if common["sha256"] != self.scope["instructions"]["global"]:
+                raise Blocked("Approved global instructions changed")
+            instruction_text = f"{common['text']}\n\n{instruction_text}"
         output_schema = None
         if images and play_step is None:
             from .visual_review import write_schema
@@ -522,7 +528,7 @@ class _FixtureSession:
             check_path(output_schema)
             with output_schema.open("x", encoding="utf-8") as stream:
                 json.dump(response_schema, stream)
-        prompt = (f"{instructions['text']}\n{context} "
+        prompt = (f"{instruction_text}\n{context} "
                   "Use only the approved fixture scope. No external actions.\n" + prompt)
         self.calls += 1
         self.record("native_inspection_role_intent", cycle=cycle, phase=phase, target=target,
