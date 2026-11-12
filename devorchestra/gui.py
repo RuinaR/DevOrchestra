@@ -45,6 +45,9 @@ REGISTERED_STATES = {
     "POSTPROCESS_PENDING": "응답 저장됨 · 판정 재처리 대기", "RESPONSE_REUSED": "저장된 응답 재사용",
     "ACCEPT": "검토 수용", "RESPONSE_COMPLETE": "모델 응답 완료", "DECISION_REJECTED": "Controller 판정 불일치",
     "VERDICT_PARSED": "판정 해석 완료",
+    "PLAN_ACCEPTED": "계획 확정", "CHANGES_CONFIRMED": "파일 변경 확인",
+    "NO_FILE_CHANGE": "승인 파일 변경 없음", "REPEATED_CANDIDATE": "이전 파일 상태 반복",
+    "SKIPPED_NO_CANDIDATE": "검토할 새 변경 없어 건너뜀",
     "NOT_STARTED": "대기", "REGRESSED": "회귀", "CONTINUE": "다음 작업 진행", "REWORK": "재작업 필요",
 }
 POLL_MS = 1500
@@ -1183,7 +1186,13 @@ class CommandCenter:
                              + (f" · 명령 {count}회" if count else "")
                              + (f" · 공개 자료 검색 {searches}회" if searches else ""))
             elif kind == "native_inspection_developer_diff":
-                lines.append(f"{cycle}사이클 · 변경 파일 · " + ", ".join(row["changed"]))
+                lines.append(f"{cycle}사이클 · 파일 변경 확인 · " + ", ".join(row["changed"]))
+            elif kind == "native_inspection_plan_accepted":
+                lines.append(f"{cycle}사이클 · 계획 확정 · {row['target']}")
+            elif kind == "native_inspection_review_capture_started":
+                lines.append(f"{cycle}사이클 · Reviewer용 화면 준비 시작")
+            elif kind == "native_inspection_review_capture_result":
+                lines.append(f"{cycle}사이클 · Reviewer용 화면 준비 종료")
             elif kind == "native_inspection_project_tool_ready":
                 name = f"{row['repository']} @ {row['ref']}" if "repository" in row else row["name"]
                 lines.append(f"{cycle}사이클 · 프로젝트 도구 준비 · {name}")
@@ -1203,7 +1212,9 @@ class CommandCenter:
             elif kind == "native_inspection_replan":
                 reason = {"NO_FILE_CHANGE": "승인 파일 변경 없음", "REPEATED_CANDIDATE": "이전 파일 상태 반복",
                           "REPEATED_REVIEW": "이미 검토한 후보"}.get(row["reason"], row["reason"])
-                lines.append(f"{cycle}사이클 · {reason} · 재계획")
+                skipped = (" · Reviewer·Verifier·최종 Manager 건너뜀"
+                           if row["reason"] in {"NO_FILE_CHANGE", "REPEATED_CANDIDATE"} else "")
+                lines.append(f"{cycle}사이클 · {reason}{skipped} · 재계획")
             elif kind in {"native_inspection_role_reused", "native_inspection_decision_applied",
                           "native_inspection_decision_rejected", "native_inspection_postprocess_failed",
                           "native_inspection_role_feedback"}:
@@ -1242,7 +1253,7 @@ class CommandCenter:
         if row["kind"] == "native_inspection_decision_rejected":
             return "DECISION_REJECTED"
         if (row["kind"] == "native_inspection_role_result" and row.get("outcome") == "COMPLETED"
-                and row.get("phase") in {"reviewer", "manager-final"}):
+                and row.get("phase") != "verifier"):
             return "RESPONSE_COMPLETE"
         return row.get("verdict", row.get("manager_decision", row.get("outcome", "UNSETTLED")))
 

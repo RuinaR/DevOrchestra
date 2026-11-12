@@ -54,6 +54,8 @@ def registered_progress(events, project, *, onboarding_sequence=0):
                     usage_unknown = True
         elif kind == "native_inspection_manager_plan_reused":
             roles["manager-planning"] = {**row, "outcome": "REUSED"}
+        elif kind == "native_inspection_plan_accepted":
+            roles["manager-planning"] = {**roles.get("manager-planning", {}), **row, "outcome": "PLAN_ACCEPTED"}
         elif kind == "native_inspection_developer_skipped":
             roles["developer"] = {**row, "outcome": "SKIPPED"}
         elif kind == "native_inspection_role_reused":
@@ -69,6 +71,12 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             roles[phase] = {**roles.get(phase, {}), **row}
         elif kind == "native_inspection_developer_diff":
             changed.update(row["changed"])
+            roles["developer"] = {**roles.get("developer", {}), **row, "phase": "developer",
+                                  "outcome": "CHANGES_CONFIRMED"}
+        elif kind == "native_inspection_replan" and row["reason"] in {"NO_FILE_CHANGE", "REPEATED_CANDIDATE"}:
+            roles["developer"] = {**roles.get("developer", {}), **row, "phase": "developer", "outcome": row["reason"]}
+            for phase in ("reviewer", "verifier", "manager-final"):
+                roles.setdefault(phase, {**row, "phase": phase, "outcome": "SKIPPED_NO_CANDIDATE"})
         elif kind == "native_inspection_cycle_progress":
             criteria = row["criteria"]
             latest_progress = row
@@ -89,7 +97,8 @@ def registered_progress(events, project, *, onboarding_sequence=0):
                 "native_inspection_role_reused", "native_inspection_decision_applied",
                 "native_inspection_decision_rejected", "native_inspection_postprocess_failed",
                 "native_inspection_plan_format_failed",
-                "native_inspection_manager_plan_reused", "native_inspection_developer_skipped",
+                "native_inspection_manager_plan_reused", "native_inspection_plan_accepted", "native_inspection_developer_skipped",
+                "native_inspection_review_capture_started", "native_inspection_review_capture_result",
                 "native_inspection_manual_checkpoint", "native_inspection_progress_checkpoint",
                 "native_inspection_replan", "native_inspection_criterion_deferred",
                 "native_inspection_project_tool_ready", "native_inspection_project_tools_cleanup"}],

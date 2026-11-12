@@ -147,7 +147,8 @@ def _budget(session):
 def _candidate(session, cycle, verification):
     game = verification.get("game", {})
     if game.get("artifact_directory") and game.get("outcome") == "PASS":
-        if game["artifact_directory"] != f"godot-windows-export-{session.fields['run_id']}-cycle-{cycle}":
+        suffix = "-review" if verification.get("phase") == "review-capture" else ""
+        if game["artifact_directory"] != f"godot-windows-export-{session.fields['run_id']}-cycle-{cycle}{suffix}":
             raise Blocked("Game executable is outside the approved play attempt")
         directory = session.runner.ledger.local_directory("recovery") / game["artifact_directory"]
         return directory, "GamePilot.exe", game["executable"]["sha256"], ["--resolution", "800x540"]

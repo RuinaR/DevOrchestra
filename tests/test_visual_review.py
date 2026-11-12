@@ -163,11 +163,14 @@ class VisualReviewTests(unittest.TestCase):
         evidence = [{"id": "F1", "step": "before-input", "scenario": "C1", "source_sha256": "source"}]
         receipt = {"verdict": "NOT_VALIDATED", "phase": "verifier", "outcome": "COMPLETED",
                    "observations": [], "user_test_required": ["C1"], "source_sha256": "source"}
+        order = []
         ledger = SimpleNamespace(state_boundary=Path.cwd())
         session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True,
                                          "project_id": "fixture", "requirements": []},
                                   check=Mock(), check_image=Mock(), record=Mock(), phases=[],
-                                  verify_registered=Mock(return_value=receipt), call=Mock(return_value=self.report()),
+                                  capture_review=Mock(side_effect=lambda _: order.append("capture") or receipt),
+                                  verify_registered=Mock(side_effect=lambda _: order.append("verifier") or receipt),
+                                  call=Mock(side_effect=lambda *_args, **_kwargs: order.append("reviewer") or self.report()),
                                   fields={"run_id": "a" * 32}, source=lambda: "source",
                                   runner=SimpleNamespace(ledger=ledger), signoff_state={}, logs=lambda _: Path.cwd())
         image = Path.cwd() / "F1.png"
@@ -192,6 +195,7 @@ class VisualReviewTests(unittest.TestCase):
         self.assertEqual("CONTROLLER_SCENARIO",
                          visual_review.observation_provenance([{"step": "after-input"}])["input_source"])
         session.verify_registered.assert_called_once_with(1)
+        self.assertEqual(order, ["capture", "reviewer", "verifier"])
         recheck.assert_called_once_with(ledger, evidence)
 
     def test_missing_preview_still_runs_code_review(self):
@@ -201,7 +205,8 @@ class VisualReviewTests(unittest.TestCase):
                    "visual_preview": {"reason": "NO_RUNNABLE_GUI"}, "source_sha256": "source"}
         session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True},
                                   fields={"run_id": "a" * 32}, source=lambda: "source",
-                                  runner=SimpleNamespace(ledger=None), verify_registered=Mock(return_value=receipt),
+                                  runner=SimpleNamespace(ledger=None), capture_review=Mock(return_value=receipt),
+                                  verify_registered=Mock(return_value=receipt),
                                   record=Mock(), phases=[], signoff_state={}, call=Mock(return_value="ACCEPT"))
         _, review, _, _, comparison = registered_cycle._review_and_verify(
             session, 1, "C1", "bounded diff", {"C1": "NOT_STARTED"})
@@ -213,6 +218,20 @@ class VisualReviewTests(unittest.TestCase):
                          (review_record["observation_source"], review_record["autonomous_play"]))
         self.assertEqual(comparison["criteria"], {"C1": "USER_TEST_REQUIRED"})
         session.verify_registered.assert_called_once_with(1)
+
+    def test_invalid_reviewer_response_retains_capture_without_running_verifier(self):
+        criteria = {"C1": {"text": "Show complete labels", "checks": []}}
+        capture = {"phase": "review-capture", "observations": [], "source_sha256": "source",
+                   "outcome": "COMPLETED", "owned_tree": "DRAINED"}
+        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True},
+                                  fields={"run_id": "a" * 32}, source=lambda: "source",
+                                  runner=SimpleNamespace(ledger=None), capture_review=Mock(return_value=capture),
+                                  verify_registered=Mock(), record=Mock(), phases=[], signoff_state={},
+                                  call=Mock(return_value="invalid"))
+        with self.assertRaises(registered_cycle.VerdictError):
+            registered_cycle._review_and_verify(session, 1, "C1", "bounded diff", {"C1": "NOT_STARTED"})
+        session.verify_registered.assert_not_called()
+        self.assertEqual({"receipt": capture, "frames": []}, session.signoff_state["pending_visual"])
 
     def test_saved_play_evidence_is_reused_and_actions_reach_rework(self):
         criteria = {"C1": {"text": "Show complete labels", "checks": []}}
@@ -227,7 +246,8 @@ class VisualReviewTests(unittest.TestCase):
                                          "adaptive_play": adaptive_play.approval(),
                                          "project_id": "fixture", "requirements": []},
                                   check=Mock(), check_image=Mock(), record=Mock(), phases=[],
-                                  verify_registered=Mock(), call=Mock(return_value=dumps({
+                                  capture_review=Mock(), verify_registered=Mock(return_value=receipt),
+                                  call=Mock(return_value=dumps({
                                       **loads(self.report().replace('"F1"', '"P0"')),
                                       "observations": [{"frame": frame["id"], "visible": "Observed"} for frame in evidence]})),
                                   fields={"run_id": "a" * 32}, source=lambda: "source",
@@ -241,7 +261,8 @@ class VisualReviewTests(unittest.TestCase):
             decision, review, _, _, comparison = registered_cycle._review_and_verify(
                 session, 1, "C1", "bounded diff", {"C1": "NOT_STARTED"})
         replay.assert_not_called()
-        session.verify_registered.assert_not_called()
+        session.capture_review.assert_not_called()
+        session.verify_registered.assert_called_once_with(1)
         self.assertEqual("REWORK", review)
         self.assertIn('"reproduce_actions"', decision)
         self.assertEqual(1, comparison["adaptive_play_actions"])

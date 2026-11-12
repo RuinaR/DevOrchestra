@@ -263,6 +263,23 @@ class RegisteredTrustTests(unittest.TestCase):
         self.assertEqual(session.record.call_args.args[0], "native_inspection_progress_checkpoint")
         self.assertEqual(session.record.call_args.kwargs["source_sha256"], "verified-snapshot")
 
+    def test_ui_distinguishes_developer_response_and_missing_candidate(self):
+        from devorchestra.gui import CommandCenter
+        from devorchestra.projection import registered_progress
+
+        common = {"run_id": "fixture-run", "project_id": "fixture", "probe_kind": registered_cycle.KIND}
+        rows = [{**common, "kind": "native_inspection_intent", "scope": {}, "sequence": 1},
+                {**common, "kind": "native_inspection_role_result", "cycle": 2, "phase": "developer",
+                 "outcome": "COMPLETED", "provider_usage": {"input_tokens": 3, "output_tokens": 2}}]
+        roles = registered_progress(rows, "fixture")["roles"]
+        self.assertEqual("RESPONSE_COMPLETE", CommandCenter.registered_role_state(roles["developer"], None, False))
+        rows.append({**common, "kind": "native_inspection_replan", "cycle": 2, "reason": "NO_FILE_CHANGE"})
+        view = registered_progress(rows, "fixture")
+        self.assertEqual("NO_FILE_CHANGE", view["roles"]["developer"]["outcome"])
+        for phase in ("reviewer", "verifier", "manager-final"):
+            self.assertEqual("SKIPPED_NO_CANDIDATE", view["roles"][phase]["outcome"])
+        self.assertEqual(5, view["tokens"])
+
     def test_explicit_verdicts_and_bounded_multiline_reason(self):
         parse = registered_cycle._parse_verdict
         options = registered_cycle.REVIEW_VERDICTS

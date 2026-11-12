@@ -519,7 +519,7 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
                          else "SPACE_MESSAGES_SENT_RESPONSE_NOT_VALIDATED"))
 
 
-def verify_development(session, cycle):
+def verify_development(session, cycle, *, capture_only=False):
     """Build the reviewed candidate under the session fence and preserve independent EXE evidence."""
     scope = session.scope
     tool = scope["verifier"]
@@ -529,8 +529,10 @@ def verify_development(session, cycle):
     session.check()
     session.check_image()
     source_hash = session.source()
-    session.record("native_inspection_role_intent", cycle=cycle, phase="verifier", source_sha256=source_hash)
-    lab = session.logs(f"{cycle}-godot-verifier")
+    if not capture_only:
+        session.record("native_inspection_role_intent", cycle=cycle, phase="verifier", source_sha256=source_hash)
+    stage = "review" if capture_only else "verifier"
+    lab = session.logs(f"{cycle}-godot-{stage}")
     work, data, home = (lab / name for name in ("work", "data", "config"))
     _copy_source(session.work, work, session.image)
     data.mkdir()
@@ -566,9 +568,10 @@ def verify_development(session, cycle):
         return response["stdout"], stderr.decode("utf-8")
 
     try:
-        _export_release(ledger, f"{session.fields['run_id']}-cycle-{cycle}", session.work,
+        suffix = "-review" if capture_only else ""
+        _export_release(ledger, f"{session.fields['run_id']}-cycle-{cycle}{suffix}", session.work,
                         data, lab, observe, session.check, workers, result, generic=generic,
-                        visual=scope.get("visual_review", False))
+                        visual=capture_only or scope.get("visual_review", False))
     except Blocked as error:
         if not session.owned_verified or str(error) == "SIGNOFF_PENDING":
             raise
@@ -582,6 +585,9 @@ def verify_development(session, cycle):
                 session.owned_verified = False
                 raise Blocked("Game capture thread did not settle")
     session.check_image()
+    if capture_only:
+        return {"phase": "review-capture", "outcome": "COMPLETED", "owned_tree": "DRAINED",
+                "source_sha256": source_hash, "observations": [], "game": result}
     if generic:
         receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
                    "verdict": result["outcome"], "source_sha256": source_hash, "observations": [],

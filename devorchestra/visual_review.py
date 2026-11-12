@@ -67,13 +67,14 @@ def safe_unverified(items):
 
 def frames(ledger, receipt, run_id, cycle, source, *, allow_empty=False):
     if (not re.fullmatch(r"[a-f0-9]{32}", run_id) or receipt.get("source_sha256") != source
-            or receipt.get("phase") != "verifier" or receipt.get("outcome") != "COMPLETED"
+            or receipt.get("phase") not in {"verifier", "review-capture"} or receipt.get("outcome") != "COMPLETED"
             or receipt.get("owned_tree") != "DRAINED"):
         raise Blocked("Visual evidence does not match the owned candidate")
     captures = []
+    suffix = "-review" if receipt["phase"] == "review-capture" else ""
     game = receipt.get("game")
     if game and game.get("artifact_directory"):
-        expected = f"godot-windows-export-{run_id}-cycle-{cycle}"
+        expected = f"godot-windows-export-{run_id}-cycle-{cycle}{suffix}"
         captures.append((expected, game["artifact_directory"], game["window_size"], game["window_image"],
                          game["executable"]["sha256"], "Windows export", "GamePilot.exe"))
     for row in receipt.get("observations", ()):
@@ -81,7 +82,7 @@ def frames(ledger, receipt, run_id, cycle, source, *, allow_empty=False):
             if len(captures) >= MAX_FRAMES // 2:
                 break
             gui = row["gui"]
-            captures.append((f"gui-{run_id}-{cycle}-{row['title']}", gui["artifact_directory"],
+            captures.append((f"gui-{run_id}-{cycle}-{row['title']}{suffix}", gui["artifact_directory"],
                              gui, gui["image"], row.get("executable_sha256"), row["title"], None))
     preview = receipt.get("visual_preview")
     if preview and preview.get("artifact_directory"):

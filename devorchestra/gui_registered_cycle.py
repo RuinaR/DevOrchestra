@@ -397,7 +397,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         lines = []
         for row in roles:
             usage = row.get("provider_usage")
-            text = f"{row['cycle']} · {row['phase']} · {row.get('verdict', row.get('outcome', '실행 중'))}"
+            result = ("모델 응답 완료" if row.get("outcome") == "COMPLETED" and row["phase"] != "verifier"
+                      else row.get("verdict", row.get("outcome", "실행 중")))
+            text = f"{row['cycle']} · {row['phase']} · {result}"
             if isinstance(usage, dict):
                 text += f" · 입력 {usage['input_tokens']} / 출력 {usage['output_tokens']} / 캐시 {usage.get('cached_input_tokens', '?')}"
             if row.get("command_events"):
