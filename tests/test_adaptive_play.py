@@ -57,6 +57,15 @@ class PlayTests(unittest.TestCase):
         state["adaptive_play_actions"] = 3
         self.assertEqual("COMPLETED", registered_cycle._expected_final(scope, "C1", state, "ACCEPT"))
 
+    def test_independent_play_chain_rejects_stale_evidence(self):
+        frames = [{"id": f"P{i}", "source_sha256": "source", "executable_sha256": "exe", "sha256": str(i)}
+                  for i in range(2)]
+        action = {"step": 1, "before": "0", "after": "1", "result": "SCREEN_CHANGED", "action": {"action": "keys"}}
+        self.assertEqual(1, adaptive_play.verify_action_chain(frames, [action], "source"))
+        for replacement in ({"after": "0"}, {"step": 2}, {"result": "SCREEN_UNCHANGED"}):
+            with self.assertRaises(Blocked):
+                adaptive_play.verify_action_chain(frames, [{**action, **replacement}], "source")
+
     @unittest.skipUnless(os.environ.get("DEVORCHESTRA_GUI_E2E") == "1", "Owned Windows GUI opt-in")
     def test_three_actual_owned_window_transitions_with_offline_reviewer(self):
         from devorchestra.mxc_host_probe import _observe

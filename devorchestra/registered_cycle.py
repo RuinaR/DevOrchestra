@@ -275,7 +275,9 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
                        and (row.get("integrity") == "PASS" or row.get("game", {}).get("outcome") == "PASS")
                        for row in rows))):
         raise Blocked("복제본이 온보딩 상태와 다릅니다. 확인된 개발 결과인지 기록·복구에서 확인하세요.")
+    rework = _bounded_rework(prior["criteria"], saved_progress.get("rework")) if progress_checkpoint else None
     return {"run_id": end["run_id"], "receipt_sha256": digest(end), "changed": end["changed"],
+            **({"rework": rework} if rework else {}),
             **({"accepted_without_functional_check": accepted} if accepted else {})}
 
 
@@ -1068,10 +1070,15 @@ def _verify_signoff(session, count, key, status, *, checked=None):
                            parent_run_id=scope["resume"]["parent_run_id"], **verification)
     comparison = cycle_progress.compare(criteria, status, checked)
     if scope.get("adaptive_play"):
-        played = session.signoff_state.get("play_report", {}).get("actions", ())
-        comparison["adaptive_play_actions"] = sum(
-            row["action"]["action"] in {"keys", "click", "move"} and row["result"] == "SCREEN_CHANGED"
-            for row in played)
+        play_report = session.signoff_state.get("play_report", {})
+        played = play_report.get("actions", ())
+        count_verified = 0
+        if attachment and play_report.get("has_frames"):
+            count_verified = adaptive_play.verify_action_chain(attachment["frames"], played, session.source())
+            session.record("native_inspection_play_integrity", cycle=count, source_sha256=session.source(),
+                           frames_sha256=digest(attachment["frames"]), actions_sha256=digest(played),
+                           observed_input_transitions=count_verified)
+        comparison["adaptive_play_actions"] = count_verified
     if attachment:
         comparison["visual_review_sha256"] = attachment["response_sha256"]
     for item in checked.get("user_test_required", []):
@@ -1278,14 +1285,23 @@ def _cycle_stagnation(scope, key, review, checked, comparison, accepted, changed
     return 0 if progress and not comparison["regressed"] and review == "ACCEPT" else stagnant + 1
 
 
-def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS"):
+def _bounded_rework(criteria, feedback):
+    if (feedback and feedback.get("next") == "REWORK" and feedback.get("target") in criteria
+            and isinstance(feedback.get("review"), str) and feedback["review"]):
+        return {"next": "REWORK", "target": feedback["target"], "review": feedback["review"][:8000]}
+    return None
+
+
+def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS", feedback=None):
     if not session.owned_verified or not session.usage_complete:
         raise Blocked("NO_PROGRESS")
     session.check()
     session.check_image()
     session.cycles_checked = cycle
+    rework = _bounded_rework(session.scope["criteria"], feedback)
     session.record("native_inspection_progress_checkpoint", cycle=cycle, source_sha256=session.source(),
-                   changed=session.changes, accepted_without_functional_check=sorted(accepted))
+                   changed=session.changes, accepted_without_functional_check=sorted(accepted),
+                   **({"rework": rework} if rework else {}))
     return outcome
 
 
@@ -1321,6 +1337,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         session.progress = status
         feedback = {"existing_files": prior_candidate["changed"], "reviewed_without_functional_check": sorted(accepted),
                     "next": "CONTINUE"}
+    if rework := _bounded_rework(criteria, prior_candidate.get("rework")):
+        feedback = rework
     if continuation:
         count, stagnant = continuation["cycle"], continuation["stagnant"]
         status, feedback = continuation["criteria_status"], continuation["feedback"]
@@ -1362,11 +1380,11 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 session.admit_graceful("manager-planning")
                 if session.calls >= scope["model_calls_max"]:
                     session.request_stop("MODEL_CALL_LIMIT", "manager-planning")
-                    return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP")
+                    return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP", feedback=feedback)
             except Blocked as error:
                 if str(error) != "GRACEFUL_STOP":
                     raise
-                return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP")
+                return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP", feedback=feedback)
         catalog = Catalog(session.runner.ledger).read()
         documents = read_frozen_requirements(catalog, project, scope["requirements"],
                                             session.runner.ledger.state_boundary)
@@ -1520,11 +1538,12 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             return final
         if plan.get("mode") == "verify" and final != "REWORK":
             return _save_progress_stop(session, count, accepted, outcome=final)
+        feedback = {"target": key, "review": decision, "verifier": checked["observations"],
+                    "change_hash": digest(diff), "next": final}
         if "graceful_stop" in scope and session.stop_reason:
-            feedback = {"target": key, "change_hash": digest(diff), "next": final}
             if (scope["cycles"] is None or count < scope["cycles"]) and save_if_requested():
                 return MANUAL_CHECKPOINT
-            return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP")
+            return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP", feedback=feedback)
         repeated_failure = False
         if rework:
             failure = cycle_progress.failure_fingerprint(
@@ -1534,14 +1553,12 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             repeated_failure = failure in failures
             failures.add(failure)
         if stagnant >= 2:
-            return _save_progress_stop(session, count, accepted)
-        feedback = {"target": key, "review": decision, "verifier": checked["observations"],
-                    "change_hash": digest(diff), "next": final}
+            return _save_progress_stop(session, count, accepted, feedback=feedback)
         if repeated_failure:
             feedback["instruction"] = "This finding repeats. Choose a different approach rather than repeating the previous plan."
         if waiting_for_preview:
             feedback["visual_review"] = checked.get("visual_preview", {}).get("reason", "NO_OWNED_GUI_CAPTURE")
-    return _save_progress_stop(session, count, accepted, outcome="CYCLE_LIMIT")
+    return _save_progress_stop(session, count, accepted, outcome="CYCLE_LIMIT", feedback=feedback)
 
 
 def _resume_contract(runner, events, head, project, expires, seconds, tokens, renew=False, *,
@@ -1726,6 +1743,8 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
         resume["visual"] = checkpoint["visual"]
     if checkpoint.get("pending_visual"):
         resume["pending_visual"] = checkpoint["pending_visual"]
+    if checkpoint.get("play_report"):
+        resume["play_report"] = checkpoint["play_report"]
     if checkpoint.get("documentation"):
         resume["documentation"] = True
     policy = game_pilot.graceful_policy(followup=True)
@@ -2078,7 +2097,7 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
                 or tokens < sum(prior["role_tokens"][phase] for phase in pending)):
             raise Blocked("판정이 유효하지 않습니다. 같은 후보에서 이 검토 역할을 다시 실행하려면 새 예산이 필요합니다.")
     resume = {key: checkpoint[key] for key in ("cycle", "criterion", "criteria_status", "changed", "continuation",
-                                               "review", "review_feedback", "comparison", "verification", "documentation",
+                                               "review", "review_feedback", "play_report", "comparison", "verification", "documentation",
                                                "visual", "pending_visual")
               if key in checkpoint}
     resume.update(mode="postprocess", parent_run_id=start["run_id"], saved_response=ref,
@@ -2255,6 +2274,8 @@ def _resume_remaining(session, diff):
         session.signoff_state["continuation"] = resume["continuation"]
     if resume.get("review_feedback"):
         session.signoff_state["review_feedback"] = resume["review_feedback"]
+    if resume.get("play_report"):
+        session.signoff_state["play_report"] = resume["play_report"]
     if resume.get("visual"):
         attachment = session.signoff_state["visual"] = resume["visual"]
         if any(frame["source_sha256"] != session.source() for frame in attachment["frames"]):
@@ -2291,22 +2312,22 @@ def _resume_remaining(session, diff):
                               documentation=bool(resume.get("documentation")))
     expected = _expected_final(session.scope, key, comparison, review)
     final = _decide(session, count, key, review, comparison, expected)
+    feedback = {"target": key, "next": final, "change_hash": digest(diff),
+                "review": session.signoff_state.get("review_feedback", review),
+                "verifier": checked.get("observations", [])}
     if postprocess and final in {"CONTINUE", "REWORK"} and not session.stop_reason:
-        feedback = {"target": key, "next": final, "change_hash": digest(diff),
-                    "review": session.signoff_state.get("review_feedback", review),
-                    "verifier": checked.get("observations", [])}
         if stagnant >= 2:
-            return _save_progress_stop(session, count, accepted)
+            return _save_progress_stop(session, count, accepted, feedback=feedback)
         session.signoff_state = {}
         return _cycles(session, continuation={**saved, "cycle": count, "stagnant": stagnant,
                                                "criteria_status": comparison["criteria"], "changed": session.changes,
                                                "accepted_without_functional_check": sorted(accepted),
                                                "feedback": feedback})
     if postprocess and final in {"CONTINUE", "REWORK"} and session.stop_reason:
-        return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP")
+        return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP", feedback=feedback)
     if final in {"CONTINUE", "REWORK"}:
         outcome = "GRACEFUL_STOP" if final == "CONTINUE" and session.stop_reason else final
-        return _save_progress_stop(session, count, accepted, outcome=outcome)
+        return _save_progress_stop(session, count, accepted, outcome=outcome, feedback=feedback)
     return final
 
 

@@ -29,6 +29,22 @@ def approval():
             "max_keys": MAX_KEYS, "max_hold_ms": MAX_HOLD_MS}
 
 
+def verify_action_chain(frames, actions, source):
+    """Check the ordered Controller receipts independently of the model's visual verdict."""
+    if (not 1 <= len(frames) <= STEPS + 1 or len(frames) != len(actions) + 1
+            or len({frame["executable_sha256"] for frame in frames}) != 1
+            or any(frame["source_sha256"] != source or frame["id"] != f"P{index}"
+                   for index, frame in enumerate(frames))):
+        raise Blocked("Adaptive play frames do not match the verified candidate")
+    for index, row in enumerate(actions, 1):
+        before, after = frames[index - 1]["sha256"], frames[index]["sha256"]
+        if (row["step"], row["before"], row["after"], row["result"]) != (
+                index, before, after, "SCREEN_CHANGED" if before != after else "SCREEN_UNCHANGED"):
+            raise Blocked("Adaptive play action does not match its before and after frames")
+    return sum(row["action"]["action"] in {"keys", "click", "move"} and row["result"] == "SCREEN_CHANGED"
+               for row in actions)
+
+
 def schema():
     fields = {"action": {"type": "string", "enum": list(ACTIONS)},
               "keys": {"type": "array", "items": {"type": "string", "enum": list(KEYS)}},

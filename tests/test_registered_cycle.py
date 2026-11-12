@@ -21,6 +21,16 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_progress_stop_preserves_rework_without_granting_new_scope(self):
+        fixture = SimpleNamespace(scope={"criteria": {"C1": {}}}, owned_verified=True, usage_complete=True,
+                                  check=Mock(), check_image=Mock(), source=lambda: "source",
+                                  changes=["Fixture.cs"], record=Mock())
+        feedback = {"next": "REWORK", "target": "C1", "review": "V1: clipped label", "scope": "ignored"}
+        result = registered_cycle._save_progress_stop(fixture, 2, set(), outcome="GRACEFUL_STOP", feedback=feedback)
+        self.assertEqual("GRACEFUL_STOP", result)
+        self.assertEqual({"next": "REWORK", "target": "C1", "review": "V1: clipped label"},
+                         fixture.record.call_args.kwargs["rework"])
+
     def test_final_schema_only_offers_evidence_compatible_verdicts(self):
         session = Mock()
         session.scope = {"verifier": {}, "graceful_stop": {}}

@@ -208,15 +208,19 @@ class VisualReviewTests(unittest.TestCase):
 
     def test_saved_play_evidence_is_reused_and_actions_reach_rework(self):
         criteria = {"C1": {"text": "Show complete labels", "checks": []}}
-        evidence = [{"id": "F1", "step": "play-observation", "scenario": "C1", "source_sha256": "source"}]
+        evidence = [{"id": f"P{index}", "step": "play-observation", "scenario": "C1", "source_sha256": "source",
+                     "executable_sha256": "exe", "sha256": f"hash-{index}"} for index in range(2)]
         receipt = {"verdict": "NOT_VALIDATED", "phase": "verifier", "outcome": "COMPLETED",
                    "observations": [], "user_test_required": ["C1"], "source_sha256": "source"}
-        actions = [{"step": 1, "action": {"action": "click", "x": 10, "y": 12}, "result": "SCREEN_CHANGED"}]
+        actions = [{"step": 1, "action": {"action": "click", "x": 10, "y": 12}, "result": "SCREEN_CHANGED",
+                    "before": "hash-0", "after": "hash-1"}]
         ledger = SimpleNamespace(state_boundary=Path.cwd())
         session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True, "adaptive_play": True,
                                          "project_id": "fixture", "requirements": []},
                                   check=Mock(), check_image=Mock(), record=Mock(), phases=[],
-                                  verify_registered=Mock(), call=Mock(return_value=self.report()),
+                                  verify_registered=Mock(), call=Mock(return_value=dumps({
+                                      **loads(self.report().replace('"F1"', '"P0"')),
+                                      "observations": [{"frame": frame["id"], "visible": "Observed"} for frame in evidence]})),
                                   fields={"run_id": "a" * 32}, source=lambda: "source",
                                   runner=SimpleNamespace(ledger=ledger), logs=lambda _: Path.cwd(),
                                   signoff_state={"pending_visual": {"receipt": receipt, "frames": evidence,
