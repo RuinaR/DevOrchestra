@@ -40,6 +40,7 @@ REGISTERED_STATES = {
     "STARTING": "실행 준비 중", "STOPPING": "중단 요청됨", "RECOVERY_REQUIRED": "복구 필요",
     "TIME_LIMIT": "시간 기준 도달", "TOKEN_LIMIT": "토큰 기준 도달", "CYCLE_LIMIT": "사이클 상한 도달",
     "NO_PROGRESS": "진척 없음", "NOT_VERIFIED": "검증 미확인", "VERIFIED": "검증 완료",
+    "NEEDS_INPUT": "필요한 자료 또는 권한 대기",
     "CHECKPOINT_SAVED": "체크포인트 저장됨",
     "POSTPROCESS_PENDING": "응답 저장됨 · 판정 재처리 대기", "RESPONSE_REUSED": "저장된 응답 재사용",
     "ACCEPT": "검토 수용", "RESPONSE_COMPLETE": "모델 응답 완료", "DECISION_REJECTED": "Controller 판정 불일치",
@@ -1066,8 +1067,12 @@ class CommandCenter:
             detail.append(f"종료 예약 · {REGISTERED_STATES.get(stop, stop)}")
         if reason:
             hint = {"Role did not return a valid verdict": "모델 응답의 판정을 읽지 못했습니다. 이어서 개발에서 보존된 응답을 확인하세요.",
-                    "NO_PROGRESS": "추가 진척 근거를 확인하지 못했습니다. 기획서만 승인했다면 자동 개발 설정에서 구현 파일 범위를 검토하세요."}
+                    "NO_PROGRESS": "현재 승인 범위에서 더 진행할 기준을 찾지 못했습니다. 보류 사유를 확인하세요.",
+                    "NEEDS_INPUT": "현재 진행할 수 있는 기준이 없습니다. 아래에 표시된 자료나 권한을 검토하세요."}
             detail.append(hint.get(reason, str(reason)[:300]))
+        if deferred := (progress or {}).get("deferred"):
+            detail.append(f"보류 기준 {len(deferred)}개 · " + " · ".join(
+                f"{key} {item['reason'][:160]}" for key, item in list(deferred.items())[:3]))
         if changed := (progress or {}).get("changed"):
             detail.append(f"변경 파일 {len(changed)}개 · {', '.join(changed[:5])[:250]}")
         if reviewed := (progress or {}).get("latest_progress", {}).get("newly_reviewed_without_functional_check"):
@@ -1375,7 +1380,8 @@ class CommandCenter:
                 or end.get("staging_cleanup", {}).get("status") != "REMOVED"):
             return False
         if progress["checkpoint_kind"] == "native_inspection_progress_checkpoint":
-            return end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK"}
+            return end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK",
+                                          "NEEDS_INPUT", "USER_TEST_REQUIRED"}
         if end.get("outcome") == "USER_TEST_REQUIRED":
             return progress["scope"]["verifier"].get("mode") in {"replica-integrity", "godot-owned-gui"}
         latest = progress.get("latest_progress", {})

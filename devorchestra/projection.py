@@ -20,7 +20,7 @@ REGISTERED_PHASES = ("manager-planning", "developer", "reviewer", "verifier", "m
 
 
 def registered_progress(events, project, *, onboarding_sequence=0):
-    from .registered_cycle import KIND
+    from .registered_cycle import KIND, prerequisite_scope_hash
 
     start = next((row for row in reversed(events) if row["kind"] == "native_inspection_intent"
                   and row.get("probe_kind") == KIND and row.get("project_id") == project), None)
@@ -34,6 +34,10 @@ def registered_progress(events, project, *, onboarding_sequence=0):
     cycle = scope.get("resume", {}).get("cycle", 0)
     roles, changed = {}, set()
     criteria = scope.get("resume", {}).get("criteria_status", {})
+    prior_candidate = scope.get("prior_replica_candidate", {})
+    deferred = (dict(prior_candidate.get("deferred_criteria", {}))
+                if prior_candidate.get("prerequisite_scope_sha256") == prerequisite_scope_hash(scope) else {})
+    deferred.update(scope.get("resume", {}).get("deferred_criteria", {}))
     tokens, usage_unknown = 0, False
     for row in rows:
         kind = row["kind"]
@@ -68,13 +72,17 @@ def registered_progress(events, project, *, onboarding_sequence=0):
         elif kind == "native_inspection_cycle_progress":
             criteria = row["criteria"]
             latest_progress = row
+        elif kind == "native_inspection_criterion_deferred":
+            deferred[row["target"]] = {"kind": row["classification"], "reason": row["reason"]}
+        elif kind == "native_inspection_progress_checkpoint":
+            deferred = row.get("deferred_criteria", {})
         elif kind == "native_inspection_stop_requested":
             stop = row["reason"]
         elif kind == "native_inspection_result":
             end = row
     return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
             "end": end, "checkpoint_kind": rows[-2]["kind"] if end and len(rows) > 1 else None,
-            "cycle": cycle, "roles": roles, "stop": stop, "latest_progress": latest_progress,
+            "cycle": cycle, "roles": roles, "stop": stop, "latest_progress": latest_progress, "deferred": deferred,
             "history": [row for row in rows if row["kind"] in {
                 "native_inspection_role_intent", "native_inspection_role_result", "native_inspection_developer_diff",
                 "native_inspection_review_decision", "native_inspection_visual_review", "native_inspection_role_feedback",
@@ -83,7 +91,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
                 "native_inspection_plan_format_failed",
                 "native_inspection_manager_plan_reused", "native_inspection_developer_skipped",
                 "native_inspection_manual_checkpoint", "native_inspection_progress_checkpoint",
-                "native_inspection_replan"}],
+                "native_inspection_replan", "native_inspection_criterion_deferred"}],
             "changed": end.get("changed", []) if end else sorted(changed),
             "criteria": end.get("criteria_status", {}) if end else criteria,
             "tokens": end.get("known_reported_tokens", tokens) if end else tokens,

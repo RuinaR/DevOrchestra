@@ -157,6 +157,54 @@ class RegisteredTrustTests(unittest.TestCase):
         self.assertEqual([item.args[2] for item in session.call.call_args_list if item.args[1] == "developer"],
                          [first, first, second])
 
+    def test_rejected_changed_drafts_do_not_pin_the_next_criterion(self):
+        scope = {"project_id": "fixture", "criteria": {key: {"text": key, "checks": []} for key in ("C1", "C2")},
+                 "goal": "Plan and implement", "files": ["docs/DESIGN.md", "src/main.py"], "cycles": 3,
+                 "requirements": [], "verifier": {"mode": registered_cycle.BASELINE_VERIFIER}}
+        session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), record=Mock(),
+                                  source=lambda: digest(session.image), changes=["docs/DESIGN.md"],
+                                  check_image=Mock(), owned_verified=True, usage_complete=True)
+
+        def call(number, phase, target, prompt, **_options):
+            if phase == "manager-planning":
+                return json.dumps({"criterion": "C2" if number == 3 else "C1", "plan": "Bounded work"})
+            session.image = {"files": {"docs/DESIGN.md": {"revision": number}}}
+            session.last_changed = ["docs/DESIGN.md"]
+            return "diff"
+
+        def verify(_, number, key, diff, status):
+            verdict = "REWORK" if key == "C1" else "ACCEPT"
+            return verdict, verdict, "Missing approved comparison material", {"observations": []}, {
+                "criteria": {"C1": "BLOCKED", "C2": "VERIFIED" if key == "C2" else "NOT_STARTED"},
+                "newly_verified": ["C2"] if key == "C2" else [], "regressed": []}
+
+        session.call = Mock(side_effect=call)
+        with (patch.object(registered_cycle, "Catalog"),
+              patch.object(registered_cycle, "read_frozen_requirements", return_value=[]),
+              patch.object(registered_cycle, "_review_and_verify", side_effect=verify),
+              patch.object(registered_cycle, "_decide", side_effect=lambda *args: args[-1])):
+            self.assertEqual("USER_TEST_REQUIRED", registered_cycle._cycles(session))
+        self.assertEqual(["C1", "C1", "C2"], [item.args[2] for item in session.call.call_args_list
+                                               if item.args[1] == "developer"])
+        self.assertNotIn("Prior Reviewer findings", session.call.call_args_list[-1].args[3])
+        self.assertEqual("C1", next(item.kwargs["target"] for item in session.record.call_args_list
+                                   if item.args[0] == "native_inspection_criterion_deferred"))
+
+    def test_missing_prerequisite_saves_checkpoint_without_dispatching_developer(self):
+        scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Compare sources", "checks": []}},
+                 "goal": "Plan", "files": ["docs/DESIGN.md"], "cycles": 1,
+                 "requirements": [], "verifier": {}}
+        session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), record=Mock(),
+                                  source=lambda: "source", changes=[], check_image=Mock(), owned_verified=True,
+                                  usage_complete=True, call=Mock(return_value=json.dumps({
+                                      "criterion": "C1", "mode": "needs-input", "plan": "Supply comparison notes"})))
+        with (patch.object(registered_cycle, "Catalog"),
+              patch.object(registered_cycle, "read_frozen_requirements", return_value=[])):
+            self.assertEqual(registered_cycle.NEEDS_INPUT, registered_cycle._cycles(session))
+        self.assertEqual(["manager-planning"], [item.args[1] for item in session.call.call_args_list])
+        self.assertEqual({"C1": {"kind": "PREREQUISITE", "reason": "Supply comparison notes"}},
+                         session.record.call_args.kwargs["deferred_criteria"])
+
     def test_planned_documentation_counts_without_satisfying_red_functional_check(self):
         key = "C1"
         scope = {"project_id": "fixture", "criteria": {key: {"text": "Implement a feature", "checks": [{"title": key}]}},

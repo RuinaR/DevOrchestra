@@ -51,6 +51,7 @@ REGISTERED_ROLE_SECONDS = {"manager-planning": 3600, "developer": 7200,
 MAX_SIGNOFF_TOKENS = REGISTERED_ROLE_TOKEN_CAPS["reviewer"] + REGISTERED_ROLE_TOKEN_CAPS["manager-final"]
 MANUAL_CHECKPOINT = "CHECKPOINT_SAVED"
 POSTPROCESS_PENDING = "POSTPROCESS_PENDING"
+NEEDS_INPUT = "NEEDS_INPUT"
 LEGACY_VERDICT_ERROR = "Role did not return a valid verdict"
 LEGACY_PLAN_ERROR = "Manager plan exceeds the approved criteria"
 REVIEW_VERDICTS = {"ACCEPT", "REWORK"}
@@ -221,6 +222,10 @@ def _expected_observation(check):
     return digest(values)
 
 
+def prerequisite_scope_hash(scope):
+    return digest([scope.get(key) for key in ("files", "requirements", "verifier", "network", "install")])
+
+
 def _settled_integrity_candidate(events, project, replica, onboarding, image):
     rows = [row for row in events if row.get("project_id") == project and row.get("probe_kind") == KIND]
     start = next((row for row in reversed(rows) if row["kind"] == "native_inspection_intent"), {})
@@ -231,7 +236,8 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
     accepted = []
     saved_progress = rows[-2] if len(rows) >= 2 else {}
     progress_checkpoint = (
-        end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK"}
+        end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK", NEEDS_INPUT,
+                               "USER_TEST_REQUIRED"}
         and saved_progress.get("kind") == "native_inspection_progress_checkpoint"
         and saved_progress.get("run_id") == end.get("run_id") and saved_progress.get("source_sha256") == image_hash
         and saved_progress.get("changed") == end.get("changed") and end.get("usage_complete") is True
@@ -276,8 +282,16 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image):
                        for row in rows))):
         raise Blocked("복제본이 온보딩 상태와 다릅니다. 확인된 개발 결과인지 기록·복구에서 확인하세요.")
     rework = _bounded_rework(prior["criteria"], saved_progress.get("rework")) if progress_checkpoint else None
+    deferred = {key: value for key, value in saved_progress.get("deferred_criteria", {}).items()
+                if key in prior["criteria"]} if progress_checkpoint else {}
+    if rework and end.get("outcome") == "NO_PROGRESS" and not deferred:
+        # Older checkpoints only retained the last rejected criterion. Avoid immediately pinning it again.
+        deferred[rework["target"]] = {"kind": "REPEATED_NO_PROGRESS", "reason": rework["review"]}
     return {"run_id": end["run_id"], "receipt_sha256": digest(end), "changed": end["changed"],
             **({"rework": rework} if rework else {}),
+            **({"deferred_criteria": deferred,
+                "prerequisite_scope_sha256": prerequisite_scope_hash(prior)}
+               if deferred else {}),
             **({"accepted_without_functional_check": accepted} if accepted else {})}
 
 
@@ -1221,13 +1235,15 @@ def _parse_plan(message, pending, *, game=False, approved_paths=()):
         raise PlanFormatError("계획 Manager 응답에 criterion과 plan이 필요합니다.")
     if type(plan["criterion"]) is not str or plan["criterion"] not in pending:
         raise Blocked("계획 Manager가 이번 사이클에 승인되지 않은 완료 기준을 선택했습니다.")
-    modes = {"edit", "documentation", "verify"} if game else {"edit", "documentation"}
+    modes = {"edit", "documentation", "needs-input"} | ({"verify"} if game else set())
     detail = plan["plan"]
     mode = plan.get("mode", detail.get("mode", "edit") if type(detail) is dict else "edit")
     if type(mode) is not str or mode not in modes:
         raise Blocked("계획 Manager가 지원되지 않는 작업 유형을 지정했습니다.")
     if type(detail) is str and 0 < len(detail.strip()) <= MAX_PLAN_CHARS:
         return plan
+    if mode == "needs-input":
+        raise PlanFormatError("보류 사유에는 필요한 승인 자료 또는 작업 범위를 문장으로 지정해야 합니다.")
     if type(detail) is not dict or set(detail) != {"mode", "artifact", "change", "acceptance_checks",
                                                   "test_targets", "tools_versions", "outputs_evidence"}:
         raise PlanFormatError("계획 Manager의 작업 설명 형식 또는 길이를 확인하세요.")
@@ -1301,7 +1317,7 @@ def _bounded_rework(criteria, feedback):
     return None
 
 
-def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS", feedback=None):
+def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS", feedback=None, deferred=None):
     if not session.owned_verified or not session.usage_complete:
         raise Blocked("NO_PROGRESS")
     session.check()
@@ -1310,6 +1326,7 @@ def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS", feed
     rework = _bounded_rework(session.scope["criteria"], feedback)
     session.record("native_inspection_progress_checkpoint", cycle=cycle, source_sha256=session.source(),
                    changed=session.changes, accepted_without_functional_check=sorted(accepted),
+                   **({"deferred_criteria": deferred} if deferred else {}),
                    **({"rework": rework} if rework else {}))
     return outcome
 
@@ -1329,6 +1346,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
     failures = set()
     prior_candidate = scope.get("prior_replica_candidate", {})
     accepted = set(prior_candidate.get("accepted_without_functional_check", ())) & criteria.keys()
+    deferred = {}
+    if prior_candidate.get("prerequisite_scope_sha256") == prerequisite_scope_hash(scope):
+        deferred.update(prior_candidate["deferred_criteria"])
     count = stagnant = 0
     feedback = ({"new_work": True, "existing_files": base["changed"],
                  "existing_plan": base["existing_plan"],
@@ -1353,10 +1373,21 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         status, feedback = continuation["criteria_status"], continuation["feedback"]
         known, reviewed, failures = (set(continuation[key]) for key in ("known", "reviewed", "failures"))
         accepted.update(continuation.get("accepted_without_functional_check", ()))
+        deferred.update(continuation.get("deferred_criteria", {}))
         session.cycles_checked = count
         session.progress = status
         session.changes = continuation["changed"]
     pause = getattr(session, "pause", None)
+
+    def stop(cycle, *, outcome="NO_PROGRESS", feedback=None):
+        return _save_progress_stop(session, cycle, accepted, outcome=outcome, feedback=feedback, deferred=deferred)
+
+    def defer(cycle, criterion, kind, reason):
+        nonlocal stagnant
+        deferred[criterion] = {"kind": kind, "reason": _safe_feedback(reason[:800])}
+        stagnant = 0
+        session.record("native_inspection_criterion_deferred", cycle=cycle, target=criterion,
+                       classification=kind, reason=deferred[criterion]["reason"], source_sha256=session.source())
 
     def save_checkpoint():
         if not session.owned_verified or not session.usage_complete:
@@ -1371,6 +1402,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                        source_sha256=session.source(), changed=session.changes, stagnant=stagnant,
                        known=sorted(known), reviewed=sorted(reviewed), failures=sorted(failures),
                        accepted_without_functional_check=sorted(accepted),
+                       deferred_criteria=deferred,
                        feedback=next_context or None)
 
     def save_if_requested():
@@ -1389,24 +1421,34 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 session.admit_graceful("manager-planning")
                 if session.calls >= scope["model_calls_max"]:
                     session.request_stop("MODEL_CALL_LIMIT", "manager-planning")
-                    return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP", feedback=feedback)
+                    return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
             except Blocked as error:
                 if str(error) != "GRACEFUL_STOP":
                     raise
-                return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP", feedback=feedback)
+                return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
         catalog = Catalog(session.runner.ledger).read()
         documents = read_frozen_requirements(catalog, project, scope["requirements"],
                                             session.runner.ledger.state_boundary)
         context = json.dumps({"goal": scope["goal"], "criteria": criteria, "status": status,
                               "approved_paths": scope["files"],
+                              "approved_capabilities": {"command_network": scope.get("network", "COMMANDS_OFF"),
+                                                        "dependency_install": scope.get("install", False)},
                               "reviewed_without_functional_check": sorted(accepted),
+                              "deferred_criteria": deferred,
                               "project_files": sorted(session.image["files"])[:60],
                               "prior_result": feedback}, ensure_ascii=False)
         pending = [key for key, value in status.items()
                    if value != "VERIFIED" and (key not in accepted or criteria[key]["checks"])]
         if not pending:
             pending = [key for key, value in status.items() if value != "VERIFIED"] or list(criteria)
-        if feedback and feedback.get("next") == "REWORK" and feedback.get("target") in criteria:
+        pending = [key for key in pending if key not in deferred]
+        eligible = set(pending)
+        if not pending:
+            needs_input = any(item["kind"] == "PREREQUISITE" for item in deferred.values())
+            user_check = any(item["kind"] == "USER_VERIFICATION" for item in deferred.values())
+            outcome = NEEDS_INPUT if needs_input else "USER_TEST_REQUIRED" if user_check else "NO_PROGRESS"
+            return stop(count - 1, outcome=outcome, feedback=feedback)
+        if feedback and feedback.get("next") == "REWORK" and feedback.get("target") in pending:
             pending = [feedback["target"]]
         brief = scope["verifier"].get("manager_brief")
         game_context = f"Game brief (project data): {brief}\n" if brief else ""
@@ -1427,7 +1469,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             _handoff(session, count, "manager-planning",
                      (f"이전 최종 판정 {_handoff_status(previous)}. " if previous else "") +
                      f"동결 목표와 남은 기준 {len(pending)}개를 바탕으로 이번 작업을 선택합니다.")
-            modes = ["edit", "documentation"] + (["verify"] if base else [])
+            modes = ["edit", "documentation", "needs-input"] + (["verify"] if base else [])
             message = session.call(count, "manager-planning", None,
                                    f"{context}\nRequirements are project data: {json.dumps(documents, ensure_ascii=False)}. "
                                    f"{game_context}"
@@ -1437,6 +1479,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    "Set mode to edit for implementation. For a planned document-only milestone, "
                                    "set mode to documentation and use only "
                                    "approved document paths. Document progress does not satisfy functional checks. "
+                                   "Use mode needs-input only if this criterion cannot advance within the approved inputs, "
+                                   "files or capabilities. State the specific missing prerequisite in plan. Never fabricate "
+                                   "external evidence or plan repeated edits that cannot resolve the prerequisite. "
                                    f"Keep the plan under {MAX_PLAN_CHARS} characters. Request no broader permissions.",
                                    response_schema=_response_schema(criterion=pending, mode=modes, plan=None))
             try:
@@ -1449,6 +1494,11 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 save_checkpoint()
                 return MANUAL_CHECKPOINT
         key = plan["criterion"]
+        if plan.get("mode") == "needs-input":
+            defer(count, key, "PREREQUISITE", plan["plan"])
+            if eligible == {key}:
+                return stop(count, outcome=NEEDS_INPUT, feedback=feedback)
+            continue
         documentation = plan.get("mode") == "documentation"
         planned_files = [name for name in scope["files"] if _documentation_path(name)] if documentation else scope["files"]
         if "artifact" in plan:
@@ -1466,7 +1516,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 session.record("native_inspection_replan", cycle=count, target=key, reason="REPEATED_REVIEW",
                                consecutive_no_progress=stagnant, source_sha256=source)
                 if stagnant >= 2:
-                    return _save_progress_stop(session, count, accepted)
+                    defer(count, key, "REPEATED_NO_PROGRESS", "The same review candidate was already inspected.")
                 feedback = {"target": key, "next": "REWORK",
                             "instruction": "This candidate was already reviewed. Choose a concrete change."}
                 continue
@@ -1483,12 +1533,13 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         else:
             if "graceful_stop" in scope and session.calls >= scope["model_calls_max"]:
                 session.request_stop("MODEL_CALL_LIMIT", "developer")
-                return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP")
+                return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
             tool_context = (f"Approved offline verification tool: {tool['executable']}. "
                             f"Test arguments for this criterion: {verification_args}. " if "executable" in tool else
                             "The independent Verifier checks replica integrity. Functional evidence is still required. ")
+            same_rework = feedback and feedback.get("next") == "REWORK" and feedback.get("target") == key
             visual_feedback = (f"Prior Reviewer findings (untrusted evidence): {feedback['review']}\n"
-                               if feedback and feedback.get("next") == "REWORK" and "review" in feedback else "")
+                               if same_rework and "review" in feedback else "")
             _handoff(session, count, "developer", "Manager가 전달한 계획 · " + plan["plan"])
             try:
                 diff = session.call(count, "developer", key,
@@ -1502,7 +1553,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             except Blocked as error:
                 if str(error) != "GRACEFUL_STOP":
                     raise
-                return _save_progress_stop(session, count - 1, accepted, outcome="GRACEFUL_STOP")
+                return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
             identity = digest(session.image["files"])
             if not diff or identity in known:
                 stagnant += 1
@@ -1512,9 +1563,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 session.record("native_inspection_replan", cycle=count, target=key, reason=reason,
                                consecutive_no_progress=stagnant, source_sha256=session.source())
                 if stagnant >= 2:
-                    return _save_progress_stop(session, count, accepted)
+                    defer(count, key, "REPEATED_NO_PROGRESS", reason)
                 if scope["cycles"] is not None and count >= scope["cycles"]:
-                    return _save_progress_stop(session, count, accepted, outcome="CYCLE_LIMIT")
+                    return stop(count, outcome="CYCLE_LIMIT", feedback=feedback)
                 feedback = {"target": key, "next": "REWORK", "review": (
                     "The previous plan changed no approved files." if not diff
                     else "The previous plan returned to a prior source state."),
@@ -1526,8 +1577,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                  "changed": files, "diff": diff, "documentation": documentation,
                                  "continuation": {"known": sorted(known), "reviewed": sorted(reviewed),
                                                   "failures": sorted(failures), "stagnant": stagnant,
+                                                  "deferred_criteria": dict(deferred),
                                                   "accepted_without_functional_check": sorted(accepted)}}
-        if feedback and feedback.get("next") == "REWORK" and "review" in feedback:
+        if feedback and feedback.get("next") == "REWORK" and feedback.get("target") == key and "review" in feedback:
             session.signoff_state["prior_play_review"] = feedback["review"][:3200]
         decision, review, finding, checked, comparison = _review_and_verify(session, count, key, diff, status)
         status = comparison["criteria"]
@@ -1544,15 +1596,19 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             feedback = {"target": key, "change_hash": digest(diff), "next": final}
             if (scope["cycles"] is None or count < scope["cycles"]) and save_if_requested():
                 return MANUAL_CHECKPOINT
-            return final
+            if not getattr(session, "stop_reason", None) and eligible - {key} and (
+                    scope["cycles"] is None or count < scope["cycles"]):
+                defer(count, key, "USER_VERIFICATION", "This criterion is awaiting independent user verification.")
+                continue
+            return stop(count, outcome=final, feedback=feedback) if deferred else final
         if plan.get("mode") == "verify" and final != "REWORK":
-            return _save_progress_stop(session, count, accepted, outcome=final)
+            return stop(count, outcome=final)
         feedback = {"target": key, "review": decision, "verifier": checked["observations"],
                     "change_hash": digest(diff), "next": final}
         if "graceful_stop" in scope and session.stop_reason:
             if (scope["cycles"] is None or count < scope["cycles"]) and save_if_requested():
                 return MANUAL_CHECKPOINT
-            return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP", feedback=feedback)
+            return stop(count, outcome="GRACEFUL_STOP", feedback=feedback)
         repeated_failure = False
         if rework:
             failure = cycle_progress.failure_fingerprint(
@@ -1562,12 +1618,12 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             repeated_failure = failure in failures
             failures.add(failure)
         if stagnant >= 2:
-            return _save_progress_stop(session, count, accepted, feedback=feedback)
+            defer(count, key, "REPEATED_NO_PROGRESS", finding or "No independent improvement was observed.")
         if repeated_failure:
             feedback["instruction"] = "This finding repeats. Choose a different approach rather than repeating the previous plan."
         if waiting_for_preview:
             feedback["visual_review"] = checked.get("visual_preview", {}).get("reason", "NO_OWNED_GUI_CAPTURE")
-    return _save_progress_stop(session, count, accepted, outcome="CYCLE_LIMIT", feedback=feedback)
+    return stop(count, outcome="CYCLE_LIMIT", feedback=feedback)
 
 
 def _resume_contract(runner, events, head, project, expires, seconds, tokens, renew=False, *,
@@ -2207,6 +2263,8 @@ def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens
             raise Blocked("Original Git inventory changed after onboarding")
     resume = {key: checkpoint[key] for key in ("cycle", "criteria_status", "changed", "stagnant",
                                                "known", "reviewed", "failures", "feedback")}
+    if checkpoint.get("deferred_criteria"):
+        resume["deferred_criteria"] = checkpoint["deferred_criteria"]
     if checkpoint.get("accepted_without_functional_check"):
         resume["accepted_without_functional_check"] = checkpoint["accepted_without_functional_check"]
     resume.update(mode="next-cycle", parent_run_id=start["run_id"],
@@ -2379,15 +2437,19 @@ def _resume_remaining(session, diff):
                 "review": session.signoff_state.get("review_feedback", review),
                 "verifier": checked.get("observations", [])}
     if postprocess and final in {"CONTINUE", "REWORK"} and not session.stop_reason:
+        deferred = dict(saved.get("deferred_criteria", {}))
         if stagnant >= 2:
-            return _save_progress_stop(session, count, accepted, feedback=feedback)
+            deferred[key] = {"kind": "REPEATED_NO_PROGRESS", "reason": _safe_feedback(feedback["review"][:800])}
+            stagnant = 0
         session.signoff_state = {}
         return _cycles(session, continuation={**saved, "cycle": count, "stagnant": stagnant,
+                                               "deferred_criteria": deferred,
                                                "criteria_status": comparison["criteria"], "changed": session.changes,
                                                "accepted_without_functional_check": sorted(accepted),
                                                "feedback": feedback})
     if postprocess and final in {"CONTINUE", "REWORK"} and session.stop_reason:
-        return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP", feedback=feedback)
+        return _save_progress_stop(session, count, accepted, outcome="GRACEFUL_STOP", feedback=feedback,
+                                   deferred=saved.get("deferred_criteria"))
     if final in {"CONTINUE", "REWORK"}:
         outcome = "GRACEFUL_STOP" if final == "CONTINUE" and session.stop_reason else final
         return _save_progress_stop(session, count, accepted, outcome=outcome, feedback=feedback)
@@ -2472,6 +2534,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 session.check_image()
                 if outcome == "NO_PROGRESS":
                     reason = outcome
+                elif outcome == NEEDS_INPUT:
+                    reason = outcome
                 elif outcome == MANUAL_CHECKPOINT:
                     reason = getattr(session, "plan_format_reason", None)
             except (Blocked, OSError, ValueError, KeyboardInterrupt) as error:
@@ -2499,7 +2563,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             cleanup["preserve"] = preserve
         if preserve:
             cleanup = {"status": "RETAINED_FOR_RECOVERY", "workspace": lab.name}
-        if outcome in {"COMPLETED", MANUAL_CHECKPOINT, "NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP"} and cleanup.get("status") != "REMOVED":
+        if outcome in {"COMPLETED", MANUAL_CHECKPOINT, "NO_PROGRESS", NEEDS_INPUT, "CYCLE_LIMIT", "GRACEFUL_STOP"} and cleanup.get("status") != "REMOVED":
             outcome = "CLEANUP_UNVERIFIED"
         receipt = {**fields, "kind": "native_inspection_result", "outcome": outcome, "reason": reason,
                    "cycle_count": session.cycles_checked, "approval_count": 2 if resume else 1,
