@@ -43,6 +43,8 @@ def _verdict(message, options):
 def _tools(spec, criteria, image, writable):
     if type(spec) is not dict or set(spec) != {"executable", "checks"}:
         raise Blocked("Specify an executable and one independent check per criterion")
+    if type(spec["executable"]) is not str or not spec["executable"].strip():
+        raise Blocked("독립 검증 도구가 미설정입니다. 검증 실행 파일을 선택하세요.")
     binary = Path(spec["executable"])
     trusted = _known_folder(0x26)
     windows_text_check = binary == _known_folder(0x24) / "System32" / "cmd.exe"

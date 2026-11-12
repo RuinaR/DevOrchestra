@@ -145,22 +145,51 @@ def show(center, project):
             entries["archive"].insert(0, path)
 
     ttk.Button(inputs, text="찾기", command=archive).grid(row=0, column=2)
-    ttk.Label(panel, text="독립 검사 · 검증 도구, 기준별 인자 및 기대 출력").pack(anchor="w")
+    ttk.Label(panel, text="독립 검증 설정").pack(anchor="w")
+    ttk.Label(panel, text="처음에는 검증 도구가 미설정입니다. 실행 파일을 선택하고 완료 기준별 인자와 기대 출력을 입력하세요.",
+              wraplength=580).pack(anchor="w")
+    verifier_actions = ttk.Frame(panel)
+    verifier_actions.pack(fill="x")
     spec = center.editor_box(panel, height=6)
-    spec.insert("1.0", json.dumps({"executable": "", "checks": {key: {"args": [], "stdout": "", "inputs": []}
-                                                             for key in criteria}}, indent=2))
+    template = {"executable": "", "checks": {key: {"args": [], "stdout": "", "inputs": []} for key in criteria}}
+
+    def write_spec(value):
+        spec.delete("1.0", "end")
+        spec.insert("1.0", json.dumps(value, ensure_ascii=False, indent=2))
+
+    def read_spec():
+        try:
+            value = json.loads(spec.get("1.0", "end"))
+        except json.JSONDecodeError as error:
+            raise ValueError(f"독립 검증 JSON의 {error.lineno}행 {error.colno}열을 확인하세요.") from error
+        if not isinstance(value, dict):
+            raise ValueError("독립 검증 설정은 JSON 객체로 입력하세요.")
+        return value
+
+    def choose_verifier():
+        try:
+            value = read_spec()
+        except ValueError as error:
+            state.set(str(error))
+            return
+        path = filedialog.askopenfilename(parent=panel, filetypes=[("검증 실행 파일", "*.exe")])
+        if path:
+            value["executable"] = str(Path(path))
+            write_spec(value)
+            state.set("검증 도구를 선택했습니다. 기준별 실행 인자와 기대 출력을 확인하세요.")
+
+    write_spec(template)
 
     def windows_text_check():
         from .mxc_launcher import _known_folder
 
-        spec.delete("1.0", "end")
-        spec.insert("1.0", json.dumps({"executable": str(_known_folder(0x24) / "System32" / "cmd.exe"),
-                                     "checks": {key: {"args": ["/d", "/q", "/c", "type", "message.txt"],
-                                                      "stdout": "Hello", "inputs": []}
-                                                for key in criteria}}, indent=2))
-        state.set("예제의 message.txt와 Hello를 각 기준의 검사 파일과 기대 내용으로 바꾸세요.")
+        write_spec({"executable": str(_known_folder(0x24) / "System32" / "cmd.exe"),
+                    "checks": {key: {"args": ["/d", "/q", "/c", "type", "message.txt"],
+                                     "stdout": "Hello", "inputs": []} for key in criteria}})
+        state.set("텍스트 읽기 예제를 불러왔습니다. 프로젝트에 맞는 검증 도구, 인자와 기대 출력으로 바꾸세요.")
 
-    ttk.Button(panel, text="Windows 텍스트 검사 예제", command=windows_text_check).pack(anchor="w")
+    ttk.Button(verifier_actions, text="검증 도구 선택", command=choose_verifier).pack(side="left")
+    ttk.Button(verifier_actions, text="Windows 텍스트 검사 예제", command=windows_text_check).pack(side="left", padx=4)
     detail = center.editor_box(panel, height=8, state="disabled")
     cancelled = Event()
     future = None
@@ -295,6 +324,18 @@ def show(center, project):
         if permissions is None:
             return
         try:
+            verifier = read_spec()
+            if not isinstance(verifier.get("executable"), str) or not verifier["executable"].strip():
+                raise ValueError("독립 검증 도구가 미설정입니다. ‘검증 도구 선택’에서 실행 파일을 선택하세요.")
+            checks = verifier.get("checks")
+            if not isinstance(checks, dict) or checks.keys() != criteria.keys():
+                raise ValueError("독립 검증 설정에 등록된 완료 기준별 검사 항목을 입력하세요.")
+            missing = [key for key, check in checks.items()
+                       if not isinstance(check, dict) or not isinstance(check.get("stdout"), str)
+                       or not check["stdout"]]
+            if missing:
+                remaining = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
+                raise ValueError("독립 검증의 기대 출력을 입력하세요. " + ", ".join(missing[:3]) + remaining)
             values = {key: entry.get().strip() for key, entry in entries.items()}
             seconds, tokens = int(values["seconds"]), int(values["tokens"])
             cycles = int(values["cycles"]) if values["cycles"] else None
@@ -307,7 +348,7 @@ def show(center, project):
             game_pilot.validate_limits(limits)
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     [name.strip() for name in values["files"].split(",") if name.strip()],
-                    permissions, json.loads(spec.get("1.0", "end")),
+                    permissions, verifier,
                     int(values["manager_tokens"]))
         except (RuntimeError, ValueError) as error:
             state.set(str(error))
