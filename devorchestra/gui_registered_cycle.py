@@ -14,9 +14,32 @@ from .ledger import digest
 
 
 LABELS = {
-    "replica-read": "복제본 읽기", "replica-edit": "지정 파일 생성·수정",
-    "offline-shell": "복제본의 오프라인 셸", "pinned-verifier": "지정 검증 명령",
+    "replica-read": "작업 복제본 읽기", "replica-edit": "지정 파일 생성·수정",
+    "offline-shell": "복제본에서 오프라인 명령 실행", "pinned-verifier": "지정된 독립 검증 명령 실행",
 }
+
+
+def _permission_checkboxes(panel, draft):
+    options = ttk.LabelFrame(panel, text="자동 개발 사전 권한", padding=6)
+    options.pack(fill="x", pady=(4, 6))
+    ttk.Label(options, text="새 세션에 필요한 권한을 모두 체크하고 최종 승인 화면에서 확인하세요.",
+              wraplength=580).grid(row=0, column=0, columnspan=2, sticky="w")
+    grants = {}
+    for index, key in enumerate(registered_cycle.PERMISSIONS):
+        grants[key] = tk.BooleanVar(panel, value=draft.get(key, key == "replica-read"))
+        ttk.Checkbutton(options, text=LABELS[key], variable=grants[key],
+                        command=lambda key=key: draft.update({key: grants[key].get()})).grid(
+            row=1 + index // 2, column=index % 2, sticky="w")
+    return grants
+
+
+def _checked_permissions(grants, state):
+    selected = [key for key, variable in grants.items() if variable.get()]
+    missing = [LABELS[key] for key in grants if key not in selected]
+    if missing:
+        state.set("자동 개발 사전 권한에서 다음 항목을 확인하고 체크하세요.\n" + " · ".join(missing))
+        return None
+    return selected
 
 
 def _remaining_signoff(checkpoint):
@@ -55,17 +78,20 @@ def show(center, project):
     baseline = None
     try:
         original, replica, baseline, _ = replica_readiness.baseline(runner.ledger, project)
+        original_head = baseline["head"][:12] if baseline["head"] else "첫 커밋 전"
         ttk.Label(panel, text=f"원본 {original}\n복제본 {replica}\n"
-                  f"원본 Git {baseline['head'][:12]} · 스테이징 {len(baseline['staged'])} · "
+                  f"원본 Git {original_head} · 스테이징 {len(baseline['staged'])} · "
                   f"작업 트리 변경 {len(baseline['raw_worktree_changed'])}", wraplength=580).pack(fill="x")
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
         state.set("작업 복제본이 없습니다. Git 온보딩에서 복제본을 먼저 준비하세요."
                   if str(error) == "An established Git onboarding baseline is required" else
                   f"작업 복제본을 확인할 수 없습니다. Git 온보딩에서 상태를 확인하세요.\n{error}")
     is_godot = baseline is not None and any(name.casefold() == "project.godot" for name in baseline["files"])
+    draft = center.development_budget_drafts.setdefault(project, {})
+    grants = _permission_checkboxes(panel, draft)
     if is_godot and project == game_pilot.PROJECT:
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
-        _game_preflight(center, panel, runner, state)
+        _game_preflight(center, panel, runner, state, grants)
         return
     ttk.Button(panel, text="등록 목표·기준 편집",
                command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
@@ -73,7 +99,6 @@ def show(center, project):
     inputs.pack(fill="x")
     entries = {}
     budget_keys = ("seconds", "tokens", "cycles", "manager_tokens")
-    draft = center.development_budget_drafts.setdefault(project, {})
     for index, (key, label, default) in enumerate((
             ("archive", "공식 Codex ZIP", ""), ("files", "수정 파일 경로 (쉼표 구분)", ""),
             ("seconds", "전체 시간 기준 (초)", str(game_pilot.SESSION_SECONDS)),
@@ -136,13 +161,6 @@ def show(center, project):
         state.set("예제의 message.txt와 Hello를 각 기준의 검사 파일과 기대 내용으로 바꾸세요.")
 
     ttk.Button(panel, text="Windows 텍스트 검사 예제", command=windows_text_check).pack(anchor="w")
-    options = ttk.Frame(panel)
-    options.pack(fill="x")
-    grants = {}
-    for index, key in enumerate(registered_cycle.PERMISSIONS):
-        grants[key] = tk.BooleanVar(panel, value=key == "replica-read")
-        ttk.Checkbutton(options, text=LABELS[key], variable=grants[key]).grid(
-            row=index // 2, column=index % 2, sticky="w")
     detail = center.editor_box(panel, height=8, state="disabled")
     cancelled = Event()
     future = None
@@ -252,6 +270,7 @@ def show(center, project):
                                for key, row in result["verifier"]["checks"].items())
             summary = (f"{project}\n{result['goal']}\n복제본 {result['replica']}\n"
                        f"파일 {', '.join(result['files'])}\n"
+                       "사전 권한 · " + " · ".join(LABELS[key] for key in result["permissions"]) + "\n"
                        f"{result['seconds']}초 / {result['tokens']} 토큰 / 사이클 {result['cycles'] or '예산까지'}\n"
                        f"{result['model']} · {result['role_tokens']}\n"
                        f"검증 EXE {result['verifier']['executable']}\n{checks}\n"
@@ -272,6 +291,9 @@ def show(center, project):
         panel.after(150, poll)
 
     def start():
+        permissions = _checked_permissions(grants, state)
+        if permissions is None:
+            return
         try:
             values = {key: entry.get().strip() for key, entry in entries.items()}
             seconds, tokens = int(values["seconds"]), int(values["tokens"])
@@ -285,7 +307,7 @@ def show(center, project):
             game_pilot.validate_limits(limits)
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     [name.strip() for name in values["files"].split(",") if name.strip()],
-                    [key for key, variable in grants.items() if variable.get()], json.loads(spec.get("1.0", "end")),
+                    permissions, json.loads(spec.get("1.0", "end")),
                     int(values["manager_tokens"]))
         except (RuntimeError, ValueError) as error:
             state.set(str(error))
@@ -349,7 +371,7 @@ def show(center, project):
     render()
 
 
-def _game_preflight(center, panel, runner, state):
+def _game_preflight(center, panel, runner, state, grants):
     cancelled = Event()
     future = None
 
@@ -364,6 +386,8 @@ def _game_preflight(center, panel, runner, state):
         nonlocal future
         limits = None
         if online and not resume:
+            if _checked_permissions(grants, state) is None:
+                return
             try:
                 limits = {"seconds": int(session_entries["seconds"].get()),
                           "tokens": int(session_entries["tokens"].get()),
@@ -453,6 +477,8 @@ def _game_preflight(center, panel, runner, state):
                                         "검증된 파일을 기준으로 새 Manager 계획부터 시작합니다.")
                             if base.get("player_report"):
                                 summary += "\n사용자 평가와 완주 여부를 Manager 계획에 전달합니다. 메모는 로컬에 저장합니다."
+                        if not resume:
+                            summary += "\n사전 권한 · " + " · ".join(LABELS[key] for key in result["permissions"])
                         if resume:
                             title = "게임 후보 검토 재개 승인"
                             if result["resume"].get("mode") == "after-manager-planning":

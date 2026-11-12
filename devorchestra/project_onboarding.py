@@ -174,21 +174,27 @@ def _blob_identity(path, info, oid):
 def _scan(source, git, include):
     initial = _git_identity(source)
     if not initial:
-        raise Blocked("A local, committed Git checkout is required")
+        raise Blocked("A local Git checkout is required")
     for path in ("commondir", "objects/info/alternates", "objects/info/http-alternates"):
         metadata = source / ".git" / path
         check_path(metadata)
         if metadata.exists():
             raise Blocked("Shared Git metadata is outside this onboarding scope")
-    head = git("rev-parse", "--verify", "HEAD").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+    head = git("rev-parse", "--verify", "--quiet", "HEAD", allowed=(0, 1)).strip() or None
+    if head and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
         raise Blocked("Git HEAD is unavailable")
     branch = git("symbolic-ref", "--quiet", "--short", "HEAD", allowed=(0, 1)).strip() or None
-    tree = _records(git("ls-tree", "-rz", head), tree=True)
+    tree = _records(git("ls-tree", "-rz", head), tree=True) if head else {}
     index = _records(git("ls-files", "--stage", "-z"))
     untracked = sorted(set(git("ls-files", "-z", "--others", "--exclude-standard").strip("\0").split("\0")) - {""})
     ignored = sorted(set(git("ls-files", "-z", "--others", "--ignored", "--exclude-standard",
                              "--directory").strip("\0").split("\0")) - {""})
+    if not head:
+        if not branch or index or untracked or ignored:
+            raise Blocked("첫 커밋이 없는 Git 저장소는 작업 폴더가 비어 있을 때만 복제할 수 있습니다.")
+        refs = git("for-each-ref", "--count=1", "--format=%(refname)").strip()
+        if refs:
+            raise Blocked("첫 커밋이 없는 브랜치에서 기존 Git 참조가 발견됐습니다.")
     if len(set(tree) | set(index) | set(untracked) | set(ignored)) > 4096:
         raise Blocked("Git inventory exceeds onboarding limits")
     for path in [*untracked, *ignored]:
@@ -249,7 +255,8 @@ def _scan(source, git, include):
             docs[name] = {**info, "read": read}
     if sum(info["bytes"] for info in files.values()) > 128 * 1024 * 1024:
         raise Blocked("Copy exceeds the onboarding byte limit")
-    if _git_identity(source) != initial or git("rev-parse", "--verify", "HEAD").strip() != head:
+    current_head = git("rev-parse", "--verify", "--quiet", "HEAD", allowed=(0, 1)).strip() or None
+    if _git_identity(source) != initial or current_head != head:
         raise Blocked("Original Git baseline changed during onboarding")
     return {"head": head, "branch": branch, "git": initial, "remotes": remotes, "staged": staged,
             "raw_worktree_changed": modified, "deleted": deleted, "untracked": untracked, "ignored": ignored,
@@ -391,7 +398,7 @@ def create(runner, project, destination, include, approval):
                 paths.unlink()
             git(*commands, "-c", "user.name=DevOrchestra", "-c", "user.email=local@devorchestra.invalid",
                 "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m",
-                "Isolated baseline from " + baseline["head"], cwd=staging)
+                "Isolated baseline from " + (baseline["head"] or "an empty Git repository"), cwd=staging)
             replica_head = git(*commands, "rev-parse", "--verify", "HEAD", cwd=staging).strip()
             indexed = _records(git(*commands, "ls-files", "--stage", "-z", cwd=staging))
             if set(indexed) != set(baseline["files"]) or any(

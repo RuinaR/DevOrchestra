@@ -66,7 +66,7 @@ def show_panel(center, initial, *, project=None):
     def review_text(scope):
         baseline = scope["baseline"]
         context = scope["context"]
-        lines = ["CONTEXT_READY · 원본 및 작업 복제본 승인 검토", f'원본 HEAD {baseline["head"]}',
+        lines = ["CONTEXT_READY · 원본 및 작업 복제본 승인 검토", f'원본 HEAD {baseline["head"] or "첫 커밋 전"}',
                  f'브랜치 {baseline["branch"] or "DETACHED"}',
                  "원격 " + (", ".join(remote["host"] or "호스트 비공개" for remote in baseline["remotes"]) or "없음"),
                  f'선택된 파일 {len(baseline["files"])}개 · 보호 자료 {len(baseline["protected"])}개',
