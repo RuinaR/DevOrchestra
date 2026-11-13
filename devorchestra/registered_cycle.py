@@ -20,7 +20,7 @@ from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder, _signed_offline
-from .mxc_owned_gui import inspect_owned_window
+from .mxc_owned_gui import CAPTURE_DIMENSIONS, OPTIONAL_CAPTURE_STOPS, inspect_owned_window
 from .native_command_probe import ARCHIVE_SHA256, CODE_MODE_HOST_SHA256, RELEASE_SHA256, _staging
 from .native_cycle import ROLES, ROLE_TOKENS, _FixtureSession
 from .native_developer_trial import (
@@ -1280,9 +1280,7 @@ class RegisteredSession(_FixtureSession):
                                                  memory=1024**3, check=self.check, output_limit=8192,
                                                  interact=interact))
         except OwnedMxcStopped as error:
-            if str(error) not in {"Owned verification window did not appear",
-                                  "Owned process exited before window observation", "MXC probe timeout",
-                                  "Owned window rendered no usable visual evidence"}:
+            if str(error) not in OPTIONAL_CAPTURE_STOPS:
                 raise
             return {"status": "NOT_VERIFIED", "reason": "GUI_PREVIEW_WINDOW_OR_CAPTURE_UNAVAILABLE",
                     "detail": str(error)}
@@ -2321,9 +2319,10 @@ def _interrupted_preview(rows):
     reason = end.get("reason") or ""
     prefix = re.fullmatch(r"native-command-[a-z0-9_]+", start.get("workspace", ""))
     cycle = diff.get("cycle")
+    path_failure = (prefix and reason.startswith("[WinError 3]")
+                    and f"{prefix[0]}\\tmp\\{cycle}-gui-build\\" in reason.replace("\\\\", "\\"))
     return bool(prefix and type(cycle) is int and cycle > 0
-                and end.get("outcome") == "BLOCKED" and reason.startswith("[WinError 3]")
-                and f"{prefix[0]}\\tmp\\{cycle}-gui-build\\" in reason.replace("\\\\", "\\")
+                and end.get("outcome") == "BLOCKED" and (path_failure or reason == CAPTURE_DIMENSIONS)
                 and end.get("owned_tree") == "DRAINED" and end.get("usage_complete") is True
                 and end.get("staging_cleanup") == {"status": "RETAINED_FOR_RECOVERY", "workspace": prefix[0]}
                 and diff["kind"] == "native_inspection_developer_diff"

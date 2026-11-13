@@ -8,7 +8,7 @@ from . import visual_review as visual
 from .lease import Blocked
 from .ledger import check_path, digest
 from .mxc_host_probe import OwnedMxcStopped, _args, _observe
-from .mxc_owned_gui import inspect_owned_window
+from .mxc_owned_gui import OPTIONAL_CAPTURE_STOPS, inspect_owned_window
 from .native_developer_trial import PROFILE, trial_flags
 from .replica_evidence import fingerprint, snapshot
 from .role_contract import _unique_object
@@ -328,8 +328,7 @@ def run(session, cycle, key, verification, context):
             outcome = "GAME_EXIT_FAILED"
     except OwnedMxcStopped as error:
         game_clear = True
-        if str(error) not in {"Owned verification window did not appear", "Owned process exited before window observation",
-                              "Owned window rendered no usable visual evidence", "MXC probe timeout"}:
+        if str(error) not in OPTIONAL_CAPTURE_STOPS:
             outcome = "PLAY_INTERRUPTED"
             raise
         outcome = "WINDOW_OR_CAPTURE_UNAVAILABLE"

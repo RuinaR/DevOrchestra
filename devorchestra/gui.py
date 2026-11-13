@@ -1179,8 +1179,9 @@ class CommandCenter:
             hint = {"Role did not return a valid verdict": "모델 응답의 판정을 읽지 못했습니다. 이어서 개발에서 보존된 응답을 확인하세요.",
                     "NO_PROGRESS": "현재 승인 범위에서 더 진행할 기준을 찾지 못했습니다. 보류 사유를 확인하세요.",
                     "NEEDS_INPUT": "현재 진행할 수 있는 기준이 없습니다. 아래에 표시된 자료나 권한을 검토하세요."}
-            short = ("검토용 Windows 빌드의 임시 경로를 열지 못했습니다 (WinError 3)."
-                     if (progress or {}).get("preview_recovery_review") else
+            short = (("검토용 창의 크기가 캡처 제한을 넘었습니다." if reason == "Owned capture dimensions exceed the bound"
+                      else "검토용 Windows 빌드의 임시 경로를 열지 못했습니다 (WinError 3).")
+                     if preview_blocked else
                      hint.get(reason, str(reason or label_text).splitlines()[0][:160]))
             recovery = ((progress or {}).get("preview_recovery_review") or self.can_resume_registered(progress))
             self.registered_issue.configure(text=short + ("\n재개 전에 후보와 승인 범위를 다시 검사합니다." if recovery else ""))

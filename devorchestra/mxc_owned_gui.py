@@ -15,6 +15,11 @@ from .lease import Blocked
 from .role_contract import _unique_object
 from .system_powershell import _api as signature
 
+CAPTURE_DIMENSIONS = "Owned capture dimensions exceed the bound"
+CAPTURE_BYTES = "Owned capture PNG exceeds the byte bound"
+OPTIONAL_CAPTURE_STOPS = frozenset({CAPTURE_DIMENSIONS, CAPTURE_BYTES,
+    "Owned verification window did not appear", "Owned process exited before window observation",
+    "Owned window rendered no usable visual evidence", "MXC probe timeout"})
 
 def validate(value):
     from .gui_project import _text, _validate_step
@@ -93,8 +98,8 @@ class _Bitmap(c.Structure):
 
 
 def _render(hwnd, width, height):
-    if not 100 <= width <= 900 or not 100 <= height <= 700:
-        raise Blocked("Owned capture dimensions exceed the bound")
+    if not 100 <= width <= 2048 or not 100 <= height <= 2048:
+        raise Blocked(CAPTURE_DIMENSIONS)
     gdi = c.WinDLL("gdi32", winmode=0x800, use_last_error=True)
     dc = _require(signature(gdi, "CreateCompatibleDC", w.HDC, w.HDC)(None))
     select = signature(gdi, "SelectObject", w.HANDLE, w.HDC, w.HANDLE)
@@ -151,9 +156,12 @@ def _capture(window, path, workers):
     def chunk(tag, payload):
         return pack(">I", len(payload)) + tag + payload + pack(">I", crc32(tag + payload))
 
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", compress(b"".join(rows))) + chunk(b"IEND", b""))
+    if len(png) > 4 * 1024 * 1024:
+        raise Blocked(CAPTURE_BYTES)
     with path.open("xb") as stream:
-        stream.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-                     + chunk(b"IDAT", compress(b"".join(rows))) + chunk(b"IEND", b""))
+        stream.write(png)
     return verified_image(path)[1]
 
 

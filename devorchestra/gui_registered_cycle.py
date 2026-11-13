@@ -631,7 +631,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     summary += ("\n이전 실행은 변경 후 파일 해시를 확정하기 전에 멈췄습니다. "
                                 "지금 복제본의 파일을 새 후보로 승인하고 최초 등록 기준과 비교해 검토합니다.")
                 if checkpoint.get("interrupted_preview"):
-                    summary += ("\n경로 오류 전에 확정된 후보를 독립 검토합니다. 이전 임시 빌드와 자동 플레이는 "
+                    summary += ("\n미리보기 오류 전에 확정된 후보를 독립 검토합니다. 이전 임시 빌드와 자동 플레이는 "
                                 "이 재개에 포함되지 않습니다. 새 실행 증거가 없으면 GUI는 미검증입니다.")
                 if result.get("visual_review") and not checkpoint.get("review"):
                     summary += "\n소유 테스트 창 PNG 최대 4장을 Codex Reviewer에 전송합니다."
