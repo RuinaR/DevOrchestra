@@ -539,9 +539,10 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         raise Blocked("Invalid visual review approval")
     requirements = latest_requirements(catalog, project)
     refs = list(requirements)
-    if any(ref["path"] in files for ref in refs):
+    source_requirement_paths = {ref["path"] for ref in refs if ref.get("storage") != "local"}
+    if source_requirement_paths.intersection(files):
         raise Blocked("Registered requirements cannot be changed by the Developer")
-    protected = sorted(set(data["documents"].values()) | {ref["path"] for ref in refs}
+    protected = sorted(set(data["documents"].values()) | source_requirement_paths
                        | {path for check in verifier.get("checks", {}).values() for path in check["inputs"]})
     if prior_replica_candidate and prior_replica_candidate.get("unsettled_candidate"):
         if {name.casefold() for name in protected} & {

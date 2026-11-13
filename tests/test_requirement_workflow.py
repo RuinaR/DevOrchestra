@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from devorchestra.catalog import Catalog, new_project
+from devorchestra.catalog import Catalog, latest_requirements, new_project, read_frozen_requirements
 from devorchestra.default_instructions import COMMON, PROJECT, ROLES, public_instruction
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger
@@ -41,6 +41,24 @@ class RequirementWorkflowTests(unittest.TestCase):
         )
         envelope["result"].update(changes)
         return envelope
+
+    def test_local_requirements_keep_old_revisions_and_original_files(self):
+        imported = self.catalog.register_requirement("sample", "goal.md", "GOAL")
+        first = self.catalog.write_local_requirement("sample", "qa/language.md", "한국어", "BUG")
+        second = self.catalog.write_local_requirement("sample", "qa/language.md", "한국어와 영어", "BUG")
+        self.assertEqual((2, first["id"]), (second["version"], second["supersedes"]))
+        with self.assertRaises(FileExistsError):
+            self.catalog.write_local_requirement("sample", "goal.md", "Replacement", "GOAL")
+        view = self.catalog.read()
+        self.assertEqual([imported, second], latest_requirements(view, "sample"))
+        documents = read_frozen_requirements(view, "sample", [imported, first, second], self.ledger.state_boundary)
+        self.assertEqual(["Synthetic requirement text", "한국어", "한국어와 영어"],
+                         [document["text"] for document in documents])
+        self.assertEqual([self.document], list(self.source.iterdir()))
+        blob = next((self.ledger.state_boundary / "requirements").glob(f"*/{second['sha256']}.md"))
+        blob.write_text("Tampered", encoding="utf-8")
+        with self.assertRaises(Blocked):
+            read_frozen_requirements(view, "sample", [second], self.ledger.state_boundary)
 
     def test_new_project_uses_public_layers_without_modifying_project_files(self):
         self.catalog.register_requirement("sample", "goal.md", "GOAL")

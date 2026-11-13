@@ -32,13 +32,14 @@ def _requirement_path(relative):
     return relative
 
 
-def _read_requirement(root, relative, state_boundary):
+def _read_requirement(root, relative, state_boundary, *, local=False):
     target = root / _requirement_path(relative)
     check_path(target)
     if not target.is_file():
         raise Blocked("Requirement is missing")
     actual = target.resolve(strict=True)
-    if not actual.is_relative_to(root.resolve(strict=True)) or actual.is_relative_to(state_boundary.resolve()):
+    if (not actual.is_relative_to(root.resolve(strict=True))
+            or actual.is_relative_to(state_boundary.resolve()) != local):
         raise Blocked("Requirement is outside the document boundary")
     check_path(actual)
     before = actual.lstat()
@@ -57,6 +58,10 @@ def _read_requirement(root, relative, state_boundary):
     return content
 
 
+def _local_requirement_root(state_boundary, project_id):
+    return state_boundary / "requirements" / digest(project_id)
+
+
 def read_frozen_requirements(catalog, project_id, references, state_boundary):
     """Read only registered, frozen revisions. A changed file needs a new revision."""
     if not references:
@@ -72,7 +77,12 @@ def read_frozen_requirements(catalog, project_id, references, state_boundary):
             raise Blocked("Requirement reference is not a unique registered revision")
         seen.add(ref["id"])
         try:
-            content = _read_requirement(root, ref["path"], state_boundary)
+            if ref.get("storage") == "local":
+                local_root = _local_requirement_root(state_boundary, project_id)
+                content = _read_requirement(local_root, ref["sha256"] + ".md",
+                                            state_boundary, local=True)
+            else:
+                content = _read_requirement(root, ref["path"], state_boundary)
         except (OSError, ValueError):
             raise Blocked("Frozen requirement is unreadable") from None
         if sha256(content).hexdigest() != ref["sha256"]:
@@ -265,17 +275,64 @@ class Catalog:
                 raise Blocked("Related requirement does not belong to this project")
             content = _read_requirement(root, relative, self.ledger.state_boundary)
             checksum = sha256(content).hexdigest()
+            if (latest and latest.get("storage") != "local"
+                    and (latest["sha256"], latest["role"], latest["related"]) == (checksum, role, related)):
+                return latest
+            return self._append_requirement(events, tail, project_id, relative, role, checksum, related, latest)
+
+    def _append_requirement(self, events, tail, project_id, relative, role, checksum, related, latest,
+                            *, local=False):
+        now = datetime.now(timezone.utc).isoformat()
+        item = {"project_id": project_id, "path": relative, "role": role, "sha256": checksum,
+                "version": latest["version"] + 1 if latest else 1,
+                "supersedes": latest["id"] if latest else None, "related": related,
+                "registered_at": now}
+        if local:
+            item["storage"] = "local"
+        item["id"] = digest(item)
+        self.ledger.append(len(events), tail, {"kind": "requirement_registered",
+                                              "data": item, "timestamp": now})
+        return item
+
+    def write_local_requirement(self, project_id, relative, text, role, *, related=None):
+        """Save an owner-authored revision without changing either Git worktree."""
+        relative = _requirement_path(relative)
+        if not relative.lower().endswith(".md") or role not in REQUIREMENT_ROLES or not text.strip():
+            raise ValueError("Markdown 문서 이름과 내용을 입력하세요.")
+        data = text.encode("utf-8")
+        if len(data) > MAX_REQUIREMENT_BYTES:
+            raise ValueError("문서는 UTF-8 기준 256 KiB까지 저장할 수 있습니다.")
+        with execution_slot() as abandoned:
+            if abandoned:
+                raise Blocked("Abandoned slot requires inspection")
+            snapshot = self._snapshot()
+            events, tail = snapshot if snapshot is not None else ([], "")
+            view = self._project(events)
+            project = view["projects"].get(project_id)
+            if not project or not project["data"]["local_path"]:
+                raise Blocked("Register the original project folder first")
+            history = view.get("requirements", {}).get(project_id, [])
+            latest = next((item for item in reversed(history)
+                           if item["path"].casefold() == relative.casefold()), None)
+            if related is not None and not any(item["id"] == related for item in history):
+                raise Blocked("Related requirement does not belong to this project")
+            if latest and latest.get("storage") != "local":
+                raise FileExistsError(relative)
+            checksum = sha256(data).hexdigest()
+            root = _local_requirement_root(self.ledger.state_boundary, project_id)
+            target = root / (checksum + ".md")
+            check_path(target)
+            root.mkdir(parents=True, exist_ok=True)
+            check_path(target)
+            if not target.exists():
+                with target.open("xb") as stream:
+                    stream.write(data)
+            if _read_requirement(root, target.name, self.ledger.state_boundary, local=True) != data:
+                raise Blocked("Stored requirement does not match the authored revision")
             if latest and (latest["sha256"], latest["role"], latest["related"]) == (checksum, role, related):
                 return latest
-            now = datetime.now(timezone.utc).isoformat()
-            item = {"project_id": project_id, "path": relative, "role": role, "sha256": checksum,
-                    "version": latest["version"] + 1 if latest else 1,
-                    "supersedes": latest["id"] if latest else None, "related": related,
-                    "registered_at": now}
-            item["id"] = digest(item)
-            self.ledger.append(len(events), tail, {"kind": "requirement_registered",
-                                                  "data": item, "timestamp": now})
-            return item
+            return self._append_requirement(events, tail, project_id, relative, role, checksum, related, latest,
+                                            local=True)
 
     def write_requirement(self, project_id, relative, text, role, *, related=None):
         """Explicit owner action. Create a Markdown file exclusively, then register it."""

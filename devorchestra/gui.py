@@ -3240,7 +3240,8 @@ class CommandCenter:
             related = selected_item()
             editor = self.panel()
             editor.title("요구사항 작성")
-            ttk.Label(editor, text="원본 프로젝트 안에 새 Markdown 파일을 만듭니다. 기존 파일은 유지됩니다.").pack(anchor="w")
+            ttk.Label(editor, text="프로젝트 상대 이름으로 저장합니다. 파일은 DevOrchestra의 비공개 저장소에 보관합니다.",
+                      wraplength=480).pack(anchor="w")
             name = ttk.Entry(editor, width=58)
             name.insert(0, "requirements-" + uuid4().hex[:8] + ".md")
             name.pack(fill="x", pady=6)
@@ -3250,22 +3251,22 @@ class CommandCenter:
 
             def save_document():
                 try:
-                    item = catalog.write_requirement(
+                    item = catalog.write_local_requirement(
                         project_id, name.get().strip(), body.get("1.0", "end-1c"),
                         REQUIREMENT_ROLES[role.current()], related=related["id"] if related else None,
                     )
                 except FileExistsError:
-                    notice.configure(text="같은 이름의 문서가 있습니다. 새 파일명을 입력하세요.")
+                    notice.configure(text="같은 이름의 원본 문서가 등록되어 있습니다. 다른 이름을 입력하세요.")
                     return
                 except (Blocked, OSError, ValueError, sqlite3.Error, KeyError):
-                    notice.configure(text="저장 또는 등록 실패. 폴더·권한을 확인하고, 이미 저장된 파일은 가져오기를 사용하세요.")
+                    notice.configure(text="저장 또는 등록 실패. 문서 이름, 권한 및 실행 상태를 확인하세요.")
                     return
                 editor.destroy()
                 refresh()
                 status.configure(text=f"등록 완료 · {item['path']} · 다음 개발 기준본에 반영됩니다.")
                 self.refresh()
 
-            ttk.Button(editor, text="새 파일로 저장 및 등록", command=save_document).pack(anchor="e")
+            ttk.Button(editor, text="저장 및 등록", command=save_document).pack(anchor="e")
 
         table.bind("<<ListboxSelect>>", show_document)
         controls = ttk.Frame(panel)
