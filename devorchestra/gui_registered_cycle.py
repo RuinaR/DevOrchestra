@@ -654,6 +654,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 if checkpoint.get("interrupted_preview"):
                     summary += ("\n미리보기 오류 전에 확정된 후보를 독립 검토합니다. 이전 임시 빌드와 자동 플레이는 "
                                 "이 재개에 포함되지 않습니다. 새 실행 증거가 없으면 GUI는 미검증입니다.")
+                if checkpoint.get("prior_play_usage_unknown"):
+                    summary += "\n중단된 플레이 호출의 사용량은 미확정으로 남고, 그 호출은 재전송하지 않습니다."
                 if result.get("visual_review") and not checkpoint.get("review"):
                     summary += "\n소유 테스트 창 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                 if center.confirm("추가 예산 및 중단 작업 재개 승인", summary + instruction_note, parent=panel):
@@ -808,7 +810,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             return
         if rows and rows[0]["scope"].get("token_mode") == SUBSCRIPTION_MODE:
             end = rows[-1]
-            seconds = 1800 if (end.get("outcome") == "SIGNOFF_PENDING" or registered_cycle._interrupted_preview(rows)) else registered_cycle.manual_remaining(
+            seconds = 1800 if (end.get("outcome") == "SIGNOFF_PENDING"
+                               or registered_cycle._interrupted_preview(rows)
+                               or registered_cycle._interrupted_play(rows)) else registered_cycle.manual_remaining(
                 rows[0]["scope"], end)[0]
             if seconds < 60:
                 state.set("남은 시간이 부족합니다. 보존된 후보에서 새 세션을 검토하세요.")

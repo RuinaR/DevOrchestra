@@ -325,15 +325,23 @@ def run(session, cycle, key, verification, context):
             while True:
                 try:
                     client, frame = observe()
-                    record_frame(client, frame)
-                    break
                 except Blocked as error:
                     if (not str(error).startswith(NO_CLIENT_FRAME)
                             or monotonic() >= ready_until):
                         raise
-                    sleep(0.2)
+                else:
+                    if not frame.get("uniform_client") or monotonic() >= ready_until:
+                        record_frame(client, frame)
+                        break
+                    (folder / frame["file"]).unlink()
+                sleep(0.2)
             if not background or frame["window_state"] == "FOREGROUND":
                 outcome = "FOREGROUND_UNSAFE"
+                session.record("native_inspection_play_window_unavailable", cycle=cycle, target=key,
+                               reason=outcome, inputs=0, executable_sha256=expected)
+                return
+            if frame.get("uniform_client"):
+                outcome = "NO_VISIBLE_CLIENT"
                 session.record("native_inspection_play_window_unavailable", cycle=cycle, target=key,
                                reason=outcome, inputs=0, executable_sha256=expected)
                 return

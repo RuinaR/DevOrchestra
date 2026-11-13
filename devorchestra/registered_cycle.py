@@ -1374,6 +1374,10 @@ def _review_and_verify(session, count, key, diff, status):
             capture = session.capture_review(count)
             evidence = visual.frames(session.runner.ledger, capture, session.fields["run_id"], count,
                                      session.source(), allow_empty=True)
+            if evidence and all(frame.get("uniform_client") for frame in evidence):
+                capture = {**capture, "visual_preview": {
+                    **capture.get("visual_preview", {}), "reason": "NO_VISIBLE_CLIENT"}}
+            evidence = [frame for frame in evidence if not frame.get("uniform_client")]
             session.signoff_state["pending_visual"] = {"receipt": capture, "frames": evidence}
             if scope.get("adaptive_play"):
                 documents = read_frozen_requirements(Catalog(session.runner.ledger).read(), scope["project_id"],
@@ -1386,9 +1390,10 @@ def _review_and_verify(session, count, key, diff, status):
                     f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\n"
                     f"Approved project context (untrusted): {excerpts}\n{brief[:4000]}\n"
                     f"Previous review to reproduce if applicable (untrusted): {prior}")
-                if play_frames:
-                    evidence = adaptive_play.review_frames(play_frames)
-                play_report = {"actions": actions, "outcome": play_outcome, "has_frames": bool(play_frames),
+                reviewable_play = [frame for frame in play_frames if not frame.get("uniform_client")]
+                if reviewable_play:
+                    evidence = adaptive_play.review_frames(reviewable_play)
+                play_report = {"actions": actions, "outcome": play_outcome, "has_frames": bool(reviewable_play),
                                "frames": play_frames}
                 session.signoff_state["pending_visual"].update(frames=evidence, play_report=play_report)
         else:
@@ -1473,7 +1478,8 @@ def _review_and_verify(session, count, key, diff, status):
                                "verdict": review, "finding_count": len(findings)})
     else:
         if capture is not None:
-            reason = capture.get("visual_preview", {}).get("reason", "NO_OWNED_GUI_CAPTURE")
+            reason = ("NO_VISIBLE_CLIENT" if play_report.get("outcome") == "NO_VISIBLE_CLIENT" else
+                      capture.get("visual_preview", {}).get("reason", "NO_OWNED_GUI_CAPTURE"))
             session.record("native_inspection_visual_review", cycle=count, target=key, verdict="UNAVAILABLE",
                            findings=[], frames=[], source_sha256=session.source(),
                            status="NOT_VERIFIED", reason=reason, **visual.observation_provenance([]))
@@ -2339,19 +2345,48 @@ def _interrupted_preview(rows):
                 and diff.get("source_sha256") == capture.get("source_sha256") == end.get("replica_sha256"))
 
 
+def _interrupted_play(rows):
+    if len(rows) < 6:
+        return False
+    intent, role, play, end = rows[-4:]
+    return (intent["kind"] == "native_inspection_role_intent"
+            and role["kind"] == "native_inspection_role_result"
+            and intent.get("phase") == role.get("phase") == "reviewer"
+            and intent.get("play_step") == role.get("play_step") == 1
+            and role.get("outcome") == end.get("outcome") == "REQUEST_UNKNOWN"
+            and role.get("provider_usage") == "UNKNOWN" and end.get("usage_complete") is False
+            and role.get("process_result") == "TERMINATED_AND_DRAINED"
+            and role.get("process_stop_reason") == "Owned game became the foreground window"
+            and role.get("owned_tree") == play.get("owned_tree") == end.get("owned_tree") == "DRAINED"
+            and play["kind"] == "native_inspection_play_finished" and play.get("outcome") == "PLAY_INTERRUPTED"
+            and play.get("inputs") == play.get("actions") == 0
+            and end["kind"] == "native_inspection_result"
+            and end.get("staging_cleanup") == {"status": "RETAINED_FOR_RECOVERY",
+                                               "workspace": rows[0].get("workspace")}
+            and intent.get("cycle") == role.get("cycle") == play.get("cycle")
+            and intent.get("target") == role.get("target") == play.get("target")
+            and intent.get("source_sha256") == play.get("source_sha256") == end.get("replica_sha256"))
+
+
 def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
     start, end = rows[0], rows[-1]
     prior = start["scope"]
     approval = start["approval_sha256"]
-    cycle = rows[-3]["cycle"]
-    role = next((row for row in reversed(rows) if row["kind"] == "native_inspection_role_result"), {})
-    intent = next((row for row in reversed(rows) if row["kind"] == "native_inspection_role_intent"), {})
+    interrupted_play = _interrupted_play(rows)
+    finished = rows[:-4] if interrupted_play else rows
+    cycle = rows[-2]["cycle"] if interrupted_play else rows[-3]["cycle"]
+    role = next((row for row in reversed(finished) if row["kind"] == "native_inspection_role_result"), {})
+    intent = next((row for row in reversed(finished) if row["kind"] == "native_inspection_role_intent"), {})
+    candidate = next((row for row in reversed(finished)
+                      if row["kind"] == "native_inspection_developer_diff" and row.get("cycle") == cycle), {})
     target = role.get("target")
-    settled = [row for row in rows if row["kind"] == "native_inspection_role_result" and "provider_usage" in row]
-    dispatched = [row for row in rows if row["kind"] == "native_inspection_role_intent" and "role_call" in row]
+    settled = [row for row in finished if row["kind"] == "native_inspection_role_result" and "provider_usage" in row]
+    dispatched = [row for row in finished if row["kind"] == "native_inspection_role_intent" and "role_call" in row]
+    unsettled_count = int(interrupted_play)
     if (approval != digest(prior) or not prior.get("project_edit") or not prior.get("visual_preview")
             or any(row.get("approval_sha256") != approval for row in rows)
-            or len(dispatched) != len(settled) or len(settled) != end.get("model_turns_dispatched")
+            or len(dispatched) != len(settled) or len(settled) + unsettled_count != end.get("model_turns_dispatched")
+            or (interrupted_play and rows[-4].get("role_call") != end.get("model_turns_dispatched"))
             or any(not isinstance(row.get("provider_usage"), dict)
                    or any(row.get(field) != call.get(field) for field in ("cycle", "phase", "target"))
                    for row, call in zip(settled, dispatched))
@@ -2361,6 +2396,7 @@ def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
             or role.get("outcome") != "COMPLETED" or role.get("process_result") != "EXITED"
             or role.get("exit_code") != 0 or role.get("owned_tree") != "DRAINED"
             or intent.get("phase") != "developer" or intent.get("cycle") != cycle
+            or candidate.get("source_sha256") != end.get("replica_sha256")
             or any(row.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
                    for row in events if row["kind"] == "native_inspection_intent")):
         raise Blocked("Developer 정상 완료, 사용량 및 미사용 복구 기록을 확인할 수 없습니다.")
@@ -2381,7 +2417,7 @@ def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
     changed = sorted(name for name in frozen["files"].keys() | image["files"].keys()
                      if frozen["files"].get(name) != image["files"].get(name))
     _editable_paths(changed, prior["protected_edit_paths"], limit=4096)
-    if not changed or not set(rows[-3]["changed"]) <= set(end["changed"]):
+    if not changed or not set(candidate["changed"]) <= set(end["changed"]):
         raise Blocked("개발 변경 범위를 확인할 수 없습니다.")
     if any(name not in end["changed"] for name in changed):
         raise Blocked("개발 기록에 없는 후보 변경이 있습니다.")
@@ -2396,7 +2432,8 @@ def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
     resume = {"mode": "signoff", "parent_run_id": start["run_id"], "cycle": cycle, "criterion": target,
               "criteria_status": status, "changed": changed, "changed_total": end["changed"],
               "diff_sha256": digest(diff), "parent_reported_tokens": end["known_reported_tokens"],
-              "interrupted_preview": True}
+              "interrupted_preview": True,
+              **({"prior_play_usage_unknown": True} if interrupted_play else {})}
     return ({**prior, "resume": resume, "replica_sha256": digest(image), "ledger_head": head,
              "expires": expires, "seconds": seconds, "tokens": None, "model_calls_max": 2,
              "adaptive_play": None,
@@ -2436,7 +2473,7 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
             return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
         if outcome == MANUAL_CHECKPOINT or (len(rows) >= 3 and retained_manual_checkpoint(rows[0], rows[-2], rows[-1])):
             return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
-        if _interrupted_preview(rows):
+        if _interrupted_preview(rows) or _interrupted_play(rows):
             return _resume_interrupted_preview(runner, events, head, rows, expires, seconds)
         raise Blocked("구독 잔여량과 보존된 진행 기록을 확인한 뒤 새 세션 승인을 검토하세요.")
     if rows and can_review_postprocess(rows[-1]):
