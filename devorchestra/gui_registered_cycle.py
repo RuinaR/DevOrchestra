@@ -636,6 +636,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                 "승인합니다. 기존 요청은 재전송하지 않으며 이전 기능 검증 결과를 승계하지 않습니다.")
                     if "candidate_plan" in result:
                         summary += "\n저장된 Manager 계획으로 새 Developer 작업을 시작합니다."
+                elif "candidate_plan" in result and candidate.get("tool_plan"):
+                    summary += "\n저장된 Manager 계획의 도구를 다시 준비한 뒤 Developer부터 시작합니다."
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary + _play_approval(result), parent=panel):
                 launch(result)
             else:

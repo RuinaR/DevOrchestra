@@ -9,10 +9,12 @@ from time import monotonic
 from urllib.error import URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from uuid import uuid4
 from zipfile import BadZipFile, ZipFile
 
 from .lease import Blocked
-from .ledger import check_path
+from .ledger import check_path, digest
+from .replica_evidence import fingerprint
 
 
 PREFIX = ".devorchestra-tools-"
@@ -41,6 +43,18 @@ def _transport_failure(error, message):
     if isinstance(cause, ssl.SSLCertVerificationError):
         return PackageRuntimeUnavailable("도구 다운로드 서버의 TLS 인증서를 검증할 수 없습니다.")
     return PackageUnavailable(message)
+
+
+def _release_metadata_with_retry(item, check):
+    try:
+        return github_package(item, check)
+    except PackageRuntimeUnavailable as error:
+        cause = getattr(error.__cause__, "reason", error.__cause__)
+        if not isinstance(cause, ssl.SSLCertVerificationError):
+            raise
+        # A fresh connection may receive a different valid chain. Verification stays enabled.
+        check()
+        return github_package(item, check)
 
 
 def selection(requested):
@@ -184,6 +198,153 @@ def download_github(tool, path, check):
         return _download(tool, path, check)
     except (URLError, TimeoutError, FileNotFoundError, ssl.SSLCertVerificationError) as error:
         raise _transport_failure(error, "GitHub ZIP을 내려받을 수 없습니다.") from error
+
+
+def _archive_identity(proof):
+    sha, size = proof.get("sha256"), proof.get("bytes")
+    if (type(sha) is not str or not re.fullmatch(r"[a-f0-9]{64}", sha)
+            or type(size) is not int or not 0 < size <= MAX_DOWNLOAD):
+        raise Blocked("Invalid tool archive receipt")
+    return {"sha256": sha, "bytes": size}
+
+
+def _copy_verified(source, target, proof, check):
+    check()
+    check_path(source)
+    check_path(target)
+    if fingerprint(source, MAX_DOWNLOAD) != proof:
+        raise Blocked("Cached tool archive SHA-256 or size mismatch")
+    with source.open("rb") as reader, target.open("xb") as writer:
+        for _ in range((proof["bytes"] + 1024**2 - 1) // 1024**2):
+            check()
+            writer.write(reader.read(1024**2))
+        if reader.read(1):
+            raise Blocked("Cached tool archive grew during staging")
+    if fingerprint(target, MAX_DOWNLOAD) != proof:
+        raise Blocked("Staged tool archive SHA-256 or size mismatch")
+    check()
+
+
+def _cache_path(ledger, sha):
+    root = ledger.local_directory("state", create=True) / "tool-archives"
+    check_path(root)
+    root.mkdir(exist_ok=True)
+    return root / (sha + ".zip")
+
+
+def _publish_archive(ledger, archive, proof, check):
+    target = _cache_path(ledger, proof["sha256"])
+    check_path(target)
+    if target.exists():
+        if fingerprint(target, MAX_DOWNLOAD) != proof:
+            raise Blocked("Cached tool archive SHA-256 or size mismatch")
+        return
+    pending = target.with_name(f".{uuid4().hex}.part")
+    try:
+        _copy_verified(archive, pending, proof, check)
+        pending.rename(target)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def _cached_release(ledger, item, archive, check, *, expected_sha=None):
+    """Trust the verified ledger receipt, never a cache filename or an extracted directory."""
+    events, _ = ledger.snapshot()
+    runs, retained = {}, {}
+    for event in events:
+        run = event.get("run_id")
+        if event["kind"] == "native_inspection_intent" and run:
+            runs[run] = event
+        elif event["kind"] == "native_inspection_result" and event.get("owned_tree") == "DRAINED":
+            cleanup = event.get("staging_cleanup", {})
+            workspace = cleanup.get("workspace")
+            if (cleanup.get("status") == "RETAINED_FOR_RECOVERY"
+                    and isinstance(workspace, str) and re.fullmatch(r"native-command-[a-z0-9_]+", workspace)):
+                retained[run] = workspace
+    matches = []
+    for event in reversed(events):
+        exact = all(event.get(key) == value for key, value in item.items())
+        same_bytes = (expected_sha is not None and event.get("sha256") == expected_sha)
+        if (event["kind"] != "native_inspection_project_tool_ready" or event.get("integrity") != "PUBLISHED_SHA256"
+                or not (exact or same_bytes)):
+            continue
+        intent = runs.get(event.get("run_id"), {})
+        scope = intent.get("scope", {})
+        if (not scope.get("install") or scope.get("portable_source_policy") != GITHUB_POLICY
+                or "portable-tools" not in scope.get("permissions", ())
+                or intent.get("approval_sha256") != digest(scope)
+                or intent.get("approval_sha256") != event.get("approval_sha256")
+                or not all(type(event.get(key)) is str for key in item)):
+            continue
+        matches.append(event)
+    if not matches:
+        return None
+    proof = _archive_identity(matches[0])
+    if expected_sha is not None and proof["sha256"] != expected_sha:
+        raise Blocked("Current release digest differs from the verified cache receipt")
+    if any(_archive_identity(event) != proof for event in matches):
+        raise Blocked("Published tool archive receipts conflict for this release")
+    cached = _cache_path(ledger, proof["sha256"])
+    check_path(cached)
+    if cached.exists():
+        _copy_verified(cached, archive, proof, check)
+        return proof, "VERIFIED_CACHE"
+    for event in matches:
+        workspace = retained.get(event["run_id"])
+        if workspace and runs[event["run_id"]].get("workspace") == workspace:
+            source = (ledger.local_directory("temp") / workspace / "tmp" / "portable-zips"
+                      / ("github-" + digest({key: event[key] for key in item})[:16] + ".zip"))
+            check_path(source)
+            if source.is_file():
+                _copy_verified(source, archive, proof, check)
+                _publish_archive(ledger, archive, proof, check)
+                return proof, "VERIFIED_RECOVERY_ARCHIVE"
+    return None
+
+
+def cached_release_hints(ledger):
+    """Expose exact prior package coordinates for planning; admission rechecks the receipt and bytes."""
+    events, _ = ledger.snapshot()
+    root = ledger.local_directory("state") / "tool-archives"
+    check_path(root)
+    hints = []
+    for event in reversed(events):
+        if (event["kind"] != "native_inspection_project_tool_ready"
+                or event.get("integrity") != "PUBLISHED_SHA256"
+                or not all(type(event.get(key)) is str for key in ("repository", "ref", "asset"))):
+            continue
+        proof = _archive_identity(event)
+        path = root / (proof["sha256"] + ".zip")
+        check_path(path)
+        item = {key: event[key] for key in ("repository", "ref", "asset")}
+        if path.is_file() and item not in hints:
+            selection([item])
+            hints.append(item)
+            if len(hints) == 8:
+                break
+    return hints
+
+
+def prepare_github(ledger, item, archive, check, *, network_failure=None):
+    selection([item])
+    if item["asset"]:
+        cached = _cached_release(ledger, item, archive, check)
+        if cached:
+            proof, origin = cached
+            return {**proof, "integrity": "PUBLISHED_SHA256", "archive_source": origin}
+    if network_failure is not None:
+        raise PackageRuntimeUnavailable(network_failure)
+    descriptor = _release_metadata_with_retry(item, check)
+    if descriptor["sha256"]:
+        cached = _cached_release(ledger, item, archive, check, expected_sha=descriptor["sha256"])
+        if cached:
+            proof, origin = cached
+            return {**proof, "integrity": "PUBLISHED_SHA256", "archive_source": origin}
+    proof = download_github(descriptor, archive, check)
+    if descriptor["sha256"]:
+        _publish_archive(ledger, archive, _archive_identity(proof), check)
+    return {**proof, "integrity": "PUBLISHED_SHA256" if descriptor["sha256"] else "PINNED_GIT_COMMIT",
+            "archive_source": "OFFICIAL_DOWNLOAD"}
 
 
 def _member_path(name):

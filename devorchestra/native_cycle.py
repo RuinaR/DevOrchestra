@@ -514,7 +514,7 @@ class _FixtureSession:
         label = f"{cycle}-{phase}" + (f"-play-{play_step}" if play_step is not None else "")
         limit = self.scope["role_tokens"][phase]
         graceful = "graceful_stop" in self.scope
-        if self.model_calls_exhausted():
+        if _FixtureSession.model_calls_exhausted(self):
             raise Blocked("SIGNOFF_PENDING" if graceful and phase in {"reviewer", "manager-final"} else "TOKEN_LIMIT")
         if graceful:
             finishing = self.admit_graceful(phase, limit or 0, **({"play_step": play_step} if play_step else {}))
@@ -687,7 +687,7 @@ class _FixtureSession:
             if monotonic() - role_started >= self.scope["role_deadlines"][phase]:
                 self.request_stop("ROLE_TIME", phase)
             self.soft_boundary(phase)
-        if outcome == "COMPLETED":
+        if outcome == "COMPLETED" and self.scope.get("token_mode") == SUBSCRIPTION_MODE:
             self.after_model(phase, play_step)
         if not shell_tools and receipt["command_events"]:
             raise Blocked("A role with shell disabled returned command execution events")

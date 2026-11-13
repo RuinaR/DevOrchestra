@@ -425,6 +425,7 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image, *,
         # Older checkpoints only retained the last rejected criterion. Avoid immediately pinning it again.
         deferred[rework["target"]] = {"kind": "REPEATED_NO_PROGRESS", "reason": rework["review"]}
     return {"run_id": end["run_id"], "receipt_sha256": digest(end), "changed": end["changed"],
+            **({"tool_plan": saved_progress["tool_plan"]} if progress_checkpoint and "tool_plan" in saved_progress else {}),
             **({"rework": rework} if rework else {}),
             **({"deferred_criteria": deferred,
                 "prerequisite_scope_sha256": prerequisite_scope_hash(prior)}
@@ -603,6 +604,18 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     if prior_replica_candidate and prior_replica_candidate.get("unsettled_candidate"):
         if saved := _candidate_plan(ledger, events, scope):
             scope["candidate_plan"] = {"run_id": saved[0], "sha256": digest(saved[1])}
+    if prior_replica_candidate and (plan := prior_replica_candidate.get("tool_plan")):
+        parent = prior_replica_candidate["run_id"]
+        start = next(row for row in events if row.get("run_id") == parent
+                     and row["kind"] == "native_inspection_intent")
+        prior = start["scope"]
+        if (all(prior.get(key) == scope.get(key) for key in (
+                "project_revision", "goal", "criteria", "requirements", "permissions",
+                "verifier", "protected_edit_paths", "planning_protocol", "project_evidence_contract"))
+                and _allows_github_tools(scope)
+                and any(row.get("run_id") == parent and row["kind"] == "native_inspection_plan_accepted"
+                        and row.get("plan_sha256") == digest(plan) for row in events)):
+            scope["candidate_plan"] = {"run_id": parent, "sha256": digest(plan)}
     return scope
 
 
@@ -866,6 +879,7 @@ class RegisteredSession(_FixtureSession):
         self.refresh_quota("session-start", force=True)
         self.changes = list(self.scope.get("prior_replica_candidate", {}).get("changed", ()))
         self.last_diff = ""
+        self.package_network_failure = None
         if preview := self.scope.get("resume", {}).get("saved_preview"):
             recovery = self.runner.ledger.local_directory("recovery") / preview["directory"]
             bundle = snapshot(recovery, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
@@ -937,13 +951,19 @@ class RegisteredSession(_FixtureSession):
                         self.github_artifacts = {}
                     proof = self.github_artifacts.get(name)
                     if proof is None:
-                        descriptor = project_tools.github_package(package, self.check)
-                        proof = project_tools.download_github(descriptor, archive, self.check)
-                        proof["integrity"] = "PUBLISHED_SHA256" if descriptor["sha256"] else "PINNED_GIT_COMMIT"
+                        try:
+                            proof = project_tools.prepare_github(
+                                self.runner.ledger, package, archive, self.check,
+                                network_failure=self.package_network_failure)
+                        except project_tools.PackageRuntimeUnavailable as error:
+                            self.package_network_failure = str(error)
+                            raise
                         self.github_artifacts[name] = proof
                     elif fingerprint(archive, project_tools.MAX_DOWNLOAD) != {
                             key: proof[key] for key in ("sha256", "bytes")}:
                         raise Blocked("보존된 GitHub ZIP SHA-256 불일치")
+                    else:
+                        proof = {**proof, "archive_source": "VERIFIED_SESSION_ARCHIVE"}
                     destination = root / name
                     destination.mkdir()
                     project_tools.extract(archive, destination, self.check)
@@ -1224,8 +1244,12 @@ class RegisteredSession(_FixtureSession):
         build = self.scratch / f"{cycle}-gui-build"
         check_path(build)
         if not build.is_dir():
-            return {"status": "NOT_VERIFIED", "reason": "NO_RUNNABLE_GUI"}
+            return {"status": "NOT_VERIFIED", "reason": "PREVIEW_BUILD_DIRECTORY_MISSING"}
         bundle = snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
+        if (self.scope.get("project_evidence_contract") and "preview.json" not in bundle["files"]):
+            reason = ("PREVIEW_MANIFEST_MISSING" if any(name.lower().endswith(".exe") for name in bundle["files"])
+                      else "PREVIEW_EXECUTABLE_MISSING")
+            return {"status": "NOT_VERIFIED", "reason": reason}
         try:
             name = preview_entry(build, bundle["files"], legacy=not self.scope.get("project_evidence_contract"))
         except Blocked:
@@ -1253,7 +1277,11 @@ class RegisteredSession(_FixtureSession):
                                   "Owned process exited before window observation", "MXC probe timeout",
                                   "Owned window rendered no usable visual evidence"}:
                 raise
-            return {"status": "NOT_VERIFIED", "reason": "GUI_PREVIEW_DID_NOT_SETTLE", "detail": str(error)}
+            return {"status": "NOT_VERIFIED", "reason": "GUI_PREVIEW_WINDOW_OR_CAPTURE_UNAVAILABLE",
+                    "detail": str(error)}
+        except PermissionError:
+            # The process boundary is unresolved unless the owned launcher supplied a drain receipt.
+            raise Blocked("GUI_PREVIEW_EXECUTION_PERMISSION_UNVERIFIED") from None
         finally:
             for worker in workers:
                 worker.join(1)
@@ -1267,7 +1295,9 @@ class RegisteredSession(_FixtureSession):
             self.owned_verified = False
             raise Blocked("GUI preview Job is unresolved")
         if result["exitCode"] or not captured:
-            return {"status": "NOT_VERIFIED", "reason": "GUI_PREVIEW_FAILED", "exit_code": result["exitCode"]}
+            return {"status": "NOT_VERIFIED",
+                    "reason": "GUI_PREVIEW_EXECUTION_FAILED" if result["exitCode"] else "GUI_PREVIEW_CAPTURE_MISSING",
+                    "exit_code": result["exitCode"]}
         artifact = self.runner.ledger.local_directory("recovery", create=True) / (
             f"gui-{self.fields['run_id']}-{cycle}-preview")
         artifact.mkdir()
@@ -1831,7 +1861,8 @@ def _bounded_rework(criteria, feedback):
     return None
 
 
-def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS", feedback=None, deferred=None):
+def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS", feedback=None, deferred=None,
+                        tool_plan=None):
     if not session.owned_verified or not session.usage_complete:
         raise Blocked("NO_PROGRESS")
     session.check()
@@ -1841,6 +1872,7 @@ def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS", feed
     session.record("native_inspection_progress_checkpoint", cycle=cycle, source_sha256=session.source(),
                    changed=session.changes, accepted_without_functional_check=sorted(accepted),
                    **({"deferred_criteria": deferred} if deferred else {}),
+                   **({"tool_plan": tool_plan} if tool_plan else {}),
                    **({"rework": rework} if rework else {}))
     return outcome
 
@@ -1867,6 +1899,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
     deferred = {}
     if prior_candidate.get("prerequisite_scope_sha256") == prerequisite_scope_hash(scope):
         deferred.update(prior_candidate["deferred_criteria"])
+    if initial_plan and prior_candidate.get("tool_plan") == initial_plan:
+        deferred.pop(initial_plan["criterion"], None)
     count = stagnant = 0
     feedback = ({"new_work": True, "existing_files": base["changed"],
                  "existing_plan": base["existing_plan"],
@@ -1900,8 +1934,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         session.changes = continuation["changed"]
     pause = getattr(session, "pause", None)
 
-    def stop(cycle, *, outcome="NO_PROGRESS", feedback=None):
-        return _save_progress_stop(session, cycle, accepted, outcome=outcome, feedback=feedback, deferred=deferred)
+    def stop(cycle, *, outcome="NO_PROGRESS", feedback=None, tool_plan=None):
+        return _save_progress_stop(session, cycle, accepted, outcome=outcome, feedback=feedback, deferred=deferred,
+                                   tool_plan=tool_plan)
 
     def defer(cycle, criterion, kind, reason):
         nonlocal stagnant
@@ -1963,6 +1998,11 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                               "deferred_criteria": deferred,
                               "project_files": sorted(session.image["files"])[:60],
                               "project_toolchain_hints": discovery(session.image["files"]),
+                              "tool_download_status": ("UNAVAILABLE_THIS_SESSION"
+                                                       if getattr(session, "package_network_failure", None) else "AVAILABLE_TO_TRY"),
+                              "local_release_candidates": (project_tools.cached_release_hints(session.runner.ledger)
+                                                           if scope.get("project_evidence_contract")
+                                                           and _allows_github_tools(scope) else []),
                               "independent_check_criteria": sorted(scope["verifier"].get("checks", {})),
                               "prior_result": feedback}, ensure_ascii=False)
         pending = [key for key, value in status.items()
@@ -2040,7 +2080,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 schema["properties"]["tools"] = {"type": "array", "items": _response_schema(
                     repository=None, ref=None, asset=None)}
                 schema["required"].append("tools")
-                tool_prompt = ("Reuse available tools first. If needed, research a reputable public GitHub project "
+                tool_prompt = ("Reuse available tools first. Prefer exact local_release_candidates when compatible. "
+                               "Keep the repository, tag and asset unchanged when selecting a local release. "
+                               "If needed, research a reputable public GitHub project "
                                "with a compatible license. List only the required packages in tools. For a "
                                "portable Windows ZIP set repository to owner/name, ref to the exact release tag "
                                "and asset to its exact .zip filename. For reusable source set ref to the full "
@@ -2166,11 +2208,16 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 diff = ""
             except project_tools.PackageRuntimeUnavailable as error:
                 defer(count, key, "PREREQUISITE", str(error))
-                return stop(count, outcome=NEEDS_INPUT, feedback=feedback)
+                if eligible == {key}:
+                    return stop(count, outcome=NEEDS_INPUT, feedback=feedback, tool_plan=plan)
+                feedback = {"target": key, "next": "CONTINUE", "instruction":
+                            "New downloads are unavailable in this session. Select independent work that uses "
+                            "existing tools, an exact verified cached release, or no new package."}
+                continue
             except project_tools.PackageUnavailable as error:
                 defer(count, key, "PREREQUISITE", str(error))
                 if eligible == {key}:
-                    return stop(count, outcome=NEEDS_INPUT, feedback=feedback)
+                    return stop(count, outcome=NEEDS_INPUT, feedback=feedback, tool_plan=plan)
                 continue
             except Blocked as error:
                 if str(error) != "GRACEFUL_STOP":
@@ -3259,7 +3306,9 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
         ledger = runner.ledger
         initial_plan = None
         if not resume and "candidate_plan" in scope:
-            saved = _candidate_plan(ledger, events, scope)
+            candidate = scope["prior_replica_candidate"]
+            saved = ((candidate["run_id"], candidate["tool_plan"]) if "tool_plan" in candidate
+                     else _candidate_plan(ledger, events, scope))
             if not saved or scope["candidate_plan"] != {"run_id": saved[0], "sha256": digest(saved[1])}:
                 raise Blocked("승인한 기존 Manager 계획의 증거가 변경됐습니다.")
             initial_plan = saved[1]
