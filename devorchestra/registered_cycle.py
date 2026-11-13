@@ -437,7 +437,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
               manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False, game_limits=None, visual_review=False,
               play=False, tools=None):
     now = time()
-    if type(play) is not bool or (play and (not visual_review or game_limits is None)):
+    if (type(play) not in (bool, dict) or
+            (play is not False and (not visual_review or game_limits is None))):
         raise Blocked("AI 플레이에는 이미지 검토와 역할별 예산 승인이 필요합니다.")
     if game_limits is not None:
         (game_pilot.validate_limits if game else validate_limits)(game_limits)
@@ -567,7 +568,9 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         if player:
             candidate_base["player_report"] = {"origin": "USER_REPORTED", "ratings": player["ratings"],
                                                "finished": player["finished"]}
-    play_policy = adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI)) if play else None
+    play_policy = (adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI),
+                                         limits=play if isinstance(play, dict) else None)
+                   if play is not False else None)
     scope = {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),
             **({"visual_review": True, "replica_head": onboarding["replica_head"]} if visual_review else {}),
@@ -1045,6 +1048,10 @@ class RegisteredSession(_FixtureSession):
                 'Write preview.json at that folder root as {"kind":"windows-gui","entry":"relative/path.exe"}. '
                 "Build from the current replica. The Controller will launch that EXE without arguments, "
                 "offline, and capture its owned startup window. Keep a visible window open for observation. "
+                "For AI play, use a project-supported non-activating QA launch and verify it actually renders "
+                "and receives window-targeted input without taking focus. Keep this setting in the disposable "
+                "preview bundle (for example Godot's executable-local override.cfg when compatible). "
+                "Report any unsupported input or rendering separately. Do not change the production startup. "
                 "Keep generated files out of the replica. If the project has no runnable GUI yet, "
                 "continue the planned development and leave the preview absent."
             )

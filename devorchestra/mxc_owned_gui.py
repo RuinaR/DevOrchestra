@@ -143,7 +143,16 @@ def _capture(window, path, workers):
         window.check()
         worker.join(0.03)
     data = future.result()
-    if len(set(data)) < 8:
+    # Window chrome can make PrintWindow look successful while the game client is blank.
+    left, top, client_width, client_height = window.client_in_image()
+    x0, x1 = max(0, left), min(width, left + client_width)
+    y0, y1 = max(0, top), min(height, top + client_height)
+    if x0 >= x1 or y0 >= y1:
+        raise Blocked("Owned window rendered no usable visual evidence")
+    first = data[(y0 * width + x0) * 4:(y0 * width + x0) * 4 + 3]
+    if all(data[(row * width + col) * 4:(row * width + col) * 4 + 3] == first
+           for row in range(y0, y1, max(1, (y1 - y0) // 64))
+           for col in range(x0, x1, max(1, (x1 - x0) // 64))):
         raise Blocked("Owned window rendered no usable visual evidence")
     stride = width * 4
     rows = []

@@ -20,6 +20,15 @@ def proposal(action="keys", keys=("ENTER",), ms=45, x=0, y=0):
 
 
 class PlayTests(unittest.TestCase):
+    def test_explicit_play_limits_preserve_the_input_contract(self):
+        policy = adaptive_play.approval(limits={"input_steps": 24, "seconds": 900})
+        self.assertEqual(48, policy["steps"])
+        self.assertEqual(24, policy["input_steps"])
+        adaptive_play.validate_policy(policy)
+        for change in ({"steps": 49}, {"seconds": 1801}, {"input_steps": True}, {"keys": ["ALT"]}):
+            with self.subTest(change=change), self.assertRaises(Blocked):
+                adaptive_play.validate_policy({**policy, **change})
+
     def test_launch_focus_can_settle_without_sending_input(self):
         window = Mock()
         window.is_foreground.side_effect = [True, False]
@@ -155,7 +164,8 @@ class Fixture : Form {
                                                    "adaptive_play": adaptive_play.approval()},
                 owned_verified=True, stop_reason=None, calls=0, usage=0, scratch=scratch, work=work, logs=logs,
                 source=lambda: "source", record=Mock(), check=Mock(), check_image=Mock(),
-                binary=executable, verify_env=os.environ.copy(), soft_boundary=Mock())
+                binary=executable, verify_env=os.environ.copy(), soft_boundary=Mock(),
+                runtime_environment=registered_cycle.RegisteredSession.runtime_environment)
             selected = []
 
             def choose(_cycle, role, _key, _prompt, **options):

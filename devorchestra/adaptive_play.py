@@ -21,7 +21,10 @@ GODOT_DECISIONS = 24
 GODOT_SECONDS = 720
 MAX_HOLD_MS = 600
 MAX_KEYS = 3
+MAX_INPUT_STEPS = 64
+MAX_PLAY_SECONDS = 1800
 FOREGROUND_SETTLE_SECONDS = 4
+FIRST_FRAME_SECONDS = 8
 GAME_EXECUTABLE_LIMIT = 256 * 1024**2
 GODOT_PLAY_OVERRIDE = b"[display]\nwindow/size/no_focus=true\n"
 KEYS = {**{name: ord(name) for name in "WASDQEZXRFCV"},
@@ -48,9 +51,23 @@ def _legacy_approval():
             "max_keys": MAX_KEYS, "max_hold_ms": MAX_HOLD_MS}
 
 
-def approval(*, godot=False):
-    return {**_legacy_approval(), "steps": GODOT_DECISIONS if godot else 6,
-            "seconds": GODOT_SECONDS if godot else SECONDS, "input_steps": GODOT_INPUTS if godot else STEPS}
+def approval(*, godot=False, limits=None):
+    if limits is None:
+        return {**_legacy_approval(), "steps": GODOT_DECISIONS if godot else 6,
+                "seconds": GODOT_SECONDS if godot else SECONDS, "input_steps": GODOT_INPUTS if godot else STEPS}
+    if (type(limits) is not dict or limits.keys() != {"input_steps", "seconds"}
+            or type(limits["input_steps"]) is not int or not 1 <= limits["input_steps"] <= MAX_INPUT_STEPS
+            or type(limits["seconds"]) is not int or not 60 <= limits["seconds"] <= MAX_PLAY_SECONDS):
+        raise Blocked("AI 플레이 입력은 1~64회, 실행 시간은 60~1,800초로 지정하세요.")
+    return {**_legacy_approval(), **limits, "steps": limits["input_steps"] * 2}
+
+
+def validate_policy(policy):
+    if policy in (_legacy_approval(), approval(), approval(godot=True)):
+        return
+    if (not isinstance(policy, dict)
+            or approval(limits={key: policy.get(key) for key in ("input_steps", "seconds")}) != policy):
+        raise Blocked("Approved play action limits changed")
 
 
 def review_frames(frames):
@@ -178,15 +195,15 @@ def run(session, cycle, key, verification, context):
     session.check()
     session.check_image()
     policy = session.scope.get("adaptive_play")
-    if policy not in (_legacy_approval(), approval(), approval(godot=True)):
-        raise Blocked("Approved play action limits changed")
+    validate_policy(policy)
     target = _candidate(session, cycle, verification)
     if target is None or not _budget(session):
-        return [], [], "NO_PLAYABLE_CANDIDATE" if target is None else "PLAY_BUDGET"
+        outcome = "NO_PLAYABLE_CANDIDATE" if target is None else "PLAY_BUDGET"
+        session.record("native_inspection_play_finished", cycle=cycle, target=key, outcome=outcome,
+                       source_sha256=session.source(), actions=0, inputs=0)
+        return [], [], outcome
     directory, name, expected, args = target
     game_export = verification.get("game", {}).get("outcome") == "PASS"
-    if policy == approval(godot=True) and not game_export:
-        return [], [], "NO_PLAYABLE_CANDIDATE"
     binary = directory / name
     check_path(binary)
     bundle_options = {}
@@ -220,7 +237,8 @@ def run(session, cycle, key, verification, context):
     started = monotonic()
     input_limit = policy.get("input_steps", policy["steps"])
     session.record("native_inspection_play_started", cycle=cycle, target=key, source_sha256=session.source(),
-                   executable_sha256=expected, bundle_sha256=digest(bundle), backend="CODEX_IMAGE_OWNED_WINDOW")
+                   executable_sha256=expected, bundle_sha256=digest(bundle), backend="CODEX_IMAGE_OWNED_WINDOW",
+                   approved_limits=policy)
 
     def interact(api, job, deadline):
         def play(window, capture):
@@ -247,8 +265,20 @@ def run(session, cycle, key, verification, context):
 
             if not _wait_for_background(window, deadline):
                 outcome = "FOREGROUND_UNSAFE"
+                session.record("native_inspection_play_window_unavailable", cycle=cycle, target=key,
+                               reason=outcome, inputs=0, executable_sha256=expected)
                 return
-            client = observe()
+            # A newly created HWND can precede the first rendered game frame.
+            ready_until = min(deadline, monotonic() + FIRST_FRAME_SECONDS)
+            while True:
+                try:
+                    client = observe()
+                    break
+                except Blocked as error:
+                    if (str(error) != "Owned window rendered no usable visual evidence"
+                            or monotonic() >= ready_until):
+                        raise
+                    sleep(0.2)
             input_count = 0
             for step in range(1, policy["steps"] + 1):
                 session.soft_boundary("reviewer")
@@ -352,7 +382,8 @@ def run(session, cycle, key, verification, context):
         if session.owned_verified:
             session.record("native_inspection_play_finished", cycle=cycle, target=key, outcome=outcome,
                            owned_tree="DRAINED", elapsed_seconds=round(monotonic() - started, 2),
-                           source_sha256=session.source(), executable_sha256=expected, actions=len(actions))
+                           source_sha256=session.source(), executable_sha256=expected, actions=len(actions),
+                           inputs=sum(row["action"]["action"] in INPUT_ACTIONS for row in actions))
     if not session.owned_verified:
         raise Blocked("Owned play resources are unresolved")
     session.check()

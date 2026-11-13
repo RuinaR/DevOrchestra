@@ -26,6 +26,7 @@ ROLE_LABELS = {"manager-planning": "계획 Manager", "developer": "Developer",
 ROLE_TOKEN_FIELDS = {"manager-planning": "manager_tokens", "developer": "developer_tokens",
                      "reviewer": "reviewer_tokens", "manager-final": "final_manager_tokens"}
 BUDGET_FIELDS = ("seconds", "tokens", "cycles", *ROLE_TOKEN_FIELDS.values())
+PLAY_FIELDS = {"play_inputs": "input_steps", "play_seconds": "seconds"}
 
 
 def _scope_preferences(scope):
@@ -46,6 +47,8 @@ def _scope_preferences(scope):
     for role, field in ROLE_TOKEN_FIELDS.items():
         if (amount := scope.get("role_tokens", {}).get(role)) is not None:
             values[field] = str(amount)
+    if policy := scope.get("adaptive_play"):
+        values.update((field, str(policy[key])) for field, key in PLAY_FIELDS.items() if key in policy)
     return values
 
 
@@ -258,11 +261,25 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     use_images = tk.BooleanVar(panel, value=draft.get("use_images") is True)
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
     spec = None
+    play_entries = {}
 
     def play_option():
         ttk.Checkbutton(body, text="AI 플레이 · 모델이 소유 게임 창의 다음 행동을 선택",
                         variable=use_play,
                         command=lambda: use_images.set(True) if use_play.get() else None).pack(anchor="w")
+        if is_godot and project == game_pilot.PROJECT and not resume_only:
+            return
+        limits = ttk.Frame(body)
+        limits.pack(fill="x")
+        for field, title in (("play_inputs", "사이클당 AI 입력 상한 (1~64회)"),
+                             ("play_seconds", "플레이 창 실행 시간 (60~1,800초)")):
+            row = len(play_entries)
+            ttk.Label(limits, text=title).grid(row=row, column=0, sticky="w", padx=(0, 8))
+            entry = play_entries[field] = ttk.Entry(limits, width=12)
+            entry.insert(0, draft.get(field, ""))
+            entry.grid(row=row, column=1, sticky="w")
+        ttk.Label(limits, text="빈 값은 기본값을 사용합니다. 저장된 세션은 기존 승인 한도를 유지합니다.").grid(
+            row=2, column=0, columnspan=2, sticky="w")
     ttk.Button(body, text="시각 검토 결과와 캡처 보기",
                command=lambda: _open_visual_report(center, runner, project)).pack(anchor="w")
     if is_godot and project == game_pilot.PROJECT and not resume_only:
@@ -324,6 +341,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         preferences.update((key, entries[key].get()) for key in (*BUDGET_FIELDS, "files"))
         preferences.update(whole_replica=whole.get(), token_mode=SUBSCRIPTION_MODE if subscription.get() else "fixed",
                            use_images=use_images.get(), use_play=use_play.get())
+        preferences.update((field, entry.get().strip()) for field, entry in play_entries.items())
         if spec is not None:
             try:
                 preferences["verifier"] = read_spec()
@@ -706,6 +724,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 names = {**LABELS, "whole_replica": "복제본 전체 개발", "files": "수정 경로",
                          "token_mode": "예산 모드", "use_images": "시각 검토", "use_play": "AI 플레이",
                          "verifier": "독립 검증", "seconds": "시간", "tokens": "세션 토큰", "cycles": "사이클 상한",
+                         "play_inputs": "AI 입력 상한", "play_seconds": "플레이 시간",
                          **{field: f"{ROLE_LABELS[role]} 토큰" for role, field in ROLE_TOKEN_FIELDS.items()}}
                 changes = [label for key, label in names.items() if prior.get(key) != current.get(key)]
                 if changes:
@@ -762,11 +781,21 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 raise ValueError("수정할 파일을 입력하거나 ‘복제본 전체 개발’을 선택하세요.")
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     files, permissions, verifier, role_tokens["manager-planning"])
+            play = use_play.get()
+            if play and any(entry.get().strip() for entry in play_entries.values()):
+                from . import adaptive_play
+                default = adaptive_play.approval(godot=registered_cycle.godot_verifier_spec(verifier))
+                try:
+                    play = {key: int(play_entries[field].get().strip() or default[key])
+                            for field, key in PLAY_FIELDS.items()}
+                except ValueError as error:
+                    raise ValueError("AI 플레이 입력 횟수와 실행 시간은 정수로 입력하세요.") from error
+                adaptive_play.approval(limits=play)
         except (RuntimeError, ValueError) as error:
             state.set(str(error))
             return
         cancelled.clear()
-        submit(args, soft_limits=limits, visual_review=use_images.get(), play=use_play.get())
+        submit(args, soft_limits=limits, visual_review=use_images.get(), play=play)
 
     def resume():
         try:

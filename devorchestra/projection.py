@@ -49,7 +49,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
     rows = [row for row in events if row.get("run_id") == start["run_id"]
             and row.get("probe_kind") == KIND and row.get("project_id") == project]
     scope = start["scope"]
-    end = stop = quota = None
+    end = stop = quota = play = None
     latest_progress = {}
     cycle = scope.get("resume", {}).get("cycle", 0)
     roles, changed = {}, set()
@@ -116,6 +116,8 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             stop = row["reason"]
         elif kind == "native_inspection_subscription_quota":
             quota = row["quota"]
+        elif kind == "native_inspection_play_finished":
+            play = row
         elif kind == "native_inspection_result":
             end = row
     criteria = end.get("criteria_status", criteria) if end else criteria
@@ -131,7 +133,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             "preview_recovery_review": scope.get("token_mode") == "subscription-quota" and _interrupted_preview(rows),
             "retained_manual_checkpoint": bool(end and len(rows) >= 3 and retained_manual_checkpoint(start, rows[-2], end)),
             "end": end, "checkpoint_kind": rows[-2]["kind"] if end and len(rows) > 1 else None,
-            "cycle": cycle, "roles": roles, "stop": stop, "quota": quota,
+            "cycle": cycle, "roles": roles, "stop": stop, "quota": quota, "play": play,
             "latest_progress": latest_progress, "deferred": deferred,
             "history": [row for row in rows if row["kind"] in {
                 "native_inspection_role_intent", "native_inspection_role_result", "native_inspection_developer_diff",

@@ -328,25 +328,27 @@ class CommandCenter:
         lane.pack(fill="x", pady=(5, 0))
         self.phases = []
         for name in ("PLAN", "DEVELOP", "REVIEW", "VERIFY", "DECIDE"):
-            badge = label(lane, bg=TILE, bold=True)
+            phase = REGISTERED_PHASES[len(self.phases)]
+            role = {"manager-planning": "Manager", "manager-final": "Manager"}.get(phase, phase.capitalize())
+            badge = tk.Button(lane, bg=TILE, fg=INK, relief="flat", bd=0, justify="left", anchor="w",
+                              activebackground=EDGE, activeforeground=INK, highlightthickness=2,
+                              highlightbackground=TILE, command=lambda role=role: self.show_role(role))
             self.phases.append((name, badge))
         self.flow_cards(lane, [badge for _, badge in self.phases], 115)
 
-        notebook = ttk.Notebook(operations)
-        notebook.pack(fill="x", pady=(8, 0))
-        work_tab = tk.Frame(notebook, bg=BG)
-        evidence_tab = tk.Frame(notebook, bg=BG)
-        notebook.add(work_tab, text="현재 작업")
-        notebook.add(evidence_tab, text="활동·검증 기록")
-        task = section(work_tab, "작업과 최근 활동")
-        task.pack(fill="x")
-        self.registered_task = task
-        self.registered_operators = operators = section(evidence_tab, "역할별 실행 근거")
-        self.registered_detail = label(task, fg=INK)
+        workspace = tk.Frame(operations, bg=BG)
+        workspace.pack(fill="x", pady=(8, 0))
+        task = section(workspace, "현재 작업")
+        self.registered_detail = label(task, fg=INK, size=11)
         self.registered_detail.pack(fill="x")
-        self.registered_cancel = ttk.Button(task, text="개발 중단", command=self.cancel_registered_run)
+        self.registered_task_button = ttk.Button(task, text="작업·인계 상세")
+        self.registered_task_button.pack(anchor="w", pady=(6, 0))
         on_width(task, lambda width: self.registered_detail.configure(wraplength=max(200, width - 34)))
-        issues = section(work_tab, "오류 및 조치")
+        checks = section(workspace, "검토·검증 및 조치")
+        self.registered_checks = label(checks, fg=MUTED)
+        self.registered_checks.pack(fill="x")
+        on_width(checks, lambda width: self.registered_checks.configure(wraplength=max(185, width - 34)))
+        issues = tk.Frame(checks, bg=PANEL)
         self.registered_issues = issues
         self.registered_issue = label(issues, fg=AMBER)
         self.registered_issue.pack(fill="x")
@@ -355,34 +357,44 @@ class CommandCenter:
         self.registered_issue_button.pack(side="left", pady=(5, 0))
         self.registered_recovery_button = ttk.Button(issues, text="재개 조건 검토")
 
+        def layout_work(width):
+            scale = float(workspace.tk.call("tk", "scaling")) * 72 / 96
+            wide = width >= 740 * scale
+            workspace.columnconfigure(0, weight=3)
+            workspace.columnconfigure(1, weight=2 if wide else 0)
+            task.grid(row=0, column=0, sticky="nsew", padx=(0, 4 if wide else 0))
+            checks.grid(row=0 if wide else 1, column=int(wide), sticky="nsew",
+                        padx=(4 if wide else 0, 0), pady=(0 if wide else 8, 0))
+
+        on_width(workspace, layout_work)
+        layout_work(0)
+        operators = section(operations, "작업 기록과 증거")
         operators.pack(fill="x", pady=(8, 0))
         self.registered_recent = label(operators, fg=MUTED)
         self.registered_recent.pack(fill="x", pady=(0, 4))
         on_width(operators, lambda width: self.registered_recent.configure(wraplength=max(200, width - 34)))
         self.registered_history_button = ttk.Button(operators, text="전체 진행 작업 보기", state="disabled",
                                                     command=self.show_registered_history)
-        self.registered_history_button.pack(anchor="e")
+        self.registered_history_button.pack(side="left")
         self.registered_criteria_button = ttk.Button(operators, text="완료 기준별 상태", state="disabled",
                                                      command=self.show_registered_criteria)
-        self.registered_criteria_button.pack(anchor="e", pady=(4, 0))
-        roster = tk.Frame(operators, bg=PANEL)
-        roster.pack(fill="x", pady=(5, 0))
+        self.registered_criteria_button.pack(side="left", padx=4)
+        ttk.Button(operators, text="GUI 증거", command=self.gui_verification_report).pack(side="left")
         self.cards = {}
         self.card_frames = {}
-        role_frames = []
-        for role, mark in ROLE_MARKS.items():
+        roster = tk.Frame(briefing, bg=PANEL)
+        roster.pack(fill="x", pady=(8, 0))
+        for role in ROLE_MARKS:
             card = tk.Frame(roster, bg=TILE, padx=8, pady=4, highlightthickness=2,
-                            highlightbackground=TILE, highlightcolor=TILE)
+                            highlightbackground=TILE)
             self.card_frames[role] = card
-            role_frames.append(card)
-            button = ttk.Button(card, text=f"{mark}   {role}", command=lambda r=role: self.show_role(r))
-            button.pack(fill="x")
+            ttk.Button(card, text=role, command=lambda role=role: self.show_role(role)).pack(fill="x")
             status = label(card, bg=TILE, bold=True)
-            status.pack(fill="x", pady=(4, 0))
+            status.pack(fill="x")
             detail = label(card, size=9, fg=MUTED, bg=TILE)
             detail.pack(fill="x")
             self.cards[role] = (status, detail)
-        self.flow_cards(roster, role_frames, 185)
+        self.flow_cards(roster, list(self.card_frames.values()), 185)
 
         audit = self.build_audit(body)
         verification = section(body, "검증 센터")
@@ -1061,9 +1073,11 @@ class CommandCenter:
             self.operations_heading.configure(text="개발 대기", fg=MUTED)
         self.registered_status.pack(fill="x")
         for widget in (self.registered_metrics, self.registered_budget,
-                       self.registered_issues, self.registered_cancel, self.registered_meter):
+                       self.registered_issues, self.registered_meter):
             widget.pack_forget()
         self.registered_detail.configure(text="확정된 개발 기록이 없습니다.")
+        self.registered_checks.configure(text="검토와 독립 검증 기록을 기다리는 중입니다.")
+        self.registered_task_button.configure(state="disabled")
         self.registered_recent.configure(text="")
         self.registered_criteria_button.configure(state="disabled")
 
@@ -1138,10 +1152,7 @@ class CommandCenter:
         self.registered_criteria_button.configure(state="normal" if progress else "disabled")
         self.render_registered_history(view, progress, activities)
         self.mission.configure(text=f"{view['project_name']}  /  {heading.removeprefix('자동 개발 · ')}", fg=color(state))
-        self.registered_status.configure(text=f"{view['project_name']} · {heading.removeprefix('자동 개발 · ')}", fg=color(state))
-        self.operations_heading.configure(text=heading, fg=color(state))
-        if not self.registered_status.winfo_manager():
-            self.registered_status.pack(fill="x", pady=(2, 8))
+        self.registered_status.pack_forget()
         if not self.registered_metrics.winfo_manager():
             self.registered_metrics.pack(fill="x")
         if progress:
@@ -1160,7 +1171,7 @@ class CommandCenter:
             budget += f" · 경과 {int(elapsed):,} / {scope['seconds']:,}초"
         if (progress or {}).get("usage_unknown"):
             budget += " · 일부 사용량 미확정"
-        detail = []
+        detail, task_lines = [], []
         counts = (progress or {}).get("criterion_counts", {})
         total = len(scope["criteria"])
         verified = counts.get("VERIFIED", 0)
@@ -1170,7 +1181,7 @@ class CommandCenter:
                 f"{counts.get('REWORK', 0)} / {counts.get('BLOCKED', 0) + counts.get('NEEDS_INPUT', 0)}\n재작업 / 차단·입력 대기",
                 f"{len(changed)}\n변경 파일")):
             widget.configure(text=value)
-        quota_text = ""
+        header_quota = ""
         if progress:
             detail.append(f"세션 {progress['run_id']} · 원장 Seq {progress['latest_sequence']}")
             if started := progress.get("started_at"):
@@ -1185,20 +1196,38 @@ class CommandCenter:
                      and all(w["resets_at"] is None or w["resets_at"] > now for w in quota.get("windows", ())))
             left = quota.get("remaining") if fresh else None
             value = "UNKNOWN" if left is None else f"{left:g}%"
-            quota_text = f" · 공식 잔여 {value} · 10% 이하 종료 예약"
+            header_quota = f" · 구독 {value}"
             if checked is not None:
                 timestamp = datetime.fromtimestamp(checked).strftime("%m-%d %H:%M:%S")
+                header_quota += f" · {timestamp[-8:-3]} 조회"
                 detail.append(f"구독 마지막 조회 {timestamp} · "
                               + REGISTERED_STATES.get("QUOTA_" + quota["status"], quota["status"]))
-        self.registered_budget.configure(text=budget + quota_text +
-                                         (f"\n검증률 {verified / total:.0%}" if total and progress else ""))
+        self.operations_heading.configure(text=heading + header_quota, fg=color(state))
+        self.registered_budget.configure(text=budget + (f" · 검증률 {verified / total:.0%}" if total and progress else ""))
         if not self.registered_budget.winfo_manager():
             self.registered_budget.pack(fill="x", pady=(7, 0))
         target = recent.get("target") or roles.get("manager-planning", {}).get("target")
         if target in scope["criteria"]:
-            detail.append(f"현재 기준 · {scope['criteria'][target]['text'][:180]}")
+            criterion = scope["criteria"][target]["text"]
+            task_lines.append(f"{target} · {criterion[:160]}")
+            detail.append(f"{target} · {criterion}")
         if stop := (progress or {}).get("stop"):
             detail.append(f"종료 예약 · {REGISTERED_STATES.get(stop, stop)}")
+        reviewer, verifier = roles.get("reviewer", {}), roles.get("verifier", {})
+        review_state = self.registered_role_state(reviewer, end, bool(local and running))
+        verify_state = verifier.get("verdict") or self.registered_role_state(verifier, end, bool(local and running))
+        review_summary = [f"Reviewer · {REGISTERED_STATES.get(review_state, review_state)}",
+                          f"독립 Verifier · {REGISTERED_STATES.get(verify_state, verify_state)}"]
+        if play := (progress or {}).get("play"):
+            play_state = {"FOREGROUND_UNSAFE": "전경 창 감지 · 입력 차단",
+                          "WINDOW_OR_CAPTURE_UNAVAILABLE": "사용 가능한 게임 화면 없음",
+                          "NO_PLAYABLE_CANDIDATE": "실행 가능한 후보 없음"}.get(play["outcome"], play["outcome"])
+            inputs = play.get("inputs")
+            review_summary.append(f"AI 플레이 · {play['cycle']}사이클 · {play_state}"
+                                  + (f" · 입력 {inputs}회" if inputs is not None else ""))
+        if finding := reviewer.get("reason"):
+            review_summary.append(str(finding).splitlines()[0][:180])
+        self.registered_checks.configure(text="\n".join(review_summary))
         if reason or state in {"SIGNOFF_PENDING", "NEEDS_INPUT", "CHECKPOINT_SAVED", "CLEANUP_UNVERIFIED", "REQUEST_UNKNOWN", "BLOCKED"}:
             hint = {"Role did not return a valid verdict": "모델 응답의 판정을 읽지 못했습니다. 이어서 개발에서 보존된 응답을 확인하세요.",
                     "NO_PROGRESS": "현재 승인 범위에서 더 진행할 기준을 찾지 못했습니다. 보류 사유를 확인하세요.",
@@ -1223,7 +1252,7 @@ class CommandCenter:
             else:
                 self.registered_recovery_button.pack_forget()
             if not self.registered_issues.winfo_manager():
-                self.registered_issues.pack(fill="x", after=self.registered_task, pady=(8, 0))
+                self.registered_issues.pack(fill="x", pady=(8, 0))
         else:
             self.registered_issues.pack_forget()
         if reviewed := (progress or {}).get("latest_progress", {}).get("newly_reviewed_without_functional_check"):
@@ -1237,22 +1266,21 @@ class CommandCenter:
                           f"{evidence.get(delivery['verification'], '검사 증거 미확인')}")
         if active_phase and (message := next((msg for number, phase, msg, kind in reversed(activities)
                                               if number == cycle and phase == active_phase and kind == "activity"), None)):
-            detail.append(f"최근 활동 · {message}")
+            task_lines.append(f"최근 활동 · {message}")
         if active_phase and (plan := next((msg for number, phase, msg, kind in reversed(activities)
                                            if number == cycle and phase == active_phase and kind == "handoff"), None)):
             detail.append(f"작업 인계 · {plan[:420]}")
         if changed:
-            detail.append("최근 변경 · " + ", ".join(changed[-3:])[:180])
-        self.registered_detail.configure(text="\n".join(detail))
+            task_lines.append(f"변경 파일 {len(changed)}개 · {', '.join(changed[-2:])[:125]}")
+            detail.append("변경 파일\n" + "\n".join(changed))
+        if progress:
+            task_lines.append(f"원장 Seq {progress['latest_sequence']}")
+        self.registered_detail.configure(text="\n".join(task_lines) or "현재 확정된 작업이 없습니다.")
+        self.registered_task_button.configure(state="normal", command=lambda: self.registered_readout(
+            "작업·인계 상세", "\n".join(task_lines + [""] + detail)))
         recent_activity = [msg for _, _, msg, kind in activities if kind == "activity"][-3:]
         self.registered_recent.configure(text="\n".join(recent_activity) if recent_activity else
                                          f"변경 파일 {len(changed)}개 · 역할 결과와 파일은 전체 진행 작업에서 확인")
-        if local and running:
-            self.registered_cancel.configure(state="disabled" if local["cancelled"].is_set() else "normal")
-            if not self.registered_cancel.winfo_manager():
-                self.registered_cancel.pack(anchor="w", pady=(5, 0))
-        else:
-            self.registered_cancel.pack_forget()
         owned = (end or {}).get("owned_tree")
         ownership = {"DRAINED": "회수 확인", "UNRESOLVED": "회수 확인 필요"}.get(owned, "최종 회수 기록 대기")
         self.safety.configure(text=f"등록 프로젝트 Codex 실행 · {label_text}\n"
@@ -1265,7 +1293,8 @@ class CommandCenter:
                 outcome = "BLOCKED"
             glyph = "●" if phase == active_phase else "○" if not row else "◆"
             badge.configure(text=f"{glyph}  {REGISTERED_LABELS[phase]}\n{REGISTERED_STATES.get(outcome, outcome)}",
-                            fg=MUTED if outcome == "WAITING" else color(outcome), bg=EDGE if phase == active_phase else TILE)
+                            fg=MUTED if outcome == "WAITING" else color(outcome), bg=EDGE if phase == active_phase else TILE,
+                            highlightbackground=ACTIVE_AGENT_BORDER if phase == active_phase else TILE)
         for name, (status, evidence) in self.cards.items():
             phase = {"Manager": "manager-final" if "manager-final" in roles else "manager-planning",
                      "Developer": "developer", "Reviewer": "reviewer", "Verifier": "verifier"}[name]
