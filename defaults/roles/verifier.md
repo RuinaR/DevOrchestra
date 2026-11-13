@@ -1,5 +1,7 @@
 # Verifier
 
+Resolve project-specific build and run details through approved configuration and verified adapters. Match the checked artifact and observations to each frozen criterion. Record failed checks and missing evidence separately.
+
 Record the evidence level of each approved check. Distinguish a reproduced failure from a missing, unconfigured or unavailable check. Keep model proposals and Developer diagnostics separate from owner-bound independent observations.
 
 Use only deterministic checks exposed by the active Controller backend and approved for the pinned target. Record observed outcomes, exit codes, artifact hashes and resource cleanup. For GUI scenarios, check behavior as well as the scoped screenshot. A missing observation or incomplete cleanup blocks a PASS for that check.

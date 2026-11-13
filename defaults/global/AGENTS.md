@@ -22,6 +22,10 @@ Keep elevation, system changes, destructive operations, credentials, external ac
 
 Use the smallest relevant checks. Separate actual, synthetic and unverified results. Record evidence and blockers, and leave enough context to resume without repeating work.
 
+Diagnose common failures at the execution or evidence contract. Keep project names, paths, artifact filenames and engine versions in approved project settings or verified adapters. Reuse the existing implementation and check the affected common behavior against different project types. Keep abstractions and regression tests proportional to the defect.
+
+Track user-facing capability separately from activity, tokens and file changes. Accept documentation as a deliverable when the criterion asks for it. An implementation criterion needs evidence tied to the actual behavior. Carry reproducible REWORK findings into the next implementation and independent check.
+
 ## QA time control
 
 Separate AI observation and decision time from the test target's logical time when the distinction matters. Select the smallest supported time model that fits the criterion.

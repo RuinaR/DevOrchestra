@@ -57,6 +57,8 @@
 - Work reports go to docs/CURRENT-STATUS.md / WORKLOG.md / AI-HANDOFF.md or equivalent project docs, with a concise ChatGPT handoff. Do not commit user-private transcripts.
 
 ## Test and release gate
+- Diagnose recurring defects in the shared execution or evidence contract. Resolve project-specific paths, artifact names and versions through approved settings or verified adapters. Validate shared changes across relevant project types.
+- Track actual user-facing criterion evidence separately from changed files and model activity. Treat documentation as a deliverable when the criterion asks for it. Carry reproducible REWORK findings into the next bounded implementation and check.
 - Use [the product-first development principles](docs/PROJECT-DEFINITION.md#제품-완성-우선-원칙) to prioritize working user flows. Where a live safety gate remains blocked, advance an independent user function and keep synthetic and live evidence separate.
 - Tie each cycle to a user outcome and justified checks. Count accepted artifacts and verification evidence separately. Replan after repeated stagnation and honor the Controller's NO_PROGRESS stop and all safety gates.
 - Keep supervised Codex handoffs user-carried. Verify imports against the frozen request and scope, preserve automatic admission gates, and distinguish imported plans from observed execution and trusted verification.

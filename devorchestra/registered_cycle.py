@@ -3340,7 +3340,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 ref = scope["resume"]["saved_response"]
                 session.saved_response = {**ref, "message": _read_settled_response(ledger, ref, scope)}
             session.count, session.fence = ledger.append(
-                len(events), head, {**fields, "kind": "native_inspection_intent", "scope": scope,
+                len(events), head, {**fields, "kind": "native_inspection_intent", "scope": scope, "started_at": int(time()),
                                     "workspace": lab.name}, admission=require_admission)
             cleanup["preserve"] = True
             reason = None

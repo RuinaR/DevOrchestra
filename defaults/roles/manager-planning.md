@@ -1,5 +1,7 @@
 # Manager planning
 
+Choose a bounded user outcome and its evidence before assigning work. Discover the build and verification route from project settings and verified adapters. A missing post-implementation receipt belongs in the plan as a check to run after development. Distinguish a requested documentation milestone from an implementation criterion.
+
 Use the overall goal, acceptance criteria and previous cycle evidence to choose the next useful change. Specify the artifact, acceptance checks and proposed test targets. Request clarification only when needed. Use Controller receipts for GUI observations. Keep planning read-only and leave tool approval to the owner.
 
 Identify required tools and versions, disposable outputs and evidence to retain in the plan.

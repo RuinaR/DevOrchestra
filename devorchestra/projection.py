@@ -19,6 +19,23 @@ from .token_reserve import DEFAULT_RESERVE, reserve_status
 REGISTERED_PHASES = ("manager-planning", "developer", "reviewer", "verifier", "manager-final")
 
 
+def criterion_statuses(criteria, checked, implemented, rework, deferred):
+    result = {}
+    for key in criteria:
+        state = checked.get(key)
+        if key in rework or state == "REGRESSED":
+            result[key] = "REWORK"
+        elif state == "VERIFIED":
+            result[key] = "VERIFIED"
+        elif state == "BLOCKED" or key in deferred:
+            result[key] = "BLOCKED"
+        elif key in implemented:
+            result[key] = "IMPLEMENTED"
+        else:
+            result[key] = "NOT_VERIFIED"
+    return result
+
+
 def registered_progress(events, project, *, onboarding_sequence=0):
     from .registered_cycle import KIND, _recoverable_pre_developer_stop, prerequisite_scope_hash
 
@@ -34,6 +51,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
     cycle = scope.get("resume", {}).get("cycle", 0)
     roles, changed = {}, set()
     criteria = scope.get("resume", {}).get("criteria_status", {})
+    implemented, rework = set(), set()
     prior_candidate = scope.get("prior_replica_candidate", {})
     deferred = (dict(prior_candidate.get("deferred_criteria", {}))
                 if prior_candidate.get("prerequisite_scope_sha256") == prerequisite_scope_hash(scope) else {})
@@ -65,6 +83,11 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             roles[phase] = {**roles.get(phase, {}), **row, "phase": phase}
         elif kind == "native_inspection_review_decision":
             roles["reviewer"] = {**roles.get("reviewer", {}), **row, "phase": "reviewer"}
+            if row.get("verdict") == "REWORK" and row.get("target"):
+                rework.add(row["target"])
+                implemented.discard(row["target"])
+            elif row.get("verdict") == "ACCEPT":
+                rework.discard(row.get("target"))
         elif kind in {"native_inspection_decision_applied", "native_inspection_decision_rejected",
                       "native_inspection_postprocess_failed", "native_inspection_plan_format_failed"}:
             phase = row["phase"]
@@ -80,6 +103,8 @@ def registered_progress(events, project, *, onboarding_sequence=0):
         elif kind == "native_inspection_cycle_progress":
             criteria = row["criteria"]
             latest_progress = row
+            if row.get("progress_basis") == "REVIEW_AND_INTEGRITY" and not row.get("delivery", {}).get("document_only", True):
+                implemented.update(row.get("newly_reviewed_without_functional_check", ()))
         elif kind == "native_inspection_criterion_deferred":
             deferred[row["target"]] = {"kind": row["classification"], "reason": row["reason"]}
         elif kind == "native_inspection_progress_checkpoint":
@@ -90,7 +115,15 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             quota = row["quota"]
         elif kind == "native_inspection_result":
             end = row
+    criteria = end.get("criteria_status", criteria) if end else criteria
+    statuses = criterion_statuses(scope.get("criteria", {}), criteria, implemented, rework, deferred)
+    counts = dict.fromkeys(("VERIFIED", "IMPLEMENTED", "NOT_VERIFIED", "REWORK", "BLOCKED"), 0)
+    for status in statuses.values():
+        counts[status] += 1
     return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
+            "run_id": start["run_id"], "latest_sequence": rows[-1].get("sequence", start["sequence"]),
+            "started_at": start.get("started_at"),
+            "criterion_statuses": statuses, "criterion_counts": counts,
             "tool_preflight_recoverable": _recoverable_pre_developer_stop(rows),
             "end": end, "checkpoint_kind": rows[-2]["kind"] if end and len(rows) > 1 else None,
             "cycle": cycle, "roles": roles, "stop": stop, "quota": quota,
@@ -109,7 +142,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
                 "native_inspection_project_tools_intent", "native_inspection_project_tool_ready",
                 "native_inspection_project_tools_cleanup"}],
             "changed": end.get("changed", []) if end else sorted(changed),
-            "criteria": end.get("criteria_status", {}) if end else criteria,
+            "criteria": criteria,
             "tokens": end.get("known_reported_tokens", tokens) if end else tokens,
             "usage_unknown": usage_unknown or bool(end and not end.get("usage_complete", True))}
 

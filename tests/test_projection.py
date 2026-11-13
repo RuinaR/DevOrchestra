@@ -10,9 +10,10 @@ from unittest.mock import Mock, patch
 from xml.etree.ElementTree import fromstring
 
 from devorchestra.gui import CommandCenter, audit_rows, evidence_text
+from devorchestra import development_profiles
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger
-from devorchestra.projection import ProjectionReader
+from devorchestra.projection import ProjectionReader, criterion_statuses
 from devorchestra.runtime import Runner, Scenario
 from devorchestra.sandbox_profile import restricted_profile
 from devorchestra.ui_design import MUTED, RED, TEAL
@@ -20,6 +21,22 @@ from devorchestra.ui_design import MUTED, RED, TEAL
 
 @unittest.skipUnless(os.name == "nt", "Windows P1 ledger integration")
 class ProjectionTests(unittest.TestCase):
+    def test_development_preferences_are_project_local_and_leave_ledger_unchanged(self):
+        before = self.reader.ledger.snapshot()
+        values = {"whole_replica": True, "seconds": "86400", "token_mode": "subscription",
+                  "verifier": {"mode": "replica-integrity"}, "use_play": True}
+        development_profiles.save(self.reader.ledger, "fixture-a", values)
+        reopened = Ledger(self.reader.ledger.path)
+        self.assertEqual(values, development_profiles.read(reopened, "fixture-a"))
+        self.assertIsNone(development_profiles.read(reopened, "fixture-b"))
+        self.assertEqual(before, reopened.snapshot())
+
+    def test_criterion_counts_distinguish_review_from_verification(self):
+        states = criterion_statuses("abcdef", {"a": "VERIFIED", "c": "BLOCKED", "f": "REGRESSED"},
+                                    {"b", "d"}, {"d"}, set())
+        self.assertEqual(dict(zip("abcdef", ("VERIFIED", "IMPLEMENTED", "BLOCKED", "REWORK",
+                                              "NOT_VERIFIED", "REWORK"))), states)
+
     def setUp(self):
         tmp = TemporaryDirectory(dir=Path.cwd())
         self.addCleanup(tmp.cleanup)
@@ -140,7 +157,8 @@ class ProjectionTests(unittest.TestCase):
         for attr in ("global_badge", "mission", "goal", "project_states", "development_button", "development_options", "gates",
                      "safety", "resources", "run_filter", "role_filter", "render_audit",
                      "overview", "verify_overview", "approval_button",
-                     "registered_status", "registered_detail", "registered_cancel", "registered_history_button"):
+                     "registered_status", "registered_detail", "registered_cancel", "registered_history_button",
+                     "registered_meter"):
             setattr(center, attr, Mock())
         center.phases = [(name, Mock()) for name in ("PLAN", "DEV", "REV", "VFY", "DEC")]
         center.cards = {"Manager": (Mock(), Mock())}

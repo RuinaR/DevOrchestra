@@ -40,16 +40,19 @@ class ProjectToolsTests(unittest.TestCase):
                      "portable_source_policy": project_tools.GITHUB_POLICY,
                      "model_calls_max": 4, "role_tokens": {"developer": 1}, "tokens": 4}
             session = SimpleNamespace(work=work, scratch=scratch, scope=scope, calls=0, usage=0,
-                                      owned_verified=True, check=Mock(), check_image=Mock(), record=Mock())
+                                      owned_verified=True, check=Mock(), check_image=Mock(), record=Mock(),
+                                      model_calls_exhausted=Mock(return_value=False), package_network_failure=None,
+                                      runner=SimpleNamespace(ledger=Mock()))
 
-            def downloaded(package, path, check):
-                self.assertEqual(package, tool)
+            def downloaded(ledger, package, path, check, *, network_failure):
+                self.assertIs(ledger, session.runner.ledger)
+                self.assertEqual(package, item)
+                self.assertIsNone(network_failure)
                 check()
                 copyfile(archive, path)
                 return {"bytes": path.stat().st_size, "sha256": tool["sha256"]}
 
-            with (patch.object(project_tools, "github_package", return_value=tool) as resolve,
-                  patch.object(project_tools, "download_github", side_effect=downloaded) as transfer):
+            with patch.object(project_tools, "prepare_github", side_effect=downloaded) as transfer:
                 with RegisteredSession.portable_tools(session, 1, "manager-planning", [item]) as root:
                     self.assertIsNone(root)
                 with RegisteredSession.portable_tools(session, 1, "developer", []) as root:
@@ -63,7 +66,6 @@ class ProjectToolsTests(unittest.TestCase):
                     self.assertFalse(root.exists())
                     self.assertEqual(snapshot(work), image)
                 transfer.assert_called_once()
-                resolve.assert_called_once()
             self.assertEqual(len([c for c in session.record.call_args_list
                                   if c.args[0] == "native_inspection_project_tools_cleanup"]), 2)
 

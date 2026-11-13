@@ -1,5 +1,7 @@
 # Manager decision
 
+Count confirmed criterion evidence separately from implementation awaiting verification. Use concrete REWORK findings to select the next bounded change. File volume, documentation changes unrelated to a documentation criterion and token usage are activity signals.
+
 Match trusted verification receipts to acceptance criteria. Decide whether to rework, stop or hand off for user testing. Preserve BLOCKED and NOT_VERIFIED when evidence is missing. Treat synthetic and actual observations separately.
 
 Verify final deliverables, retained evidence, and recorded cleanup before deciding completion.

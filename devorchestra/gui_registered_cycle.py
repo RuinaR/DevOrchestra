@@ -9,7 +9,8 @@ from time import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from . import codex_setup, cycle_progress, game_pilot, registered_cycle, replica_readiness, visual_review as visual
+from . import codex_setup, cycle_progress, development_profiles, game_pilot, registered_cycle, replica_readiness
+from . import visual_review as visual
 from .ai_usage import SUBSCRIPTION_MODE
 from .catalog import Catalog
 from .ledger import digest
@@ -24,6 +25,28 @@ ROLE_LABELS = {"manager-planning": "계획 Manager", "developer": "Developer",
                "reviewer": "Reviewer", "manager-final": "최종 Manager"}
 ROLE_TOKEN_FIELDS = {"manager-planning": "manager_tokens", "developer": "developer_tokens",
                      "reviewer": "reviewer_tokens", "manager-final": "final_manager_tokens"}
+BUDGET_FIELDS = ("seconds", "tokens", "cycles", *ROLE_TOKEN_FIELDS.values())
+
+
+def _scope_preferences(scope):
+    verifier = scope["verifier"]
+    if verifier.get("mode") in (registered_cycle.BASELINE_VERIFIER, game_pilot.REGISTERED_GUI):
+        spec = {key: verifier[key] for key in ("mode", "tools_root") if key in verifier}
+    elif {"executable", "checks"} <= verifier.keys():
+        spec = {key: verifier[key] for key in ("executable", "checks")}
+    else:
+        spec = None
+    values = {**{key: key in scope["permissions"] for key in LABELS},
+              "whole_replica": bool(scope.get("project_edit")), "files": ", ".join(scope["files"]),
+              "token_mode": scope.get("token_mode", "fixed"), "use_images": bool(scope.get("visual_review")),
+              "use_play": bool(scope.get("adaptive_play")), "verifier": spec}
+    for key in ("seconds", "tokens", "cycles"):
+        if scope.get(key) is not None or key == "cycles":
+            values[key] = str(scope[key]) if scope.get(key) is not None else ""
+    for role, field in ROLE_TOKEN_FIELDS.items():
+        if (amount := scope.get("role_tokens", {}).get(role)) is not None:
+            values[field] = str(amount)
+    return values
 
 
 def _permission_checkboxes(panel, draft):
@@ -33,9 +56,8 @@ def _permission_checkboxes(panel, draft):
               wraplength=580).grid(row=0, column=0, columnspan=2, sticky="w")
     grants = {}
     for index, key in enumerate((*registered_cycle.PERMISSIONS, *registered_cycle.OPTIONAL_PERMISSIONS)):
-        grants[key] = tk.BooleanVar(panel, value=draft.get(key, True))
-        ttk.Checkbutton(options, text=LABELS[key], variable=grants[key],
-                        command=lambda key=key: draft.update({key: grants[key].get()})).grid(
+        grants[key] = tk.BooleanVar(panel, value=draft.get(key, True) is True)
+        ttk.Checkbutton(options, text=LABELS[key], variable=grants[key]).grid(
             row=1 + index // 2, column=index % 2, sticky="w")
     return grants
 
@@ -219,12 +241,23 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     if baseline is not None:
         restart_button.pack(anchor="w", pady=(0, 4))
     is_godot = baseline is not None and any(name.casefold() == "project.godot" for name in baseline["files"])
-    draft = center.development_budget_drafts.setdefault(project, {})
+    progress = (center.view or {}).get("registered_progress") if (center.view or {}).get("project_id") == project else None
+    prior = _scope_preferences(progress["scope"]) if progress else {}
+    try:
+        restored = development_profiles.read(runner.ledger, project)
+    except (OSError, ValueError, RuntimeError, RecursionError):
+        restored = None
+        state.set("저장한 개발 설정을 읽지 못했습니다. 화면의 권한과 검증 설정을 다시 확인하세요.")
+    draft = restored if restored is not None else prior.copy()
+    if draft:
+        ttk.Label(body, text="이전 설정을 불러왔습니다. 실행 권한은 승인 화면에서 다시 확인합니다.",
+                  wraplength=580).pack(anchor="w")
     grants = _permission_checkboxes(body, draft)
     ttk.Label(body, text="자동 설치를 허용하면 필요한 공개 GitHub 도구나 소스를 작업 중 찾아 복제본에 준비합니다.",
               wraplength=580).pack(anchor="w")
-    use_images = tk.BooleanVar(panel, value=False)
-    use_play = tk.BooleanVar(panel, value=False)
+    use_images = tk.BooleanVar(panel, value=draft.get("use_images") is True)
+    use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
+    spec = None
 
     def play_option():
         ttk.Checkbutton(body, text="AI 플레이 · 모델이 소유 게임 창의 다음 행동을 선택",
@@ -237,16 +270,15 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                         variable=use_images).pack(anchor="w", pady=(0, 6))
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
         play_option()
-        _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button)
+        _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button, draft)
         return
     ttk.Button(body, text="등록 목표·기준 편집",
-               command=lambda: (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
+               command=lambda: save_budget() and (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
     inputs = ttk.Frame(body)
     inputs.pack(fill="x")
     entries = {}
-    whole = tk.BooleanVar(panel, value=draft.get("whole_replica", True))
+    whole = tk.BooleanVar(panel, value=draft.get("whole_replica", True) is True)
     subscription = tk.BooleanVar(panel, value=draft.get("token_mode") == SUBSCRIPTION_MODE)
-    budget_keys = ("seconds", "tokens", "cycles", *ROLE_TOKEN_FIELDS.values())
     defaults = registered_cycle.recommended_limits()
     for index, (key, label, default) in enumerate((
             ("archive", "공식 Codex ZIP", ""), ("files", "지정 경로만 수정 (선택)", ""),
@@ -256,13 +288,13 @@ def show(center, project, *, resume_only=False, continue_progress=False):
               for role, field in ROLE_TOKEN_FIELDS.items()))):
         ttk.Label(inputs, text=label).grid(row=index, column=0, sticky="w")
         entry = entries[key] = ttk.Entry(inputs)
-        entry.insert(0, draft.get(key, default))
+        value = draft.get(key)
+        entry.insert(0, value if isinstance(value, str) and key != "archive" else default)
         entry.grid(row=index, column=1, sticky="ew")
     inputs.columnconfigure(1, weight=1)
 
     def edit_mode():
         entries["files"].configure(state="disabled" if whole.get() else "normal")
-        draft["whole_replica"] = whole.get()
 
     ttk.Checkbutton(inputs, text="복제본 전체 개발 · 소스·설정·에셋 생성, 수정 및 삭제",
                     variable=whole, command=edit_mode).grid(row=len(entries), column=0, columnspan=2, sticky="w")
@@ -273,7 +305,6 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     def token_mode():
         for key in ("tokens", *ROLE_TOKEN_FIELDS.values()):
             entries[key].configure(state="disabled" if subscription.get() else "normal")
-        draft["token_mode"] = SUBSCRIPTION_MODE if subscription.get() else "fixed"
 
     modes = ttk.Frame(body)
     modes.pack(fill="x")
@@ -289,20 +320,41 @@ def show(center, project, *, resume_only=False, continue_progress=False):
               wraplength=580).pack(anchor="w", pady=(0, 5))
 
     def save_budget():
-        draft.update((key, entries[key].get()) for key in budget_keys)
+        preferences = {key: variable.get() for key, variable in grants.items()}
+        preferences.update((key, entries[key].get()) for key in (*BUDGET_FIELDS, "files"))
+        preferences.update(whole_replica=whole.get(), token_mode=SUBSCRIPTION_MODE if subscription.get() else "fixed",
+                           use_images=use_images.get(), use_play=use_play.get())
+        if spec is not None:
+            try:
+                preferences["verifier"] = read_spec()
+            except (ValueError, RecursionError):
+                if isinstance(draft.get("verifier"), dict):
+                    preferences["verifier"] = draft["verifier"]
+        elif isinstance(draft.get("verifier"), dict):
+            preferences["verifier"] = draft["verifier"]
+        try:
+            development_profiles.save(runner.ledger, project, preferences)
+        except (OSError, ValueError, RuntimeError, RecursionError):
+            state.set("개발 설정을 저장하지 못했습니다. 사용자 저장소 쓰기 권한을 확인하세요.")
+            return False
+        return True
 
-    restart_button.configure(command=lambda: (save_budget(), restart()))
+    restart_button.configure(command=lambda: save_budget() and restart())
+    ttk.Button(body, text="프로젝트 설정 저장",
+               command=lambda: save_budget() and state.set("현재 설정을 저장했습니다. 실행 승인에서 적용 범위를 확인하세요."))\
+        .pack(anchor="w", pady=(0, 4))
 
     if baseline is None:
         def close_preflight():
-            save_budget()
-            panel.destroy()
+            if save_budget():
+                panel.destroy()
 
         def reopen():
-            close_preflight()
-            show(center, project)
+            if save_budget():
+                panel.destroy()
+                show(center, project)
 
-        ttk.Button(footer, text="처음부터 다시 시작", command=lambda: (save_budget(), restart()),
+        ttk.Button(footer, text="처음부터 다시 시작", command=lambda: save_budget() and restart(),
                    style="Primary.TButton").pack(anchor="w")
         ttk.Button(footer, text="Git 온보딩 · 작업 복제본 준비",
                    command=lambda: center.onboarding_panel(project=project)).pack(anchor="w")
@@ -381,7 +433,15 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             write_spec(value)
             state.set("검증 도구를 선택했습니다. 기준별 실행 인자와 기대 출력을 확인하세요.")
 
-    write_spec(default_verifier)
+    saved_spec = draft.get("verifier")
+    if isinstance(saved_spec, dict):
+        write_spec(saved_spec)
+        if ((registered_cycle.godot_verifier_spec(saved_spec) and not is_godot)
+                or ("checks" in saved_spec and (not isinstance(saved_spec["checks"], dict)
+                                               or not saved_spec["checks"].keys() <= criteria.keys()))):
+            state.set("이전 검증 설정을 복원했습니다. 현재 프로젝트 구조와 완료 기준에 맞게 확인하세요.")
+    else:
+        write_spec(default_verifier)
 
     def select_godot():
         directory = filedialog.askdirectory(parent=panel, mustexist=True, title="검증된 Godot 엔진과 템플릿의 상위 tools 폴더")
@@ -453,8 +513,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         if active:
             cancelled.set()
             state.set("중단 요청됨 · 소유 자원 회수 대기")
-        else:
-            save_budget()
+        elif save_budget():
             panel.destroy()
 
     def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False):
@@ -489,8 +548,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 return run_fn(runner, *args, approval=digest(scope), cancelled=cancelled.is_set,
                               activity=activity, pause=pause, **options)
 
+            if not save_budget():
+                return
             if center.start_registered_run(scope, run, cancelled):
-                save_budget()
                 panel.destroy()
             else:
                 state.set("이미 자동 개발이 실행 중입니다. 개발 운영실에서 확인하세요.")
@@ -638,6 +698,15 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                         summary += "\n저장된 Manager 계획으로 새 Developer 작업을 시작합니다."
                 elif "candidate_plan" in result and candidate.get("tool_plan"):
                     summary += "\n저장된 Manager 계획의 도구를 다시 준비한 뒤 Developer부터 시작합니다."
+            if prior:
+                current = _scope_preferences(result)
+                names = {**LABELS, "whole_replica": "복제본 전체 개발", "files": "수정 경로",
+                         "token_mode": "예산 모드", "use_images": "시각 검토", "use_play": "AI 플레이",
+                         "verifier": "독립 검증", "seconds": "시간", "tokens": "세션 토큰", "cycles": "사이클 상한",
+                         **{field: f"{ROLE_LABELS[role]} 토큰" for role, field in ROLE_TOKEN_FIELDS.items()}}
+                changes = [label for key, label in names.items() if prior.get(key) != current.get(key)]
+                if changes:
+                    summary += "\n이전 승인과 달라진 설정 · " + " · ".join(changes)
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary + _play_approval(result), parent=panel):
                 launch(result)
             else:
@@ -827,15 +896,29 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         panel.after_idle(resume)
 
 
-def _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button):
+def _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button, draft):
     cancelled = Event()
     future = None
+
+    def save():
+        values = {key: draft[key] for key in ("whole_replica", "files", "token_mode", "verifier") if key in draft}
+        values.update((key, variable.get()) for key, variable in grants.items())
+        values.update((key, entry.get()) for key, entry in session_entries.items())
+        values.update((field, role_entries["role_tokens"][role].get()) for role, field in ROLE_TOKEN_FIELDS.items())
+        values.update(use_images=use_images.get(), use_play=use_play.get(),
+                      game_role_seconds={role: entry.get() for role, entry in role_entries["role_seconds"].items()})
+        try:
+            development_profiles.save(runner.ledger, game_pilot.PROJECT, values)
+        except (OSError, ValueError, RuntimeError, RecursionError):
+            state.set("개발 설정을 저장하지 못했습니다. 사용자 저장소 쓰기 권한을 확인하세요.")
+            return False
+        return True
 
     def close():
         if future is not None and not future.done():
             cancelled.set()
             state.set("중단 요청됨 · 소유 Job 회수 대기")
-        else:
+        elif save():
             panel.destroy()
 
     def start(export_windows=False, *, online=False, resume=False):
@@ -962,6 +1045,8 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                         if result.get("visual_review") and (not resume or not result["resume"].get("review")):
                             summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
                         if center.confirm(title, summary + _play_approval(result), parent=panel):
+                            if not save():
+                                return
                             def run(activity, pause):
                                 if resume:
                                     return registered_cycle.run_resume(
@@ -1005,15 +1090,21 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
         ttk.Label(budget, text=label).grid(row=row, column=0, sticky="w")
         entry = session_entries[key] = ttk.Entry(budget, width=12)
         entry.grid(row=row, column=1, sticky="w")
-        if defaults[key] is not None:
-            entry.insert(0, str(defaults[key]))
+        value = draft.get(key, defaults[key])
+        if value is not None:
+            entry.insert(0, str(value))
     ttk.Label(budget, text="역할 초").grid(row=3, column=1, sticky="w")
     ttk.Label(budget, text="역할 토큰").grid(row=3, column=2, sticky="w")
     for row, role in enumerate(defaults["role_seconds"], 4):
         ttk.Label(budget, text=ROLE_LABELS[role]).grid(row=row, column=0, sticky="w")
         for column, key in enumerate(role_entries, 1):
             entry = role_entries[key][role] = ttk.Entry(budget, width=12)
-            entry.insert(0, str(defaults[key][role]))
+            if key == "role_seconds":
+                saved_seconds = draft.get("game_role_seconds")
+                saved = saved_seconds.get(role) if isinstance(saved_seconds, dict) else None
+            else:
+                saved = draft.get(ROLE_TOKEN_FIELDS[role])
+            entry.insert(0, saved if isinstance(saved, str) and saved else str(defaults[key][role]))
             entry.grid(row=row, column=column, sticky="w")
     button = ttk.Button(body, text="게임 오프라인 사전 검증", command=start)
     button.pack(anchor="w")
