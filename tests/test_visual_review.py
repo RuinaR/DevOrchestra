@@ -126,6 +126,20 @@ class VisualReviewTests(unittest.TestCase):
         with self.assertRaises(Blocked):
             visual_review.parse(dumps(report), ["F1"])
 
+    def test_multiple_observations_of_one_frame_preserve_complete_ordered_coverage(self):
+        report = loads(self.report(verdict="ACCEPT", kind="suggestion"))
+        first = report["observations"][0]
+        additional = {"frame": "F1", "visible": "The first button has a bright outline."}
+        second = {"frame": "F2", "visible": "The title screen is visible."}
+        report["observations"] = [first, additional, second]
+        result, blockers = visual_review.parse(dumps(report), ["F1", "F2"])
+        self.assertEqual([{"frame": "F1", "visible": first["visible"] + " " + additional["visible"]},
+                          second], result["observations"])
+        self.assertEqual([], blockers)
+        for observations in ([first, additional], [first, second, additional], [first] * 5 + [second]):
+            with self.subTest(observations=observations), self.assertRaises(Blocked):
+                visual_review.parse(dumps({**report, "observations": observations}), ["F1", "F2"])
+
     def test_runtime_freezes_reviewer_document_and_passes_real_attachment_arguments(self):
         instruction = public_instruction("reviewer")
         common = public_instruction("global")

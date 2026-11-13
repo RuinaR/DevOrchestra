@@ -17,6 +17,7 @@ MAX_FRAMES = 4
 MAX_FINDINGS = 4
 MAX_NOT_VERIFIED = 8
 MAX_DESCRIPTION_CHARS = 240
+MAX_OBSERVATIONS_PER_FRAME = 4
 SENSITIVE = re.compile(r"https?://|\b(?:bearer|password|secret|credential|api[ _-]?key|token|cookie)\b"
                        r"|\b[A-Za-z0-9_+/=-]{32,}\b", re.I)
 
@@ -213,7 +214,8 @@ def parse(message, frame_ids, changed_files=()):
             raise Blocked("Visual Reviewer reported unavailable images")
         if (type(result) is not dict or set(result) != {"verdict", "observations", "findings", "not_verified", "code_finding"}
                 or result["verdict"] not in ("ACCEPT", "REWORK", "UNAVAILABLE")
-                or type(result["observations"]) is not list or len(result["observations"]) != len(frame_ids)
+                or type(result["observations"]) is not list
+                or not len(frame_ids) <= len(result["observations"]) <= len(frame_ids) * MAX_OBSERVATIONS_PER_FRAME
                 or type(result["findings"]) is not list or len(result["findings"]) > MAX_FINDINGS
                 or type(result["not_verified"]) is not list or len(result["not_verified"]) > MAX_NOT_VERIFIED
                 or not all(_description(item) for item in result["not_verified"])):
@@ -222,10 +224,20 @@ def parse(message, frame_ids, changed_files=()):
         if code is not None and (type(code) is not dict or set(code) != {"file", "observed"}
                                  or code["file"] not in changed_files or not _description(code["observed"])):
             raise ValueError
-        for frame_id, observation in zip(frame_ids, result["observations"], strict=True):
+        by_frame = {}
+        for observation in result["observations"]:
             if (type(observation) is not dict or set(observation) != {"frame", "visible"}
-                    or observation["frame"] != frame_id or not _description(observation["visible"])):
+                    or observation["frame"] not in frame_ids or not _description(observation["visible"])):
                 raise ValueError
+            frame_id = observation["frame"]
+            if frame_id in by_frame and frame_id != next(reversed(by_frame)):
+                raise ValueError
+            group = by_frame.setdefault(frame_id, [])
+            if len(group) == MAX_OBSERVATIONS_PER_FRAME:
+                raise ValueError
+            group.append(observation["visible"])
+        if list(by_frame) != list(frame_ids):
+            raise ValueError
         fields = {"id", "kind", "severity", "frame", "observed", "expected", "reproduce", "fix",
                   "basis", "uncertainty"}
         seen = set()
@@ -244,7 +256,8 @@ def parse(message, frame_ids, changed_files=()):
             raise Blocked("Visual Reviewer verdict did not match its cited defects")
     except (ValueError, TypeError, KeyError, RecursionError):
         raise Blocked("Visual Reviewer response did not match the evidence schema") from None
-    return {**result, "response_sha256": digest(message)}, blockers
+    observations = [{"frame": frame, "visible": " ".join(notes)} for frame, notes in by_frame.items()]
+    return {**result, "observations": observations, "response_sha256": digest(message)}, blockers
 
 
 def _description(value):

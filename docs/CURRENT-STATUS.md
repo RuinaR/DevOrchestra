@@ -2,6 +2,8 @@
 
 **원본을 보존하는 요구사항 작성.** Command Center에서 직접 작성한 Markdown은 프로젝트 상대 이름으로 등록하고 본문은 사용자별 비공개 저장소에 보관한다. 원본 Git과 작업 복제본에 파일을 만들지 않는다. 기존에 가져온 문서는 기존 참조로 계속 읽는다. 새 개발 승인은 최신 개정을 고정하며 이전 승인에서 참조한 로컬 본문도 해시로 다시 확인할 수 있다.
 
+**시각 검토 후처리 복구.** 같은 캡처의 연속 관찰은 화면당 최대 네 건을 한 기록으로 합친다. 모든 첨부 화면을 순서대로 다뤄야 하며 판정과 결함의 일치 검사는 유지한다. 구독 잔여량 기반 세션도 토큰 상한 없이 보존된 검토 응답을 재처리할 수 있다. 실제 저장 응답과 후보에 대한 재개 계약을 읽기 전용으로 검증했다.
+
 **GUI 관찰·행동 영수증.** Windows 브로커는 실제 소유 창의 실행 경로, 창·프로세스·Job 신원과 클라이언트 픽셀을 관찰 영수증에 연결한다. 독립 검사에서 PNG로 클라이언트 해시를 다시 계산한다. 전경 창은 관찰하되 입력은 차단한다. 새 승인에서는 소유 표준 Edit에 시험 텍스트를 입력할 수 있다. 독립 Win32 시험 창에서 텍스트·키·스크롤 각 1회 후 클라이언트 변화와 동일 창 신원, 비활성 상태 및 Job 회수를 관측했다. WinForms의 세 단계 입력은 오프라인 시험 응답으로 검증했다. 실제 Codex 교차 시험과 비활성 GPU 입력은 미검증이다.
 
 **범용 소유 창 캡처.** Windows Graphics Capture를 `PrintWindow` 보완 경로로 연결했다. Windows 10 1903 이상에서 HWND 단위 캡처 API를 사용하며 프레임 풀, D3D 텍스처와 실행 시간을 제한한다. Windows의 캡처 표시를 유지한다. Windows 11에서 독립 Godot 사본의 일반 실행 메뉴를 WGC로 캡처했다. 비활성 창을 네 번 캡처했을 때 클라이언트는 단색이었고 소유 창 입력 3회 이후 화면 변화가 없었다. 기능 플레이는 `NOT_VERIFIED`다. WinForms는 실제 소유 창과 오프라인 시험 응답으로 입력 3회 및 화면 전환을 확인했다. 새 온라인 AI 호출은 없었다. 새 승인에서는 소유 창 스크롤과 크기 조절을 사용할 수 있다. [Microsoft HWND 캡처 API](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow) · [프레임 풀](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframepool)

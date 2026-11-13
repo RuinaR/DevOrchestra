@@ -1435,7 +1435,7 @@ def _review_and_verify(session, count, key, diff, status):
                            "contrast, control states and visible changes. Still frames do not prove animation timing "
                            "or control feel. If images are missing reply UNAVAILABLE. Return only JSON with verdict "
                            "(ACCEPT, REWORK, UNAVAILABLE), observations (ordered objects with frame and visible; "
-                           f"describe a concrete fact visible in each image), findings (0 to {visual.MAX_FINDINGS}), and not_verified "
+                           f"exactly one observation per image, in the supplied order), findings (0 to {visual.MAX_FINDINGS}), and not_verified "
                            f"(up to {visual.MAX_NOT_VERIFIED} descriptions of conditions the images cannot establish). "
                            f"Keep every description on one line, 1 to {visual.MAX_DESCRIPTION_CHARS} characters, with no tabs. "
                            "Each finding has id V1 to V4, kind defect or suggestion, severity low/medium/high/critical, "
@@ -3071,9 +3071,11 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
                    for e in events if e["kind"] == "native_inspection_intent")):
         raise Blocked("소유 자원과 사용량이 확정된 미사용 복구 기록이 필요합니다.")
     remaining_seconds, remaining_tokens, calls = manual_remaining(prior, end)
-    if (type(renew) is not bool or type(seconds) is not int or type(tokens) is not int
-            or (renew and not (60 <= seconds <= MAX_SESSION_SECONDS
-                               and max(prior["role_tokens"].values()) <= tokens <= MAX_SESSION_TOKENS))
+    subscription = prior.get("token_mode") == SUBSCRIPTION_MODE
+    valid_tokens = tokens is None if subscription else type(tokens) is int
+    if (type(renew) is not bool or type(seconds) is not int or not valid_tokens
+            or (renew and (not 60 <= seconds <= MAX_SESSION_SECONDS or (
+                not subscription and not max(prior["role_tokens"].values()) <= tokens <= MAX_SESSION_TOKENS)))
             or (not renew and (seconds < 0 or (tokens is not None and tokens < 0)
                                or (calls is not None and calls < 0)
                                or (seconds, tokens) != (remaining_seconds, remaining_tokens)))
