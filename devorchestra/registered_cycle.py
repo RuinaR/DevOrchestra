@@ -2395,6 +2395,22 @@ def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
              "shell_roles": ["reviewer"], "graceful_stop": game_pilot.graceful_policy(followup=True)}, diff)
 
 
+def retained_manual_checkpoint(start, checkpoint, end):
+    cleanup = end.get("staging_cleanup", {})
+    approval = start.get("approval_sha256")
+    source = end.get("replica_sha256")
+    return (end.get("outcome") == "CLEANUP_UNVERIFIED" and end.get("owned_tree") == "DRAINED"
+            and end.get("usage_complete") is True and cleanup.get("status") == "UNCONFIRMED"
+            and cleanup.get("workspace") == start.get("workspace")
+            and bool(re.fullmatch(r"native-command-[a-z0-9_]+", start.get("workspace", "")))
+            and checkpoint.get("kind") == "native_inspection_manual_checkpoint"
+            and checkpoint.get("run_id") == end.get("run_id") == start.get("run_id")
+            and checkpoint.get("approval_sha256") == end.get("approval_sha256") == approval
+            and approval == digest(start["scope"])
+            and isinstance(source, str) and bool(re.fullmatch(r"[0-9a-f]{64}", source))
+            and checkpoint.get("source_sha256") == source and checkpoint.get("changed") == end.get("changed"))
+
+
 def _resume_contract(runner, events, head, project, expires, seconds, tokens, renew=False, *,
                      require_proof=True, graceful=False):
     now = time()
@@ -2409,7 +2425,7 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
             return _resume_signoff_contract(runner, events, head, rows, expires, seconds, tokens, graceful)
         if can_review_postprocess(rows[-1]):
             return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
-        if outcome == MANUAL_CHECKPOINT:
+        if outcome == MANUAL_CHECKPOINT or (len(rows) >= 3 and retained_manual_checkpoint(rows[0], rows[-2], rows[-1])):
             return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
         if _interrupted_preview(rows):
             return _resume_interrupted_preview(runner, events, head, rows, expires, seconds)
@@ -2422,7 +2438,8 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
         raise Blocked("추가 개발 예산은 보존된 응답을 복구할 때만 사용할 수 있습니다.")
     if _recoverable_pre_developer_stop(rows):
         return _resume_tool_preparation(runner, events, head, rows, expires, seconds, tokens, now)
-    if rows and rows[-1].get("outcome") == MANUAL_CHECKPOINT:
+    if rows and (rows[-1].get("outcome") == MANUAL_CHECKPOINT
+                 or (len(rows) >= 3 and retained_manual_checkpoint(rows[0], rows[-2], rows[-1]))):
         return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
     if rows and can_review_registered_plan(rows[-1]):
         return _resume_registered_plan_contract(runner, events, head, rows, expires, seconds, tokens, now)
@@ -3149,7 +3166,8 @@ def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens
     prior = start["scope"]
     if (checkpoint["kind"] != "native_inspection_manual_checkpoint"
             or end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not True
-            or end.get("staging_cleanup", {}).get("status") != "REMOVED"
+            or (end.get("staging_cleanup", {}).get("status") != "REMOVED"
+                and not retained_manual_checkpoint(start, checkpoint, end))
             or digest(prior) != start["approval_sha256"]
             or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
                    for e in events if e["kind"] == "native_inspection_intent")):

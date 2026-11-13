@@ -48,6 +48,7 @@ REGISTERED_STATES = {
     "NO_PROGRESS": "진척 없음", "NOT_VERIFIED": "검증 미확인", "VERIFIED": "검증 완료",
     "NEEDS_INPUT": "필요한 자료 또는 권한 대기",
     "CHECKPOINT_SAVED": "체크포인트 저장됨",
+    "CLEANUP_UNVERIFIED": "임시 폴더 정리 미확인",
     "POSTPROCESS_PENDING": "응답 저장됨 · 판정 재처리 대기", "RESPONSE_REUSED": "저장된 응답 재사용",
     "ACCEPT": "검토 수용", "RESPONSE_COMPLETE": "모델 응답 완료", "DECISION_REJECTED": "Controller 판정 불일치",
     "VERDICT_PARSED": "판정 해석 완료",
@@ -218,9 +219,19 @@ class CommandCenter:
         self.project.pack(side="right", padx=(8, 14))
         self.project.current(0)
         self.project.bind("<<ComboboxSelected>>", self.select_project)
+        self.operations_header = tk.Frame(root, bg=PANEL, padx=18, pady=5)
+        self.operations_heading = label(self.operations_header, bold=True, fg=CYAN)
+        self.operations_heading.pack(side="left", fill="x", expand=True)
+        self.operations_stop = ttk.Button(self.operations_header, text="개발 중단", command=self.cancel_registered_run)
+        self.operations_stop.pack(side="right")
+        self.operations_pause = ttk.Button(self.operations_header, text="종료 예약",
+                                           command=lambda: self.shutdown_command("request"))
+        self.operations_pause.pack(side="right", padx=4)
+        self.operations_start = ttk.Button(self.operations_header, text="개발 설정", command=self.registered_development)
+        self.operations_start.pack(side="right", padx=4)
         shell = tk.Frame(root, bg=BG)
-        shell.grid(row=1, column=0, sticky="nsew")
-        root.grid_rowconfigure(1, weight=1)
+        shell.grid(row=2, column=0, sticky="nsew")
+        root.grid_rowconfigure(2, weight=1)
         rail = tk.Frame(shell, bg=ui_design.RAIL, padx=12, pady=15)
         rail.pack(side="left", fill="y")
         workspace = tk.Frame(shell, bg=BG)
@@ -321,14 +332,21 @@ class CommandCenter:
             self.phases.append((name, badge))
         self.flow_cards(lane, [badge for _, badge in self.phases], 115)
 
-        task = section(operations, "현재 작업")
+        notebook = ttk.Notebook(operations)
+        notebook.pack(fill="x", pady=(8, 0))
+        work_tab = tk.Frame(notebook, bg=BG)
+        evidence_tab = tk.Frame(notebook, bg=BG)
+        notebook.add(work_tab, text="현재 작업")
+        notebook.add(evidence_tab, text="활동·검증 기록")
+        task = section(work_tab, "작업과 최근 활동")
+        task.pack(fill="x")
         self.registered_task = task
-        self.registered_operators = operators = section(operations, "역할별 실행 근거")
+        self.registered_operators = operators = section(evidence_tab, "역할별 실행 근거")
         self.registered_detail = label(task, fg=INK)
         self.registered_detail.pack(fill="x")
         self.registered_cancel = ttk.Button(task, text="개발 중단", command=self.cancel_registered_run)
         on_width(task, lambda width: self.registered_detail.configure(wraplength=max(200, width - 34)))
-        issues = section(operations, "오류 및 조치")
+        issues = section(work_tab, "오류 및 조치")
         self.registered_issues = issues
         self.registered_issue = label(issues, fg=AMBER)
         self.registered_issue.pack(fill="x")
@@ -390,7 +408,7 @@ class CommandCenter:
                                     ("AI 사용량 및 연결", self.ai_usage_panel)))
         self.page_frames = {
             "dashboard": (hero, mission, briefing), "projects": (projects,),
-            "operations": (mission, safety, operations), "verification": (verification,),
+            "operations": (operations, safety), "verification": (verification,),
             "approval": (approval,), "records": (audit, safety), "settings": (settings,),
         }
         command.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, ui_design.GAP))
@@ -479,7 +497,11 @@ class CommandCenter:
                 frame.grid()
         self.page = page
         self.details_visible = page == "operations"
-        command_pages = ("dashboard", "projects", "operations")
+        if self.details_visible:
+            self.operations_header.grid(row=1, column=0, sticky="ew")
+        else:
+            self.operations_header.grid_remove()
+        command_pages = ("dashboard", "projects")
         if (page in command_pages) != (previous in command_pages):
             (self.command_frame.grid if page in command_pages else self.command_frame.grid_remove)()
         if previous:
@@ -1035,10 +1057,13 @@ class CommandCenter:
 
     def clear_registered_summary(self):
         self.registered_status.configure(text="자동 개발 기록 대기", fg=MUTED)
+        if hasattr(self, "operations_heading"):
+            self.operations_heading.configure(text="개발 대기", fg=MUTED)
         self.registered_status.pack(fill="x")
-        for widget in (self.registered_metrics, self.registered_budget, self.registered_task,
+        for widget in (self.registered_metrics, self.registered_budget,
                        self.registered_issues, self.registered_cancel, self.registered_meter):
             widget.pack_forget()
+        self.registered_detail.configure(text="확정된 개발 기록이 없습니다.")
         self.registered_recent.configure(text="")
         self.registered_criteria_button.configure(state="disabled")
 
@@ -1114,12 +1139,11 @@ class CommandCenter:
         self.render_registered_history(view, progress, activities)
         self.mission.configure(text=f"{view['project_name']}  /  {heading.removeprefix('자동 개발 · ')}", fg=color(state))
         self.registered_status.configure(text=f"{view['project_name']} · {heading.removeprefix('자동 개발 · ')}", fg=color(state))
+        self.operations_heading.configure(text=heading, fg=color(state))
         if not self.registered_status.winfo_manager():
             self.registered_status.pack(fill="x", pady=(2, 8))
         if not self.registered_metrics.winfo_manager():
             self.registered_metrics.pack(fill="x")
-        if not self.registered_task.winfo_manager():
-            self.registered_task.pack(fill="x", before=self.registered_operators, pady=(8, 0))
         if progress:
             self.registered_meter.configure(maximum=max(1, len(scope["criteria"])),
                                             value=progress["criterion_counts"]["VERIFIED"])
@@ -1175,7 +1199,7 @@ class CommandCenter:
             detail.append(f"현재 기준 · {scope['criteria'][target]['text'][:180]}")
         if stop := (progress or {}).get("stop"):
             detail.append(f"종료 예약 · {REGISTERED_STATES.get(stop, stop)}")
-        if reason or state in {"SIGNOFF_PENDING", "NEEDS_INPUT", "CHECKPOINT_SAVED", "REQUEST_UNKNOWN", "BLOCKED"}:
+        if reason or state in {"SIGNOFF_PENDING", "NEEDS_INPUT", "CHECKPOINT_SAVED", "CLEANUP_UNVERIFIED", "REQUEST_UNKNOWN", "BLOCKED"}:
             hint = {"Role did not return a valid verdict": "모델 응답의 판정을 읽지 못했습니다. 이어서 개발에서 보존된 응답을 확인하세요.",
                     "NO_PROGRESS": "현재 승인 범위에서 더 진행할 기준을 찾지 못했습니다. 보류 사유를 확인하세요.",
                     "NEEDS_INPUT": "현재 진행할 수 있는 기준이 없습니다. 아래에 표시된 자료나 권한을 검토하세요."}
@@ -1186,6 +1210,8 @@ class CommandCenter:
             recovery = ((progress or {}).get("preview_recovery_review") or self.can_resume_registered(progress))
             self.registered_issue.configure(text=short + ("\n재개 전에 후보와 승인 범위를 다시 검사합니다." if recovery else ""))
             full = str(reason or label_text)
+            if state == "CLEANUP_UNVERIFIED":
+                full += "\n" + str((end or {}).get("staging_cleanup", {}).get("reason", ""))
             deferred = (progress or {}).get("deferred", {})
             if deferred:
                 full += "\n\n" + "\n".join(f"{key} · {item['reason']}" for key, item in deferred.items())
@@ -1215,6 +1241,8 @@ class CommandCenter:
         if active_phase and (plan := next((msg for number, phase, msg, kind in reversed(activities)
                                            if number == cycle and phase == active_phase and kind == "handoff"), None)):
             detail.append(f"작업 인계 · {plan[:420]}")
+        if changed:
+            detail.append("최근 변경 · " + ", ".join(changed[-3:])[:180])
         self.registered_detail.configure(text="\n".join(detail))
         recent_activity = [msg for _, _, msg, kind in activities if kind == "activity"][-3:]
         self.registered_recent.configure(text="\n".join(recent_activity) if recent_activity else
@@ -1249,16 +1277,6 @@ class CommandCenter:
             parts = [REGISTERED_LABELS[phase]]
             if phase == active_phase:
                 parts.append(REGISTERED_ACTIONS[phase])
-                if target in scope["criteria"]:
-                    parts.append("현재 작업 · " + scope["criteria"][target]["text"][:150])
-                message = next((msg for number, role_phase, msg, kind in reversed(activities)
-                                if number == cycle and role_phase == phase and kind == "activity"), None)
-                if message:
-                    parts.append(message)
-                handoff = next((msg for number, role_phase, msg, kind in reversed(activities)
-                                if number == cycle and role_phase == phase and kind == "handoff"), None)
-                if handoff:
-                    parts.append("\n인계 요약\n" + handoff)
             if row and phase != "verifier" and scope.get("model"):
                 parts.append(scope["model"])
             if isinstance(usage := row.get("provider_usage"), dict):
@@ -1625,6 +1643,8 @@ class CommandCenter:
             return True
         if end.get("usage_complete") is not True:
             return False
+        if progress.get("retained_manual_checkpoint"):
+            return True
         if CommandCenter.can_continue_progress_stop(progress):
             return True
         if registered_cycle.can_review_postprocess(end) or registered_cycle.can_review_size_stop(end):
@@ -1658,6 +1678,13 @@ class CommandCenter:
             self.render_shutdown()
 
     def render_shutdown(self):
+        if hasattr(self, "operations_start"):
+            job = self.registered_job
+            active = bool(job and not job["future"].done())
+            ready = bool(self.view and self.view.get("registration") and not active)
+            self.operations_start.configure(state="normal" if ready else "disabled")
+            self.operations_stop.configure(state="normal" if active and not job["cancelled"].is_set() else "disabled")
+            self.operations_pause.configure(state="disabled")
         if self.registered_shutdown_context():
             job = self.registered_job
             progress = self.view.get("registered_progress") if self.view else None
@@ -1687,6 +1714,9 @@ class CommandCenter:
             self.shutdown_label.configure(text=message)
             for action, button in self.shutdown_buttons.items():
                 button.configure(state="normal" if allowed[action] else "disabled")
+            self.operations_pause.configure(state="normal" if allowed["request"] or allowed["cancel"] else "disabled",
+                                            text="예약 취소" if allowed["cancel"] else "종료 예약",
+                                            command=lambda: self.shutdown_command("cancel" if allowed["cancel"] else "request"))
             return
         state = self.view["shutdown"]["state"] if self.view else "UNAVAILABLE"
         titles = {"RUNNING": "실행 입장 가능 · 합성 전용", "SCHEDULED": "종료 예약됨 · 신규 입장 차단",

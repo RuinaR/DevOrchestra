@@ -39,7 +39,8 @@ def criterion_statuses(criteria, checked, implemented, rework, deferred):
 
 
 def registered_progress(events, project, *, onboarding_sequence=0):
-    from .registered_cycle import KIND, _interrupted_preview, _recoverable_pre_developer_stop, prerequisite_scope_hash
+    from .registered_cycle import (KIND, _interrupted_preview, _recoverable_pre_developer_stop,
+                                   prerequisite_scope_hash, retained_manual_checkpoint)
 
     start = next((row for row in reversed(events) if row["kind"] == "native_inspection_intent"
                   and row.get("probe_kind") == KIND and row.get("project_id") == project), None)
@@ -128,6 +129,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             "criterion_statuses": statuses, "criterion_counts": counts,
             "tool_preflight_recoverable": _recoverable_pre_developer_stop(rows),
             "preview_recovery_review": scope.get("token_mode") == "subscription-quota" and _interrupted_preview(rows),
+            "retained_manual_checkpoint": bool(end and len(rows) >= 3 and retained_manual_checkpoint(start, rows[-2], end)),
             "end": end, "checkpoint_kind": rows[-2]["kind"] if end and len(rows) > 1 else None,
             "cycle": cycle, "roles": roles, "stop": stop, "quota": quota,
             "latest_progress": latest_progress, "deferred": deferred,

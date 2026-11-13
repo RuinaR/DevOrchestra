@@ -21,6 +21,7 @@ GODOT_DECISIONS = 24
 GODOT_SECONDS = 720
 MAX_HOLD_MS = 600
 MAX_KEYS = 3
+FOREGROUND_SETTLE_SECONDS = 4
 GAME_EXECUTABLE_LIMIT = 256 * 1024**2
 GODOT_PLAY_OVERRIDE = b"[display]\nwindow/size/no_focus=true\n"
 KEYS = {**{name: ord(name) for name in "WASDQEZXRFCV"},
@@ -28,6 +29,18 @@ KEYS = {**{name: ord(name) for name in "WASDQEZXRFCV"},
         "SPACE": 0x20, "ENTER": 0x0D, "ESC": 0x1B}
 ACTIONS = ("keys", "click", "move", "wait", "observe", "stop")
 INPUT_ACTIONS = frozenset(("keys", "click", "move"))
+
+
+def _wait_for_background(window, deadline):
+    """Allow launch-time focus to settle without activating or moving any window."""
+    until = min(deadline, monotonic() + FOREGROUND_SETTLE_SECONDS)
+    while window.is_foreground():
+        window.check()
+        remaining = until - monotonic()
+        if remaining <= 0:
+            return False
+        sleep(min(0.1, remaining))
+    return True
 
 
 def _legacy_approval():
@@ -232,7 +245,7 @@ def run(session, cycle, key, verification, context):
                                client=list(client), elapsed_seconds=round(monotonic() - started, 2))
                 return client
 
-            if window.is_foreground():
+            if not _wait_for_background(window, deadline):
                 outcome = "FOREGROUND_UNSAFE"
                 return
             client = observe()

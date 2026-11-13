@@ -20,6 +20,17 @@ def proposal(action="keys", keys=("ENTER",), ms=45, x=0, y=0):
 
 
 class PlayTests(unittest.TestCase):
+    def test_launch_focus_can_settle_without_sending_input(self):
+        window = Mock()
+        window.is_foreground.side_effect = [True, False]
+        with patch.object(adaptive_play, "monotonic", return_value=1), patch.object(adaptive_play, "sleep"):
+            self.assertTrue(adaptive_play._wait_for_background(window, 2))
+        window.key.assert_not_called()
+        window.is_foreground.side_effect = None
+        window.is_foreground.return_value = True
+        with patch.object(adaptive_play, "monotonic", return_value=2):
+            self.assertFalse(adaptive_play._wait_for_background(window, 2))
+
     def test_action_shape_and_coordinates_are_enforced(self):
         client = (8, 30, 500, 250)
         self.assertEqual(proposal(), adaptive_play.parse(json.dumps(proposal()), client))
