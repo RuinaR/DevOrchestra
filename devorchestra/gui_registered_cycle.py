@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 
 from . import codex_setup, cycle_progress, game_pilot, registered_cycle, replica_readiness, visual_review as visual
+from .ai_usage import SUBSCRIPTION_MODE
 from .catalog import Catalog
 from .ledger import digest
 
@@ -244,6 +245,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     inputs.pack(fill="x")
     entries = {}
     whole = tk.BooleanVar(panel, value=draft.get("whole_replica", True))
+    subscription = tk.BooleanVar(panel, value=draft.get("token_mode") == SUBSCRIPTION_MODE)
     budget_keys = ("seconds", "tokens", "cycles", *ROLE_TOKEN_FIELDS.values())
     defaults = registered_cycle.recommended_limits()
     for index, (key, label, default) in enumerate((
@@ -268,6 +270,18 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     ttk.Label(inputs, text="복제본 전체 개발을 끄면 쉼표로 지정한 파일만 수정합니다. "
               "등록 요구사항과 독립 검증 입력, 원본 프로젝트는 보호됩니다.",
               wraplength=570).grid(row=len(entries) + 1, column=0, columnspan=2, sticky="w")
+    def token_mode():
+        for key in ("tokens", *ROLE_TOKEN_FIELDS.values()):
+            entries[key].configure(state="disabled" if subscription.get() else "normal")
+        draft["token_mode"] = SUBSCRIPTION_MODE if subscription.get() else "fixed"
+
+    modes = ttk.Frame(body)
+    modes.pack(fill="x")
+    ttk.Radiobutton(modes, text="토큰 한도 지정", variable=subscription, value=False,
+                    command=token_mode).pack(side="left")
+    ttk.Radiobutton(modes, text="구독 잔여량 기반 개발", variable=subscription, value=True,
+                    command=token_mode).pack(side="left", padx=8)
+    token_mode()
     ttk.Label(body, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
               wraplength=580).pack(anchor="w", pady=4)
     ttk.Label(body, text="빈 역할 입력은 전체 토큰 기준 내에서 해당 역할의 기본값을 사용합니다. "
@@ -504,6 +518,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 return
             if resume:
                 checkpoint = result["resume"]
+                quota_mode = result.get("token_mode") == SUBSCRIPTION_MODE
                 updated_roles = checkpoint.get("updated_role_instructions", ())
                 instruction_note = ("\n새 승인부터 최신 개발 지침을 적용합니다 · "
                                     + ", ".join("전역" if role == "global" else ROLE_LABELS[role] for role in updated_roles)
@@ -518,8 +533,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                f"{checkpoint['cycle']}사이클의 남은 판정부터 이어갑니다.\n"
                                f"이전 확정 사용량 {checkpoint['parent_reported_tokens']:,}토큰\n"
                                f"{'새 승인 예산' if checkpoint.get('renewed_budget') else '남은 예산'} "
-                               f"{result['seconds']:,}초 · {result['tokens']:,}토큰 · "
-                               f"모델 최대 {result['model_calls_max']}회\n"
+                               f"{result['seconds']:,}초 · "
+                               + ("구독 잔여량 기준\n" if quota_mode else
+                                  f"{result['tokens']:,}토큰 · 모델 최대 {result['model_calls_max']}회\n") +
                                "승인 범위 내에서 판정을 마치고 필요하면 다음 사이클에서 재작업합니다.")
                     if checkpoint.get("renewed_budget"):
                         summary += f"\n이번 추가 승인은 {result['cycles']}사이클까지 유효합니다."
@@ -531,8 +547,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 if checkpoint.get("mode") in {"next-cycle", "after-registered-planning"}:
                     summary = (f"{project}\n복제본 {result['replica']}\n"
                                f"다음 사이클 {checkpoint['cycle'] + 1}부터 이어갑니다.\n"
-                               f"남은 승인 예산 {result['seconds']:,}초 · {result['tokens']:,}토큰 · "
-                               f"모델 최대 {result['model_calls_max']}회\n"
+                               f"남은 승인 예산 {result['seconds']:,}초 · "
+                               + ("구독 잔여량 기준\n" if quota_mode else
+                                  f"{result['tokens']:,}토큰 · 모델 최대 {result['model_calls_max']}회\n") +
                                "기존 완료 기준, 파일 범위와 실행 권한을 사용합니다.")
                     if checkpoint["mode"] == "after-registered-planning":
                         summary += "\n저장된 Manager 계획을 사용해 Developer부터 실행합니다."
@@ -544,9 +561,10 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 summary = (f"{project}\n복제본 {result['replica']}\n"
                            f"재검토 대상: {', '.join(checkpoint['changed'])}\n"
                            f"기존 사용량 {checkpoint['parent_reported_tokens']:,}토큰\n"
-                           f"추가 한도 {result['tokens']:,}토큰 / {result['seconds']}초\n"
-                           f"Reviewer {result['role_tokens']['reviewer']:,} / "
-                           f"최종 Manager {result['role_tokens']['manager-final']:,}토큰\n"
+                           + (f"구독 잔여량 기준 / {result['seconds']}초\n" if quota_mode else
+                              f"추가 한도 {result['tokens']:,}토큰 / {result['seconds']}초\n"
+                              f"Reviewer {result['role_tokens']['reviewer']:,} / "
+                              f"최종 Manager {result['role_tokens']['manager-final']:,}토큰\n") +
                            f"{_remaining_signoff(checkpoint)} · 모델 최대 {result['model_calls_max']}회. "
                            "Developer 재호출과 원본 반영은 없습니다.")
                 if checkpoint.get("mode") == "review-size-stopped-candidate":
@@ -569,14 +587,17 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                 "Windows EXE를 내보내 소유 창에 키 입력과 클릭을 보내고 입력 전후 화면을 캡처합니다.\n")
             else:
                 verification = f"검증 EXE {verifier['executable']}\n{checks}\n"
-            role_budget = " · ".join(f"{ROLE_LABELS[role]} {result['role_tokens'][role]:,}토큰"
-                                     for role in ROLE_LABELS)
+            quota_mode = result.get("token_mode") == SUBSCRIPTION_MODE
+            role_budget = ("구독 잔여량 기반 개발 · 10% 이하에서 종료 예약" if quota_mode else
+                           " · ".join(f"{ROLE_LABELS[role]} {result['role_tokens'][role]:,}토큰"
+                                      for role in ROLE_LABELS))
+            token_label = "구독 잔여량 기준" if quota_mode else f"{result['tokens']:,} 토큰"
             edit_summary = ("복제본 전체에서 소스·설정·에셋을 생성·수정·삭제합니다. 보호된 파일은 제외합니다."
                             if result.get("project_edit") else "파일 " + ", ".join(result["files"]))
             summary = (f"{project}\n{result['goal']}\n복제본 {result['replica']}\n"
                        f"{edit_summary}\n"
                        "사전 권한 · " + " · ".join(LABELS[key] for key in result["permissions"]) + "\n"
-                       f"{result['seconds']}초 / {result['tokens']} 토큰 / 사이클 {result['cycles'] or '예산까지'}\n"
+                       f"{result['seconds']}초 / {token_label} / 사이클 {result['cycles'] or '예산까지'}\n"
                        f"{result['model']}\n{role_budget}\n"
                        f"{verification}"
                        "Developer는 MXC 안에서 복제본 쓰기와 셸 권한을 사용합니다. "
@@ -594,9 +615,13 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 summary += "\n자동 설치 가능 도구 · 계획에서 선택한 항목만 복제본에 설치\n" + "\n".join(
                     f"{tool['name']} · {tool['url']}\nSHA-256 {tool['sha256']}" for tool in result["tool_packages"])
             if result.get("graceful_stop"):
-                summary += (f"\n역할 초 {result['role_deadlines']}. 시간과 토큰은 소프트 기준입니다. "
+                summary += (f"\n역할 초 {result['role_deadlines']}. "
+                            + ("공식 구독 허용 여부와 잔여량을 확인합니다. 크레딧 사용 가능성이 있으면 호출을 보류합니다. "
+                               "마무리 최대 1,800초. " if quota_mode else
+                               "시간과 토큰은 소프트 기준입니다. "
                             "토큰은 호출 전 잔여량과 공급자 응답 후 사용량을 확인합니다. "
-                            "마무리 최대 1,800초·300,000토큰. 역할 유예 최대 900초. "
+                            "마무리 최대 1,800초·300,000토큰. ") +
+                            "역할 유예 최대 900초. "
                             "무응답 600초, 도구 실행 중 무응답 1,200초에서 소유 Job을 회수합니다.")
             if result.get("visual_review"):
                 summary += ("\n캡처에 성공하면 소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다. "
@@ -640,10 +665,12 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     remaining = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
                     raise ValueError("독립 검증의 기대 출력을 입력하세요. " + ", ".join(missing[:3]) + remaining)
             values = {key: entry.get().strip() for key, entry in entries.items()}
-            seconds, tokens = int(values["seconds"]), int(values["tokens"])
+            seconds = int(values["seconds"])
+            tokens = None if subscription.get() else int(values["tokens"])
             cycles = int(values["cycles"]) if values["cycles"] else None
-            role_tokens = {role: min(cap, tokens) for role, cap in defaults["role_tokens"].items()}
-            for role, field in ROLE_TOKEN_FIELDS.items():
+            role_tokens = (dict.fromkeys(ROLE_LABELS) if subscription.get() else
+                           {role: min(cap, tokens) for role, cap in defaults["role_tokens"].items()})
+            for role, field in (() if subscription.get() else ROLE_TOKEN_FIELDS.items()):
                 if not values[field]:
                     continue
                 try:
@@ -653,6 +680,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             limits = {"seconds": seconds, "tokens": tokens, "cycles": cycles,
                       "role_seconds": {role: min(cap, seconds) for role, cap in defaults["role_seconds"].items()},
                       "role_tokens": role_tokens}
+            if subscription.get():
+                limits["token_mode"] = SUBSCRIPTION_MODE
             registered_cycle.validate_limits(limits)
             files = [] if whole.get() else [name.strip() for name in values["files"].split(",") if name.strip()]
             if not whole.get() and not files:
@@ -670,6 +699,16 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             rows = registered_cycle.history(runner.ledger, project, current_replica=True)
         except (OSError, RuntimeError, ValueError, sqlite3.Error):
             state.set("저장된 개발 기록을 읽지 못했습니다. 기록·복구 화면에서 상태를 확인하세요.")
+            return
+        if rows and rows[0]["scope"].get("token_mode") == SUBSCRIPTION_MODE:
+            end = rows[-1]
+            seconds = 1800 if end.get("outcome") == "SIGNOFF_PENDING" else registered_cycle.manual_remaining(
+                rows[0]["scope"], end)[0]
+            if seconds < 60:
+                state.set("남은 시간이 부족합니다. 보존된 후보에서 새 세션을 검토하세요.")
+                return
+            cancelled.clear()
+            submit((project, int(time()) + seconds + 2940, seconds, None), resume=True, graceful=True)
             return
         if rows and (registered_cycle.can_review_postprocess(rows[-1]) or registered_cycle.can_review_size_stop(rows[-1])):
             prior, result = rows[0]["scope"], rows[-1]

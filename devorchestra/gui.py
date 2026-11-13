@@ -13,6 +13,7 @@ from tkinter import filedialog, ttk
 from uuid import UUID, uuid4
 
 from .catalog import Catalog, REQUIREMENT_ROLES, new_project, read_frozen_requirements
+from .ai_usage import QUOTA_FRESH_SECONDS, SUBSCRIPTION_MODE
 from .build_info import build_label
 from .default_instructions import defaults_text, public_instruction
 from .lease import Blocked
@@ -33,6 +34,11 @@ REGISTERED_STATES = {
     "RUNNING": "실행 중", "WAITING": "대기", "UNSETTLED": "결과 미확정", "COMPLETED": "완료",
     "PASS": "통과", "FAIL": "실패", "CANCELLED": "중단됨", "BLOCKED": "차단됨",
     "SIGNOFF_PENDING": "검토 재개 대기", "USER_TEST_REQUIRED": "사용자 검증 필요",
+    "QUOTA_LOW": "구독 잔여량 10% 이하", "QUOTA_LIMIT_REACHED": "구독 사용 제한",
+    "QUOTA_UNKNOWN": "구독 잔여량 미확인", "QUOTA_QUERY_FAILED": "구독 조회 실패",
+    "QUOTA_AUTH_REQUIRED": "ChatGPT 인증 필요", "QUOTA_CONFLICT": "구독 조회 결과 불일치",
+    "QUOTA_STALE": "구독 조회 시각 만료", "QUOTA_PAID_FALLBACK_POSSIBLE": "추가 크레딧 사용 가능성이 있어 보류",
+    "QUOTA_UNSUPPORTED": "이 Codex 버전에서 구독 조회 계약을 지원하지 않음",
     "GRACEFUL_STOP": "작업 마무리 후 종료", "NOT_VALIDATED": "검증 미완료",
     "REUSED": "계획 재사용", "SKIPPED": "건너뜀", "REQUEST_UNKNOWN": "요청 결과 미확정",
     "TOOL_EVIDENCE_REJECTED": "도구 실행 기록을 검증할 수 없어 차단됨",
@@ -1057,12 +1063,33 @@ class CommandCenter:
             self.registered_status.pack(fill="x", before=lane, pady=(4, 0))
         used = (end or {}).get("known_reported_tokens", (progress or {}).get("tokens", 0))
         elapsed = (end or {}).get("elapsed_seconds", monotonic() - local["started"] if local else None)
-        budget = f"확정 사용량 {used:,} / {scope['tokens']:,} 토큰"
+        quota_mode = scope.get("token_mode") == SUBSCRIPTION_MODE
+        budget = (f"확정 사용량 {used:,} 토큰" if quota_mode else
+                  f"확정 사용량 {used:,} / {scope['tokens']:,} 토큰")
         if elapsed is not None:
             budget += f" · 경과 {int(elapsed):,} / {scope['seconds']:,}초"
         if (progress or {}).get("usage_unknown"):
             budget += " · 일부 사용량 미확정"
         detail = [budget]
+        if quota_mode:
+            quota = (progress or {}).get("quota") or {}
+            checked = quota.get("checked_at")
+            now = time()
+            fresh = (checked is not None and 0 <= now - checked < QUOTA_FRESH_SECONDS
+                     and all(w["resets_at"] is None or w["resets_at"] > now for w in quota.get("windows", ())))
+            left = quota.get("remaining") if fresh else None
+            value = "UNKNOWN" if left is None else f"{left:g}%"
+            detail.append(f"구독 잔여량 기반 개발 · 공식 잔여 {value} · 10% 이하 종료 예약")
+            if checked is not None:
+                timestamp = datetime.fromtimestamp(checked).strftime("%m-%d %H:%M:%S")
+                detail.append(f"마지막 조회 {timestamp} · "
+                              + REGISTERED_STATES.get("QUOTA_" + quota["status"], quota["status"]))
+            for window in quota.get("windows", ()):
+                reset = window["resets_at"]
+                reset_text = datetime.fromtimestamp(reset, timezone.utc).strftime("%m-%d %H:%M UTC") if reset else "UNKNOWN"
+                remaining = window["remaining"] if fresh and quota.get("status") == "AVAILABLE" else None
+                percent = f"{remaining:g}%" if remaining is not None else "UNKNOWN"
+                detail.append(f"{window['bucket']} · {window['window']} · 잔여 {percent} · 초기화 {reset_text}")
         target = recent.get("target")
         if target in scope["criteria"]:
             detail.append(f"현재 기준 · {scope['criteria'][target]['text'][:180]}")
@@ -1444,7 +1471,8 @@ class CommandCenter:
             scope = progress["scope"]
             seconds, tokens, calls = registered_cycle.manual_remaining(scope, end)
             return (progress["checkpoint_kind"] == "native_inspection_manual_checkpoint"
-                    and seconds >= 60 and tokens >= scope["role_tokens"]["manager-planning"] and calls > 0)
+                    and seconds >= 60 and (tokens is None or tokens >= scope["role_tokens"]["manager-planning"])
+                    and (calls is None or calls > 0))
         if end["outcome"] == "SIGNOFF_PENDING":
             return progress["checkpoint_kind"] == "native_inspection_signoff_checkpoint"
         developer = progress["roles"].get("developer", {})

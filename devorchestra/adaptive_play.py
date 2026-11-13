@@ -139,6 +139,8 @@ def apply(window, proposal, client):
 
 
 def _budget(session):
+    if session.scope["tokens"] is None:
+        return not session.stop_reason and session.quota_fresh() and not session.model_calls_exhausted(3)
     tokens = session.scope["role_tokens"]
     return (not session.stop_reason and session.calls + 3 <= session.scope["model_calls_max"]
             and session.scope["tokens"] - session.usage >= 2 * tokens["reviewer"] + tokens["manager-final"])
@@ -256,6 +258,11 @@ def run(session, cycle, key, verification, context):
                     response, _ = session.dispatch(cycle, "reviewer", key, prompt, shell_tools=False, images=paths,
                                                    image_evidence=[frame], response_schema=schema(), play_step=step,
                                                    operation_check=check_play)
+                except Blocked as error:
+                    if str(error) != "PLAY_QUOTA_REFRESH":
+                        raise
+                    outcome = "PLAY_BUDGET"
+                    return
                 finally:
                     model_clear = session.owned_verified
                 try:

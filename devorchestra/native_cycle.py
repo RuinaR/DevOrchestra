@@ -7,6 +7,7 @@ from subprocess import list2cmdline
 from time import monotonic, time
 
 from . import cycle_progress
+from .ai_usage import SUBSCRIPTION_MODE
 from .default_instructions import public_instruction
 from .job_probe import CODEX_DEVELOPER_PROCESS_LIMIT
 from .lease import Blocked, execution_slot
@@ -224,6 +225,7 @@ def _execute_cycles(scope, role, verify, source, evidence):
 
 class _FixtureSession:
     def __init__(self, runner, scope, lab, count, fence, fields, cancelled):
+        self.lab = lab
         self.runner, self.scope, self.fields = runner, scope, fields
         self.count, self.fence, self.cancelled = count, fence, cancelled
         self.started = monotonic()
@@ -276,10 +278,17 @@ class _FixtureSession:
     def soft_boundary(self, phase):
         if monotonic() - self.started >= self.scope["seconds"]:
             self.request_stop("SESSION_TIME", phase)
-        elif self.usage >= self.scope["tokens"]:
+        elif self.scope["tokens"] is not None and self.usage >= self.scope["tokens"]:
             self.request_stop("SESSION_TOKENS", phase)
 
-    def admit_graceful(self, phase, reserve=0):
+    def model_calls_exhausted(self, reserve=1):
+        maximum = self.scope["model_calls_max"]
+        return maximum is not None and self.calls + reserve > maximum
+
+    def after_model(self, phase, play_step):
+        return None
+
+    def admit_graceful(self, phase, reserve=0, *, play_step=None):
         policy = self.scope["graceful_stop"]
         self.soft_boundary(phase)
         finishing = phase in {"reviewer", "verifier", "manager-final"}
@@ -505,10 +514,10 @@ class _FixtureSession:
         label = f"{cycle}-{phase}" + (f"-play-{play_step}" if play_step is not None else "")
         limit = self.scope["role_tokens"][phase]
         graceful = "graceful_stop" in self.scope
-        if self.calls >= self.scope["model_calls_max"]:
+        if self.model_calls_exhausted():
             raise Blocked("SIGNOFF_PENDING" if graceful and phase in {"reviewer", "manager-final"} else "TOKEN_LIMIT")
         if graceful:
-            finishing = self.admit_graceful(phase, limit)
+            finishing = self.admit_graceful(phase, limit or 0, **({"play_step": play_step} if play_step else {}))
         elif self.scope["tokens"] - self.usage < limit:
             raise Blocked("TOKEN_LIMIT")
         writable = phase == "developer"
@@ -584,6 +593,7 @@ class _FixtureSession:
         if tool_environment_root is not None:
             environment = {**environment, **dict.fromkeys(
                 ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "HOME", "TEMP", "TMP"), str(tool_environment_root))}
+            environment["PSModuleAnalysisCachePath"] = str(tool_environment_root / "ModuleAnalysisCache")
         try:
             result = _observe(self.binary, argv,
                               self.work, role_log, environment, seconds=timeout, check=observed_check,
@@ -635,7 +645,7 @@ class _FixtureSession:
         outcome = ("REQUEST_UNKNOWN" if not settled_process or response.get("provider_response") != "COMPLETED" else
                    "TOOL_EVIDENCE_REJECTED" if evidence_error else
                    "RESPONSE_MISSING" if not response.get("message") else
-                   "USAGE_UNKNOWN" if tokens is None else "TOKEN_LIMIT" if tokens > limit and not graceful else "COMPLETED")
+                   "USAGE_UNKNOWN" if tokens is None else "TOKEN_LIMIT" if not graceful and tokens > limit else "COMPLETED")
         message = response.get("message")
         receipt = {"outcome": outcome, "exit_code": result["exitCode"], "owned_tree": "DRAINED",
                    "process_result": process_result,
@@ -650,7 +660,7 @@ class _FixtureSession:
             receipt["web_search_events"] = response["web_search_events"]
         if response.get("empty_discovery_count"):
             receipt["empty_discovery_count"] = response["empty_discovery_count"]
-        if tokens is not None and tokens > limit:
+        if limit is not None and tokens is not None and tokens > limit:
             receipt["role_token_limit"] = limit
             receipt["role_reported_tokens"] = tokens
             receipt["role_token_overage"] = tokens - limit
@@ -668,12 +678,17 @@ class _FixtureSession:
             receipt["manager_decision"] = decision if decision in {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"} else "INVALID"
         self.phases.append({"cycle": cycle, "phase": phase, **receipt})
         self.record("native_inspection_role_result", cycle=cycle, phase=phase, target=target, **receipt)
+        if self.scope.get("token_mode") == SUBSCRIPTION_MODE and outcome == "REQUEST_UNKNOWN":
+            if "PROVIDER_RATE_LIMIT" in receipt.get("cli_failure_signals", ()):
+                self.request_stop("QUOTA_LIMIT_REACHED", phase)
         if graceful:
-            if tokens is not None and tokens >= limit:
+            if limit is not None and tokens is not None and tokens >= limit:
                 self.request_stop("ROLE_TOKENS", phase)
             if monotonic() - role_started >= self.scope["role_deadlines"][phase]:
                 self.request_stop("ROLE_TIME", phase)
             self.soft_boundary(phase)
+        if outcome == "COMPLETED":
+            self.after_model(phase, play_step)
         if not shell_tools and receipt["command_events"]:
             raise Blocked("A role with shell disabled returned command execution events")
         if outcome != "COMPLETED":

@@ -10,6 +10,25 @@ from devorchestra.ledger import digest
 
 
 class UsageTests(unittest.TestCase):
+    def test_included_quota_uses_lowest_window_and_requires_permission(self):
+        main = {"limitId": "codex", "primary": {"usedPercent": 18, "resetsAt": 200},
+                "credits": {"hasCredits": False, "unlimited": False}}
+        other = {"limitId": "model", "secondary": {"usedPercent": 91, "resetsAt": 150}}
+        payload = {"ordinaryUsageAllowed": True, "rateLimits": main,
+                   "rateLimitsByLimitId": {"codex": main, "model": other}}
+        self.assertEqual(9, ai_usage.subscription_quota(payload, checked_at=100)["remaining"])
+        self.assertEqual("STALE", ai_usage.subscription_quota(payload, checked_at=150)["status"])
+        self.assertEqual("UNKNOWN", ai_usage.subscription_quota(
+            {**payload, "ordinaryUsageAllowed": None}, checked_at=100)["status"])
+        self.assertEqual("LIMIT_REACHED", ai_usage.subscription_quota(
+            {**payload, "ordinaryUsageAllowed": False}, checked_at=100)["status"])
+        self.assertEqual("CONFLICT", ai_usage.subscription_quota(
+            {**payload, "rateLimits": {**main, "primary": {"usedPercent": 4}}}, checked_at=100)["status"])
+        other["credits"] = {"hasCredits": True, "unlimited": False}
+        self.assertEqual("PAID_FALLBACK_POSSIBLE", ai_usage.subscription_quota(payload, checked_at=100)["status"])
+        other["credits"] = {"hasCredits": False, "unlimited": False}
+        other["secondary"] = {"usedPercent": 0, "resetsAt": 300}
+        self.assertEqual(82, ai_usage.subscription_quota(payload, checked_at=151)["remaining"])
     def test_account_buckets_only_show_provider_fields(self):
         result = ai_usage.codex_snapshot({"rateLimitsByLimitId": {"codex": {
             "primary": {"usedPercent": 29, "windowDurationMins": 10080, "resetsAt": 1794384416},

@@ -1,11 +1,15 @@
 """Separate provider quota signals, reported tokens, and local session budgets."""
 from math import isfinite
+from time import time
 
 from .lease import Blocked, execution_slot
 from .ledger import digest
 
 USAGE_URL = "https://chatgpt.com/settings/usage"
 LIMIT_CODE = "subscription_sharing_usage_limit_exceeded"
+SUBSCRIPTION_MODE = "subscription-quota"
+QUOTA_STOP_PERCENT = 10
+QUOTA_FRESH_SECONDS = 60
 ROLE_RESULTS = {"native_manager_result": "manager-planning", "subscription_developer_result": "developer",
                 "subscription_cycle_result": None}
 
@@ -115,6 +119,57 @@ def codex_snapshot(limits, activity=None):
     summary = activity.get("summary") if type(activity) is dict else None
     return {"windows": windows, "reached": reached,
             "lifetime_tokens": _count(summary.get("lifetimeTokens")) if type(summary) is dict else None}
+
+
+def subscription_quota(payload, *, checked_at=None):
+    """Fail closed when the official reply cannot establish included usage."""
+    checked_at = int(time()) if checked_at is None else checked_at
+    result = {"status": "UNKNOWN", "windows": [], "remaining": None, "checked_at": checked_at}
+    if type(payload) is not dict:
+        return result
+    primary = payload.get("rateLimits")
+    buckets = payload.get("rateLimitsByLimitId")
+    if type(primary) is not dict or (buckets is not None and type(buckets) is not dict):
+        return result
+    key = primary.get("limitId") or "codex"
+    if not isinstance(key, str):
+        return result
+    if buckets and (key not in buckets or buckets[key] != primary):
+        return {**result, "status": "CONFLICT"}
+    buckets = buckets or {key: primary}
+    if len(buckets) > 32 or any(type(k) is not str or not 0 < len(k) <= 48
+                                or type(b) is not dict or b.get("limitId") not in (None, k)
+                                for k, b in buckets.items()):
+        return result
+    snapshot = codex_snapshot(payload)
+    windows = snapshot["windows"]
+    result["windows"] = windows
+    permission = payload.get("ordinaryUsageAllowed")
+    if permission is False or snapshot["reached"] or any(b.get("spendControlReached") is True for b in buckets.values()):
+        return {**result, "status": "LIMIT_REACHED"}
+    # No official per-turn switch was established to disable credit fallback.
+    if primary.get("credits") is None:
+        return result
+    for b in buckets.values():
+        credits = b.get("credits")
+        if credits is not None:
+            if type(credits) is not dict or any(type(credits.get(f)) is not bool for f in ("hasCredits", "unlimited")):
+                return result
+            if credits["hasCredits"] or credits["unlimited"]:
+                return {**result, "status": "PAID_FALLBACK_POSSIBLE"}
+    if permission is not True or not windows or any(
+            not any(type(b.get(name)) is dict for name in ("primary", "secondary"))
+            or any(b.get(name) is not None and type(b[name]) is not dict for name in ("primary", "secondary"))
+            or b.get("rateLimitReachedType") is not None for b in buckets.values()):
+        return result
+    if any(w["remaining"] is None for w in windows):
+        return result
+    if any(type(b[name].get("resetsAt")) is not int and b[name].get("resetsAt") is not None
+           for b in buckets.values() for name in ("primary", "secondary") if b.get(name) is not None):
+        return result
+    if any(w["resets_at"] is not None and w["resets_at"] <= checked_at for w in windows):
+        return {**result, "status": "STALE"}
+    return {**result, "status": "AVAILABLE", "remaining": min(w["remaining"] for w in windows)}
 
 
 def project_usage(events, project):

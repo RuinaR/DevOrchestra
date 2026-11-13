@@ -21,6 +21,45 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_subscription_admission_and_signoff_without_token_reservation(self):
+        from devorchestra.ai_usage import SUBSCRIPTION_MODE, subscription_quota
+
+        def snapshot(remaining):
+            bucket = {"primary": {"usedPercent": 100 - remaining},
+                      "credits": {"hasCredits": False, "unlimited": False}}
+            return subscription_quota({"rateLimits": bucket, "ordinaryUsageAllowed": True})
+
+        for remaining in (11, 10, 9, None):
+            with self.subTest(remaining=remaining):
+                session = object.__new__(registered_cycle.RegisteredSession)
+                session.scope = {"token_mode": SUBSCRIPTION_MODE, "tokens": None, "model_calls_max": None,
+                                 "seconds": 3600, "quota_stop_percent": 10,
+                                 "graceful_stop": {"signoff_seconds": 1800}}
+                session.started, session.usage, session.calls = monotonic(), 20000000, 8
+                session.stop_reason = session.signoff_started = None
+                session.owned = lambda invoke: invoke()
+                session.binary = session.lab = session.env = None
+                session.check, session.record = Mock(), Mock()
+                reading = snapshot(remaining) if remaining is not None else subscription_quota(None)
+                with patch.object(registered_cycle.codex_setup, "read_subscription_quota", return_value=reading):
+                    if remaining == 11:
+                        self.assertFalse(session.admit_graceful("developer"))
+                        self.assertIsNone(session.stop_reason)
+                    else:
+                        with self.assertRaisesRegex(Blocked, "GRACEFUL_STOP"):
+                            session.admit_graceful("developer")
+                        if remaining is not None:
+                            self.assertEqual("QUOTA_LOW", session.stop_reason)
+                            self.assertTrue(session.admit_graceful("reviewer"))
+                        else:
+                            with self.assertRaisesRegex(Blocked, "SIGNOFF_PENDING"):
+                                session.admit_graceful("reviewer")
+                        self.assertTrue(session.admit_graceful("verifier"))
+                    self.assertFalse(session.model_calls_exhausted())
+                if remaining == 11:
+                    with patch.object(registered_cycle.codex_setup, "read_subscription_quota", return_value=snapshot(10)):
+                        session.after_model("developer", None)
+                    self.assertEqual("QUOTA_LOW", session.stop_reason)
     def test_unsettled_candidate_requires_same_git_protected_files_and_cleanup(self):
         project, run = "fixture", "run"
         replica = Path("fixture-replica")

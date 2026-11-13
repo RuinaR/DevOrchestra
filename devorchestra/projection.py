@@ -29,7 +29,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
     rows = [row for row in events if row.get("run_id") == start["run_id"]
             and row.get("probe_kind") == KIND and row.get("project_id") == project]
     scope = start["scope"]
-    end = stop = None
+    end = stop = quota = None
     latest_progress = {}
     cycle = scope.get("resume", {}).get("cycle", 0)
     roles, changed = {}, set()
@@ -86,12 +86,15 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             deferred = row.get("deferred_criteria", {})
         elif kind == "native_inspection_stop_requested":
             stop = row["reason"]
+        elif kind == "native_inspection_subscription_quota":
+            quota = row["quota"]
         elif kind == "native_inspection_result":
             end = row
     return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
             "tool_preflight_recoverable": _recoverable_pre_developer_stop(rows),
             "end": end, "checkpoint_kind": rows[-2]["kind"] if end and len(rows) > 1 else None,
-            "cycle": cycle, "roles": roles, "stop": stop, "latest_progress": latest_progress, "deferred": deferred,
+            "cycle": cycle, "roles": roles, "stop": stop, "quota": quota,
+            "latest_progress": latest_progress, "deferred": deferred,
             "history": [row for row in rows if row["kind"] in {
                 "native_inspection_role_intent", "native_inspection_role_result", "native_inspection_developer_diff",
                 "native_inspection_review_decision", "native_inspection_visual_review", "native_inspection_role_feedback",

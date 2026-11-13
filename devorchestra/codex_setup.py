@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 from shutil import copyfile
 
-from .ai_usage import codex_snapshot
+from .ai_usage import codex_snapshot, subscription_quota
 from .app_server import open_app_server
 from .lease import Blocked, execution_slot
 from .ledger import check_path
@@ -64,6 +64,38 @@ def _provider(binary, lab, environment, cancelled, *, limits_only=False):
     except (Blocked, OSError, ValueError):
         pass
     return result
+
+
+def read_subscription_quota(binary, lab, environment, check):
+    """Read ordinary ChatGPT allowance in the session's existing execution slot."""
+    for attempt in range(2):
+        check()
+        server = None
+        try:
+            with open_app_server(binary, lab, environment, 15, check,
+                                 approved_sha256=RELEASE_SHA256) as server:
+                server.restrict_outbound(frozenset({"initialize", "initialized", "account/read",
+                                                    "account/rateLimits/read"}))
+                server.initialize()
+                account = server.request(1, "account/read", {"refreshToken": False},
+                                         discard_account_updates=True).get("account")
+                if not isinstance(account, dict) or account.get("type") != "chatgpt":
+                    return {**subscription_quota(None), "status": "AUTH_REQUIRED"}
+                payload = server.request(2, "account/rateLimits/read", {}, discard_account_updates=True)
+                quota = subscription_quota(payload)
+        except (Blocked, OSError, ValueError) as error:
+            receipt = getattr(server, "cleanup_receipt", {})
+            if (isinstance(error, OSError) or server is None
+                    or receipt.get("job") not in {"DRAINED_NORMALLY", "TERMINATED_AND_DRAINED"}
+                    or receipt.get("pipes") != "CLOSED"):
+                raise
+            check()
+            diagnostics = getattr(server, "diagnostics", ())
+            errors = {row.get("error") for row in diagnostics}
+            status = ("UNSUPPORTED" if errors & {"METHOD_NOT_FOUND", "INVALID_PARAMS"} else "QUERY_FAILED")
+            quota = {**subscription_quota(None), "status": status}
+        if quota["status"] not in {"QUERY_FAILED", "STALE", "CONFLICT", "UNKNOWN"} or attempt:
+            return quota
 
 
 def run(runner, action, *, archive=None, cancelled=lambda: False):

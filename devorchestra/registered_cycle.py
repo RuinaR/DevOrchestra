@@ -12,7 +12,8 @@ from threading import Lock
 from time import monotonic, time
 from uuid import uuid4
 
-from . import adaptive_play, cycle_progress, game_pilot, project_tools, visual_review as visual
+from . import adaptive_play, codex_setup, cycle_progress, game_pilot, project_tools, visual_review as visual
+from .ai_usage import QUOTA_FRESH_SECONDS, QUOTA_STOP_PERCENT, SUBSCRIPTION_MODE
 from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .default_instructions import public_instruction
 from .lease import Blocked, execution_slot
@@ -112,6 +113,14 @@ def recommended_limits():
 
 
 def validate_limits(limits):
+    if isinstance(limits, dict) and limits.get("token_mode") == SUBSCRIPTION_MODE:
+        if (limits.get("tokens") is not None or limits.get("role_tokens") != dict.fromkeys(REGISTERED_ROLE_TOKEN_CAPS)
+                or limits.keys() != recommended_limits().keys() | {"token_mode"}):
+            raise Blocked("구독 잔여량 모드의 토큰 계약이 올바르지 않습니다.")
+        game_pilot.validate_limits(limits, maximum_seconds=MAX_SESSION_SECONDS,
+                                   role_seconds_caps=REGISTERED_ROLE_SECONDS, maximum_cycles=200,
+                                   subscription=True)
+        return
     game_pilot.validate_limits(limits, maximum_seconds=MAX_SESSION_SECONDS,
                                maximum_tokens=MAX_SESSION_TOKENS, role_token_caps=REGISTERED_ROLE_TOKEN_CAPS,
                                role_seconds_caps=REGISTERED_ROLE_SECONDS, maximum_cycles=200)
@@ -444,6 +453,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     role_tokens = {**ROLE_TOKENS, "manager-planning": manager_tokens, "manager-final": manager_tokens}
     if game_limits is not None:
         role_tokens = dict(game_limits["role_tokens"])
+    subscription = game_limits is not None and game_limits.get("token_mode") == SUBSCRIPTION_MODE
     if (len(permissions) != len(set(permissions)) or not set(PERMISSIONS) <= set(permissions)
             or not set(permissions) <= set((*PERMISSIONS, *OPTIONAL_PERMISSIONS))):
         raise Blocked("Approve the required replica, offline shell and Verifier permissions")
@@ -575,6 +585,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles,
             "role_seconds": 120, "role_tokens": role_tokens,
             "model_calls_max": cycles * (4 + (play_policy["steps"] if play_policy else 0)) if cycles else tokens,
+            **({"token_mode": SUBSCRIPTION_MODE, "quota_stop_percent": QUOTA_STOP_PERCENT} if subscription else {}),
             **({"developer_memory": 1536 * 1024**2} if game or (project_edit and (is_godot or install)) else {}),
             **({"developer_seconds": 300} if game and game_limits is None else {}),
             **({"role_deadlines": dict(game_limits["role_seconds"]), "model_output_bytes": MAX_MODEL_OUTPUT_BYTES,
@@ -787,6 +798,60 @@ def _project_review_diff(root, changed, before, old, updated):
 
 
 class RegisteredSession(_FixtureSession):
+    def quota_fresh(self):
+        current = getattr(self, "quota", None)
+        now = time()
+        return bool(current and 0 <= now - current["checked_at"] < QUOTA_FRESH_SECONDS
+                    and all(w["resets_at"] is None or w["resets_at"] > now for w in current["windows"]))
+
+    def refresh_quota(self, phase, *, force=False):
+        if self.scope.get("token_mode") != SUBSCRIPTION_MODE:
+            return
+        if not force and self.quota_fresh():
+            return
+        # Mark ownership unresolved until the read-only App Server has drained.
+        before = getattr(self, "quota", None)
+        self.quota = self.owned(lambda: codex_setup.read_subscription_quota(
+            self.binary, self.lab, self.env, self.check))
+        if before and before["status"] == self.quota["status"] == "AVAILABLE":
+            old_windows = {(w["bucket"], w["window"]): w for w in before["windows"]}
+            for window in self.quota["windows"]:
+                previous = old_windows.get((window["bucket"], window["window"]))
+                if (previous and previous["resets_at"] is not None
+                        and previous["resets_at"] == window["resets_at"]
+                        and previous["used"] > window["used"]):
+                    self.quota = {**self.quota, "status": "CONFLICT", "remaining": None}
+                    break
+        self.record("native_inspection_subscription_quota", phase=phase, quota=self.quota)
+        if self.quota["status"] != "AVAILABLE":
+            self.request_stop("QUOTA_" + self.quota["status"], phase)
+        elif self.quota["remaining"] <= self.scope["quota_stop_percent"]:
+            self.request_stop("QUOTA_LOW", phase)
+
+    def admit_graceful(self, phase, reserve=0, *, play_step=None):
+        if self.scope.get("token_mode") != SUBSCRIPTION_MODE:
+            return super().admit_graceful(phase, reserve)
+        self.soft_boundary(phase)
+        if play_step is not None and not self.quota_fresh():
+            raise Blocked("PLAY_QUOTA_REFRESH")
+        if phase != "verifier" and play_step is None:
+            self.refresh_quota(phase)
+        if self.stop_reason is None:
+            return False
+        if phase not in {"reviewer", "verifier", "manager-final"}:
+            raise Blocked("GRACEFUL_STOP")
+        if phase != "verifier" and (self.quota["status"] != "AVAILABLE" or self.quota["remaining"] <= 0):
+            raise Blocked("SIGNOFF_PENDING")
+        if self.signoff_started is None:
+            self.signoff_started = monotonic()
+        if monotonic() - self.signoff_started >= self.scope["graceful_stop"]["signoff_seconds"]:
+            raise Blocked("SIGNOFF_PENDING")
+        return True
+
+    def after_model(self, phase, play_step):
+        if play_step is None:
+            self.refresh_quota(phase, force=True)
+
     def prepare(self):
         _, _, self.original_image, _ = baseline(self.runner.ledger, self.scope["project_id"])
         self.image = snapshot(self.work)
@@ -794,8 +859,22 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("Approved replica changed")
         self.check_image()
         self.check_login()
+        self.refresh_quota("session-start", force=True)
         self.changes = list(self.scope.get("prior_replica_candidate", {}).get("changed", ()))
         self.last_diff = ""
+        if preview := self.scope.get("resume", {}).get("saved_preview"):
+            recovery = self.runner.ledger.local_directory("recovery") / preview["directory"]
+            bundle = snapshot(recovery, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
+            if digest(bundle) != preview["sha256"]:
+                raise Blocked("보존한 Windows 미리보기 파일이 변경됐습니다.")
+            build = self.logs(f"{self.scope['resume']['cycle']}-gui-build")
+            for name in bundle["files"]:
+                source = recovery / _relative(name)
+                target = build / _relative(name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                copyfile(source, target)
+            if snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES)["files"] != bundle["files"]:
+                raise Blocked("보존한 Windows 미리보기 복원을 확인할 수 없습니다.")
         if self.scope["verifier"].get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
             self.game_scratch = self.scratch / "developer-game"
             self.game_scratch.mkdir()
@@ -828,10 +907,10 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("Project tool installation was not approved")
         self.check()
         self.check_image()
-        if self.calls >= self.scope["model_calls_max"]:
+        if self.model_calls_exhausted():
             raise Blocked("TOKEN_LIMIT")
         if "graceful_stop" in self.scope:
-            self.admit_graceful(phase, self.scope["role_tokens"][phase])
+            self.admit_graceful(phase, self.scope["role_tokens"][phase] or 0)
         elif self.scope["tokens"] - self.usage < self.scope["role_tokens"][phase]:
             raise Blocked("TOKEN_LIMIT")
         root = self.work / f"{project_tools.PREFIX}{uuid4().hex}"
@@ -1225,7 +1304,7 @@ def _review_and_verify(session, count, key, diff, status):
         pending = session.signoff_state.get("pending_visual")
         if pending is None:
             if "graceful_stop" in scope:
-                session.admit_graceful("reviewer", scope["role_tokens"]["reviewer"])
+                session.admit_graceful("reviewer", scope["role_tokens"]["reviewer"] or 0)
             capture = session.capture_review(count)
             evidence = visual.frames(session.runner.ledger, capture, session.fields["run_id"], count,
                                      session.source(), allow_empty=True)
@@ -1416,6 +1495,22 @@ def _save_signoff(session):
     check_path(path)
     with path.open("x", encoding="utf-8", newline="") as stream:
         stream.write(diff)
+    build = session.scratch / f"{state['cycle']}-gui-build"
+    if (session.scope.get("token_mode") == SUBSCRIPTION_MODE and not state.get("review")
+            and not state.get("pending_visual") and (build / "app.exe").is_file()):
+        bundle = snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
+        artifact = folder / f"registered-preview-{session.fields['run_id']}"
+        check_path(artifact)
+        artifact.mkdir()
+        for name in bundle["files"]:
+            source = build / _relative(name)
+            target = artifact / _relative(name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            copyfile(source, target)
+        saved = snapshot(artifact, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
+        if saved["files"] != bundle["files"]:
+            raise Blocked("Windows 미리보기 보존을 확인할 수 없습니다.")
+        state["saved_preview"] = {"directory": artifact.name, "sha256": digest(saved)}
     session.record("native_inspection_signoff_checkpoint",
                    **{k: v for k, v in state.items() if k != "diff"},
                    source_sha256=session.source(), diff_sha256=digest(diff))
@@ -1779,8 +1874,10 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         count += 1
         if "graceful_stop" in scope and initial_plan is None:
             try:
+                if scope.get("token_mode") == SUBSCRIPTION_MODE:
+                    session.refresh_quota("cycle-start", force=True)
                 session.admit_graceful("manager-planning")
-                if session.calls >= scope["model_calls_max"]:
+                if _FixtureSession.model_calls_exhausted(session):
                     session.request_stop("MODEL_CALL_LIMIT", "manager-planning")
                     return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
             except Blocked as error:
@@ -1943,7 +2040,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             session.record("native_inspection_developer_skipped", cycle=count, target=key,
                            source_sha256=session.source(), diff_sha256=digest(diff))
         else:
-            if "graceful_stop" in scope and session.calls >= scope["model_calls_max"]:
+            if "graceful_stop" in scope and _FixtureSession.model_calls_exhausted(session):
                 session.request_stop("MODEL_CALL_LIMIT", "developer")
                 return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
             tool_context = (f"Approved offline verification tool: {tool['executable']}. "
@@ -2062,6 +2159,19 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
                      require_proof=True, graceful=False):
     now = time()
     rows = history(runner.ledger, project, current_replica=True)
+    if rows and rows[0]["scope"].get("token_mode") == SUBSCRIPTION_MODE:
+        outcome = rows[-1].get("outcome")
+        if (not graceful or renew or tokens is not None or type(seconds) is not int
+                or not 60 <= seconds <= (1800 if outcome == "SIGNOFF_PENDING" else MAX_SESSION_SECONDS)
+                or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000):
+            raise Blocked("구독 잔여량 모드의 재개 시간 계약을 확인하세요.")
+        if outcome == "SIGNOFF_PENDING":
+            return _resume_signoff_contract(runner, events, head, rows, expires, seconds, tokens, graceful)
+        if can_review_postprocess(rows[-1]):
+            return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
+        if outcome == MANUAL_CHECKPOINT:
+            return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
+        raise Blocked("구독 잔여량과 보존된 진행 기록을 확인한 뒤 새 세션 승인을 검토하세요.")
     if rows and can_review_postprocess(rows[-1]):
         return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
     if rows and can_review_size_stop(rows[-1]):
@@ -2232,8 +2342,9 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
         raise Blocked("The signoff diff no longer matches the checkpoint")
     review = checkpoint.get("review")
     pending_roles = ("reviewer", "manager-final") if review is None else ("manager-final",)
-    reservation = sum(prior["role_tokens"][role] for role in pending_roles)
-    if tokens < reservation:
+    subscription = prior.get("token_mode") == SUBSCRIPTION_MODE
+    reservation = 0 if subscription else sum(prior["role_tokens"][role] for role in pending_roles)
+    if not subscription and tokens < reservation:
         raise Blocked("Additional budget must cover the remaining model role reservations")
     resume = {k: checkpoint[k] for k in ("cycle", "criterion", "criteria_status", "changed", "diff_sha256")}
     resume.update(mode="signoff", parent_run_id=start["run_id"], review=review,
@@ -2245,6 +2356,13 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
         resume["pending_visual"] = checkpoint["pending_visual"]
     if checkpoint.get("play_report"):
         resume["play_report"] = checkpoint["play_report"]
+    if preview := checkpoint.get("saved_preview"):
+        if preview.get("directory") != f"registered-preview-{start['run_id']}":
+            raise Blocked("Windows 미리보기 보존 경로가 일치하지 않습니다.")
+        artifact = runner.ledger.local_directory("recovery") / preview["directory"]
+        if digest(snapshot(artifact, max_file_bytes=GUI_PREVIEW_MAX_BYTES)) != preview.get("sha256"):
+            raise Blocked("보존한 Windows 미리보기 파일이 변경됐습니다.")
+        resume["saved_preview"] = preview
     if checkpoint.get("documentation"):
         resume["documentation"] = True
     policy = game_pilot.graceful_policy(followup=True)
@@ -2256,6 +2374,10 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
 
 
 def manual_remaining(scope, result):
+    if scope.get("token_mode") == SUBSCRIPTION_MODE:
+        calls = scope["model_calls_max"]
+        return (scope["seconds"] - ceil(result["elapsed_seconds"]), None,
+                None if calls is None else calls - result["model_turns_dispatched"])
     return (scope["seconds"] - ceil(result["elapsed_seconds"]),
             scope["tokens"] - result["known_reported_tokens"],
             scope["model_calls_max"] - result["model_turns_dispatched"])
@@ -2349,7 +2471,9 @@ def _resume_size_stopped_candidate(runner, events, head, rows, expires, seconds,
         raise Blocked("Reviewer 이전의 Developer 정상 종료와 사용량을 확인할 수 없습니다.")
     reserve = prior["role_tokens"]["reviewer"] + prior["role_tokens"]["manager-final"]
     remaining_seconds, remaining_tokens, calls = manual_remaining(prior, end)
-    if (type(renew) is not bool or type(seconds) is not int or type(tokens) is not int
+    subscription = prior.get("token_mode") == SUBSCRIPTION_MODE
+    if (type(renew) is not bool or type(seconds) is not int
+            or (tokens is not None if subscription else type(tokens) is not int)
             or not 60 <= seconds <= MAX_SESSION_SECONDS or not reserve <= tokens <= MAX_SESSION_TOKENS
             or (not renew and ((seconds, tokens) != (remaining_seconds, remaining_tokens) or calls < 2))
             or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000):
@@ -2679,7 +2803,8 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
     if (type(renew) is not bool or type(seconds) is not int or type(tokens) is not int
             or (renew and not (60 <= seconds <= MAX_SESSION_SECONDS
                                and max(prior["role_tokens"].values()) <= tokens <= MAX_SESSION_TOKENS))
-            or (not renew and (min(seconds, tokens, calls) < 0
+            or (not renew and (seconds < 0 or (tokens is not None and tokens < 0)
+                               or (calls is not None and calls < 0)
                                or (seconds, tokens) != (remaining_seconds, remaining_tokens)))
             or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000):
         raise Blocked("남은 승인 예산과 재개 요청이 일치하지 않습니다.")
@@ -2752,8 +2877,8 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
         rerun = True
     if rerun:
         pending = ("reviewer", "manager-final") if role["phase"] == "reviewer" else ("manager-final",)
-        if (seconds < 60 or (not renew and calls < len(pending))
-                or tokens < sum(prior["role_tokens"][phase] for phase in pending)):
+        if (seconds < 60 or (not renew and calls is not None and calls < len(pending))
+                or (not subscription and tokens < sum(prior["role_tokens"][phase] for phase in pending))):
             raise Blocked("판정이 유효하지 않습니다. 같은 후보에서 이 검토 역할을 다시 실행하려면 새 예산이 필요합니다.")
     resume = {key: checkpoint[key] for key in ("cycle", "criterion", "criteria_status", "changed", "continuation",
                                                "review", "review_feedback", "play_report", "comparison", "verification", "documentation",
@@ -2785,8 +2910,10 @@ def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens
                    for e in events if e["kind"] == "native_inspection_intent")):
         raise Blocked("Checkpoint is unsettled or was already consumed")
     remaining_seconds, remaining_tokens, calls = manual_remaining(prior, end)
-    if (type(seconds) is not int or type(tokens) is not int or seconds < 60 or calls < 1
-            or tokens < prior["role_tokens"]["manager-planning"]
+    subscription = prior.get("token_mode") == SUBSCRIPTION_MODE
+    if (type(seconds) is not int or seconds < 60 or (calls is not None and calls < 1)
+            or (tokens is not None if subscription else
+                type(tokens) is not int or tokens < prior["role_tokens"]["manager-planning"])
             or (seconds, tokens) != (remaining_seconds, remaining_tokens)
             or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000):
         raise Blocked("남은 승인 예산으로 다음 작업을 시작할 수 없습니다.")
@@ -3117,7 +3244,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                    "model_turns_dispatched": session.calls, "known_reported_tokens": session.usage,
                    "elapsed_seconds": round(monotonic() - session.started, 2),
                    **({"stop_reason": session.stop_reason, "signoff_tokens": session.signoff_tokens,
-                       "session_token_overage": max(0, session.usage - scope["tokens"])}
+                       "session_token_overage": (max(0, session.usage - scope["tokens"])
+                                                 if scope["tokens"] is not None else None)}
                       if "graceful_stop" in scope else {}),
                    "usage_complete": session.usage_complete, "owned_tree": "DRAINED",
                    "changed": getattr(session, "changes", []), "replica_sha256": session.source() if hasattr(session, "image") else None,
