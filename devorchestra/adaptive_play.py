@@ -32,7 +32,8 @@ KEYS = {**{name: ord(name) for name in "WASDQEZXRFCV"},
         "SPACE": 0x20, "ENTER": 0x0D, "ESC": 0x1B}
 ACTIONS = ("keys", "click", "move", "wait", "observe", "stop")
 WINDOW_ACTIONS = (*ACTIONS, "scroll", "resize")
-INPUT_ACTIONS = frozenset(("keys", "click", "move", "scroll", "resize"))
+CONTROL_ACTIONS = (*WINDOW_ACTIONS, "text")
+INPUT_ACTIONS = frozenset(("keys", "click", "move", "scroll", "resize", "text"))
 
 
 def _wait_for_background(window, deadline):
@@ -52,8 +53,8 @@ def _legacy_approval():
             "max_keys": MAX_KEYS, "max_hold_ms": MAX_HOLD_MS}
 
 
-def approval(*, godot=False, limits=None, window_actions=False):
-    actions = list(WINDOW_ACTIONS if window_actions else ACTIONS)
+def approval(*, godot=False, limits=None, window_actions=False, control_actions=False):
+    actions = list(CONTROL_ACTIONS if control_actions else WINDOW_ACTIONS if window_actions else ACTIONS)
     if limits is None:
         return {**_legacy_approval(), "steps": GODOT_DECISIONS if godot else 6,
                 "seconds": GODOT_SECONDS if godot else SECONDS, "input_steps": GODOT_INPUTS if godot else STEPS,
@@ -67,11 +68,13 @@ def approval(*, godot=False, limits=None, window_actions=False):
 
 def validate_policy(policy):
     if policy in (_legacy_approval(), approval(), approval(godot=True),
-                  approval(window_actions=True), approval(godot=True, window_actions=True)):
+                  approval(window_actions=True), approval(godot=True, window_actions=True),
+                  approval(control_actions=True), approval(godot=True, control_actions=True)):
         return
     if (not isinstance(policy, dict)
             or approval(limits={key: policy.get(key) for key in ("input_steps", "seconds")},
-                        window_actions=policy.get("actions") == list(WINDOW_ACTIONS)) != policy):
+                        window_actions=policy.get("actions") == list(WINDOW_ACTIONS),
+                        control_actions=policy.get("actions") == list(CONTROL_ACTIONS)) != policy):
         raise Blocked("Approved play action limits changed")
 
 
@@ -92,6 +95,14 @@ def verify_action_chain(frames, actions, source, *, policy=None):
             or any(frame["source_sha256"] != source or frame["id"] != f"P{index}"
                    for index, frame in enumerate(frames))):
         raise Blocked("Adaptive play frames do not match the verified candidate")
+    current_format = any("observation_version" in frame for frame in frames)
+    if current_format and (
+            any(frame.get("observation_version") != 1 for frame in frames)
+            or any(not isinstance(frame.get(field), str) or not frame[field]
+                   for frame in frames for field in ("project_id", "run_id", "window_identity"))
+            or len({(frame["project_id"], frame["run_id"], frame["window_identity"]) for frame in frames}) != 1):
+        raise Blocked("Adaptive play window identity changed")
+    verified_changes = 0
     for index, row in enumerate(actions, 1):
         before, after = frames[index - 1]["sha256"], frames[index]["sha256"]
         if row["action"]["action"] not in policy["actions"]:
@@ -99,10 +110,25 @@ def verify_action_chain(frames, actions, source, *, policy=None):
         if (row["step"], row["before"], row["after"], row["result"]) != (
                 index, before, after, "SCREEN_CHANGED" if before != after else "SCREEN_UNCHANGED"):
             raise Blocked("Adaptive play action does not match its before and after frames")
-    return sum(row["action"]["action"] in INPUT_ACTIONS and row["action"]["action"] != "resize"
-               and row["result"] == "SCREEN_CHANGED" and not frames[index].get("uniform_client", False)
-               and frames[index - 1].get("capture_backend") == frames[index].get("capture_backend")
-               for index, row in enumerate(actions, 1))
+        prior, current = frames[index - 1:index + 1]
+        comparison = _client_result(prior, current) if current_format else None
+        if current_format and (row.get("client_result") != comparison
+                               or current.get("previous_action") != digest(row)):
+            raise Blocked("Adaptive play client comparison does not match its action receipt")
+        if (row["action"]["action"] in INPUT_ACTIONS - {"resize"}
+                and (comparison == "CLIENT_CHANGED" if current_format else
+                     before != after and not current.get("uniform_client")
+                     and prior.get("capture_backend") == current.get("capture_backend"))):
+            verified_changes += 1
+    return verified_changes
+
+
+def _client_result(before, after):
+    if (before["uniform_client"] or after["uniform_client"]
+            or before["capture_backend"] != after["capture_backend"]
+            or before["client"] != after["client"]):
+        return "NOT_COMPARABLE"
+    return "CLIENT_CHANGED" if before["client_sha256"] != after["client_sha256"] else "CLIENT_UNCHANGED"
 
 
 def schema(actions=ACTIONS):
@@ -110,25 +136,31 @@ def schema(actions=ACTIONS):
               "keys": {"type": "array", "items": {"type": "string", "enum": list(KEYS)}},
               **{key: {"type": "integer"} for key in ("ms", "x", "y")},
               "observed": {"type": "string"}}
+    if "text" in actions:
+        fields["text"] = {"type": "string"}
     return {"type": "object", "additionalProperties": False, "properties": fields, "required": list(fields)}
 
 
 def parse(raw, client, actions=ACTIONS):
     try:
         row = json.loads(raw, object_pairs_hook=_unique_object)
-        if (type(row) is not dict or row.keys() != schema()["properties"].keys()
+        if (type(row) is not dict or row.keys() != schema(actions)["properties"].keys()
                 or row["action"] not in actions or type(row["keys"]) is not list
                 or type(row["observed"]) is not str or not 0 < len(row["observed"].strip()) <= 300
                 or any(type(row[name]) is not int for name in ("x", "y", "ms"))):
             raise ValueError
         action, keys, ms, x, y = (row[name] for name in ("action", "keys", "ms", "x", "y"))
+        text = row.get("text", "")
+        if (type(text) is not str or len(text) > 120 or any(not char.isprintable() for char in text)
+                or (action != "text" and text) or (text and visual.safe_unverified([text]) != [text])):
+            raise ValueError
         if action == "keys":
             if (not 1 <= len(keys) <= MAX_KEYS or any(type(key) is not str or key not in KEYS for key in keys)
                     or len(set(keys)) != len(keys) or not 30 <= ms <= MAX_HOLD_MS or x or y):
                 raise ValueError
         elif keys:
             raise ValueError
-        elif action in {"click", "move"}:
+        elif action in {"click", "move", "text"}:
             if ms or not (0 <= x < client[2] and 0 <= y < client[3]):
                 raise ValueError
         elif action == "scroll":
@@ -182,6 +214,8 @@ def apply(window, proposal, client):
         window.scroll_client(proposal["x"], proposal["y"], proposal["ms"])
     elif action == "resize":
         window.resize(proposal["x"], proposal["y"])
+    elif action == "text":
+        window.set_client_text(proposal["x"], proposal["y"], proposal["text"])
     elif action == "wait":
         _wait(window, proposal["ms"])
     _wait(window, 250)
@@ -264,8 +298,6 @@ def run(session, cycle, key, verification, context):
             nonlocal outcome, model_clear
 
             def observe():
-                if window.is_foreground():
-                    raise Blocked("Owned game became the foreground window")
                 path = folder / f"P{len(frames)}.png"
                 client = window.client_in_image()
                 size = window.dimensions()
@@ -275,29 +307,36 @@ def run(session, cycle, key, verification, context):
                     raise Blocked("Owned game window changed during observation")
                 frame = {**image, "id": path.stem, "step": "play-observation", "scenario": key,
                          "folder": folder.name, "source_sha256": session.source(), "executable_sha256": expected,
-                         "executable_file": None}
+                         "executable_file": None, "observation_version": 1,
+                         "project_id": session.fields["project_id"], "run_id": session.fields["run_id"],
+                         "window_state": "FOREGROUND" if window.is_foreground() else "BACKGROUND"}
                 visual.read_frames(ledger, [frame])
+
+                return client, frame
+
+            def record_frame(client, frame):
                 frames.append(frame)
                 session.record("native_inspection_play_observation", cycle=cycle, target=key, frame=frame,
                                client=list(client), elapsed_seconds=round(monotonic() - started, 2))
-                return client
 
-            if not _wait_for_background(window, deadline):
-                outcome = "FOREGROUND_UNSAFE"
-                session.record("native_inspection_play_window_unavailable", cycle=cycle, target=key,
-                               reason=outcome, inputs=0, executable_sha256=expected)
-                return
+            background = _wait_for_background(window, deadline)
             # A newly created HWND can precede the first rendered game frame.
             ready_until = min(deadline, monotonic() + FIRST_FRAME_SECONDS)
             while True:
                 try:
-                    client = observe()
+                    client, frame = observe()
+                    record_frame(client, frame)
                     break
                 except Blocked as error:
                     if (not str(error).startswith(NO_CLIENT_FRAME)
                             or monotonic() >= ready_until):
                         raise
                     sleep(0.2)
+            if not background or frame["window_state"] == "FOREGROUND":
+                outcome = "FOREGROUND_UNSAFE"
+                session.record("native_inspection_play_window_unavailable", cycle=cycle, target=key,
+                               reason=outcome, inputs=0, executable_sha256=expected)
+                return
             input_count = 0
             for step in range(1, policy["steps"] + 1):
                 session.soft_boundary("reviewer")
@@ -305,6 +344,9 @@ def run(session, cycle, key, verification, context):
                     outcome = "PLAY_BUDGET"
                     return
                 window.check()
+                if window.is_foreground():
+                    outcome = "FOREGROUND_UNSAFE"
+                    return
                 frame = frames[-1]
                 paths = visual.stage(ledger, [frame], session.logs(f"{cycle}-play-input-{step}"))
                 prompt = (f"{context}\nUse the attached real frame {frame['id']} to choose ONE next action. "
@@ -321,6 +363,10 @@ def run(session, cycle, key, verification, context):
                     prompt += (" For scroll, x,y are client coordinates and ms is a signed wheel delta "
                                "of 120, 240 or 360. For resize, x,y are the new outer width and height "
                                "within 320–1600 by 240–1200, ms=0.")
+                if "text" in policy["actions"]:
+                    prompt += (" For text, x,y must point to an approved standard Windows edit control, "
+                               "ms=0, and text is a non-sensitive test string of at most 120 printable characters. "
+                               "Use an empty text field for other actions.")
                 def check_play():
                     window.check()
                     if window.is_foreground():
@@ -346,6 +392,11 @@ def run(session, cycle, key, verification, context):
                                    frame_sha256=frame["sha256"], response_sha256=digest(raw))
                     return
                 action = {field: value for field, value in proposed.items() if field != "observed"}
+                if "text" in action:
+                    value = action.pop("text")
+                    if action["action"] == "text":
+                        action["text_sha256"] = digest(value)
+                        action["text_length"] = len(value)
                 session.record("native_inspection_play_action_intent", cycle=cycle, target=key, step=step,
                                frame_sha256=frame["sha256"], response_sha256=digest(raw), action=action,
                                observation=visual.safe_unverified([proposed["observed"]])[0])
@@ -362,17 +413,20 @@ def run(session, cycle, key, verification, context):
                     return
                 try:
                     apply(window, proposed, client)
-                    client = observe()
+                    client, observed = observe()
                 except (Blocked, OSError):
                     session.record("native_inspection_play_action_result", cycle=cycle, target=key, step=step,
                                    action=action, result="INPUT_OR_CAPTURE_UNCONFIRMED")
                     session.check()
                     outcome = "INPUT_OR_CAPTURE_UNCONFIRMED"
                     return
-                changed = frame["sha256"] != frames[-1]["sha256"]
+                changed = frame["sha256"] != observed["sha256"]
                 row = {"step": step, "action": action,
                        "result": "SCREEN_CHANGED" if changed else "SCREEN_UNCHANGED",
-                       "before": frame["sha256"], "after": frames[-1]["sha256"]}
+                       "before": frame["sha256"], "after": observed["sha256"],
+                       "client_result": _client_result(frame, observed)}
+                observed["previous_action"] = digest(row)
+                record_frame(client, observed)
                 actions.append(row)
                 input_count += int(action["action"] in INPUT_ACTIONS)
                 session.record("native_inspection_play_action_result", cycle=cycle, target=key, **row)
@@ -383,7 +437,7 @@ def run(session, cycle, key, verification, context):
                         outcome = "INPUT_LIMIT"
                     return
 
-        inspect_owned_window(api, job, deadline, session.check, None, workers, play=play)
+        inspect_owned_window(api, job, deadline, session.check, None, workers, play=play, executable=binary)
 
     argv = [*trial_flags(session.work, writable=False, tool_root=directory, shell_tools=False, runtime_root=runtime_root),
             *_args(binary, *args, profile=PROFILE)]

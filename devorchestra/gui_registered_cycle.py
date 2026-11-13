@@ -148,6 +148,8 @@ def _play_approval(scope):
         inputs = (f"실제 입력 최대 {play['input_steps']}회. 대기·재관찰은 모델 호출에만 포함합니다. "
                   if "input_steps" in play else "")
         extra = "창 내부 스크롤과 제한된 크기 변경을 허용합니다. " if "scroll" in play["actions"] else ""
+        if "text" in play["actions"]:
+            extra += "표준 Windows 편집 컨트롤에 시험 문자열 입력을 허용합니다. "
         return (f"\nAI 플레이 · 사이클당 추가 모델 최대 {play['steps']}회, 소유 창 실행 최대 {play['seconds']}초. "
                 f"{inputs}"
                 "창 내부 클릭·이동과 600ms 이내 최대 3키 동시 입력을 허용합니다. "

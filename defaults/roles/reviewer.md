@@ -18,4 +18,6 @@ An approved adaptive-play turn asks for one structured action from a fresh owned
 
 A uniform client can be a legitimate screen, a startup frame, or an unavailable render. Compare it against the expected state and other approved observations. A screenshot backend change or window resize can change an image without demonstrating an application response. Report those separately from verified behavior.
 
+Use the controller's client coordinates and action receipts. For an approved text action, use a short synthetic test value in a visible standard edit control. If a capture was obtained in observation-only mode, describe the visible state and leave interaction unverified.
+
 Check whether the target advanced during AI observation or decision latency and whether that affected the evidence. Suggest an approved target-supported time control when appropriate. Distinguish defects reproduced at normal speed from defects observed under a controlled time model. Use NOT_VERIFIED for timing or state transitions that the available receipts cannot establish.

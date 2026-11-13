@@ -10,6 +10,8 @@ Windows GUI 브로커는 `PrintWindow`가 사용 가능한 클라이언트 화�
 
 UI Automation의 Invoke·Value·SelectionItem·Scroll 패턴은 앱이 제공할 때 의미 기반 조작에 적합하다. 현재 자율 브로커는 이 패턴을 호출하지 않는다. 창 메시지는 UIPI와 앱 입력 구현의 영향을 받으며 포커스나 Raw Input에 의존하는 프로그램은 별도 검증이 필요하다. 전역 입력이나 데스크톱 캡처로 대체하지 않는다. [Microsoft UI Automation 패턴](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controlpatternsoverview) · [창 메시지와 UIPI](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw)
 
+자율 GUI 관찰 영수증은 프로젝트·실행·후보 해시, 소유 창 식별자, 프레임·클라이언트 해시, 영역·시각·캡처 방식, 앞선 행동 영수증을 연결한다. Controller는 창을 만든 프로세스의 실제 실행 경로와 승인된 EXE 경로를 비교한다. 새 승인에는 좌표가 가리키는 소유 표준 Edit 컨트롤의 시험 텍스트 입력이 포함된다. 암호 및 읽기 전용 Edit는 차단하고 원장에는 시험 문자열 길이와 해시만 남긴다. 전경 창은 관찰할 수 있으며 기존 자동 입력 차단이 적용된다. 브라우저 전용 자동화와 프로젝트 내부 QA 인터페이스는 별도 연결 범위다.
+
 반복되는 문제는 공통 실행·검증 계약에서 해결한다. 프로젝트별 경로, 실행 파일명, 엔진 버전은 승인된 설정과 검증 어댑터에서 해석한다. 공통 변경은 영향을 받는 여러 프로젝트 유형에서 확인한다. Reviewer는 재현 가능한 문제와 후속 검사 방법을 Developer에게 전달한다.
 
 Command Center는 최근 승인 세션의 동결 기준 중 독립 확인된 비율을 표시한다. 구현 검토, 재작업, 검증 실패, 입력 대기와 미검증은 별도로 표시한다. 프로젝트별 개발 설정은 사용자 저장소에 보관하고, 세션 시작이나 재개 시 Controller가 실제 승인 계약을 다시 확인한다.

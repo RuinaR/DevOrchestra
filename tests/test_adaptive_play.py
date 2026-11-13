@@ -20,6 +20,17 @@ def proposal(action="keys", keys=("ENTER",), ms=45, x=0, y=0):
 
 
 class PlayTests(unittest.TestCase):
+    def test_text_requires_current_control_contract(self):
+        client = (0, 0, 500, 300)
+        action = {**proposal("text", (), 0, 55, 30), "text": "QA sample"}
+        raw = json.dumps(action)
+        with self.assertRaises(Blocked):
+            adaptive_play.parse(raw, client, adaptive_play.WINDOW_ACTIONS)
+        self.assertEqual(action, adaptive_play.parse(raw, client, adaptive_play.CONTROL_ACTIONS))
+        with self.assertRaises(Blocked):
+            adaptive_play.parse(json.dumps({**action, "text": "first\nsecond"}), client,
+                                adaptive_play.CONTROL_ACTIONS)
+
     def test_scroll_and_resize_require_explicit_approval(self):
         client = (8, 30, 500, 250)
         for row in (proposal(action="scroll", keys=(), ms=-120, x=100, y=80),
@@ -186,7 +197,8 @@ class Fixture : Form {
 
             session = SimpleNamespace(
                 runner=SimpleNamespace(ledger=SimpleNamespace(local_directory=lambda *_a, **_k: recovery)),
-                fields={"run_id": "b" * 32}, scope={"role_tokens": {"reviewer": 100, "manager-final": 100},
+                fields={"run_id": "b" * 32, "project_id": "gui-fixture"},
+                scope={"role_tokens": {"reviewer": 100, "manager-final": 100},
                                                    "tokens": 1000, "model_calls_max": 5,
                                                    "adaptive_play": adaptive_play.approval()},
                 owned_verified=True, stop_reason=None, calls=0, usage=0, scratch=scratch, work=work, logs=logs,
@@ -226,4 +238,11 @@ class Fixture : Form {
             self.assertEqual("INPUT_LIMIT", result)
             self.assertEqual(4, len({frame["sha256"] for frame in frames}))
             self.assertEqual(["SCREEN_CHANGED"] * 3, [row["result"] for row in actions])
+            self.assertEqual(["CLIENT_CHANGED"] * 3, [row["client_result"] for row in actions])
+            self.assertEqual(3, adaptive_play.verify_action_chain(
+                frames, actions, "source", policy=session.scope["adaptive_play"]))
+            with self.assertRaises(Blocked):
+                adaptive_play.verify_action_chain(
+                    [*frames[:3], {**frames[3], "window_identity": "other-window"}],
+                    actions, "source", policy=session.scope["adaptive_play"])
             self.assertTrue(session.owned_verified)

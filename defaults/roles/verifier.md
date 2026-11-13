@@ -12,4 +12,6 @@ For a visual review, verify the source and executable identities, owned-window c
 
 Attribute GUI actions to their actual source. A preconfigured scenario can establish its observed transitions. A claim of autonomous play requires evidence of model-selected actions and their results on the owned candidate.
 
+For versioned Windows observations, match the project, run, window identity and approved executable across the action chain. Compare the client region using the same backend and geometry. A change limited to window decoration, capture backend or resize does not establish application behavior. A client change can also be caused by animation or time, so require criterion-specific evidence for functional PASS.
+
 For an approved time-dependent check, independently verify the applied time model, control source, measured wall time, observed logical advance or ticks, scale and input/observation intervals where relevant. Confirm the relevant state remained paused during observation and decision when required, and verify restoration on exit. Record controlled-time and normal-speed results separately. Leave a required timing check NOT_VERIFIED when the available deterministic tool or evidence cannot establish it.

@@ -99,6 +99,8 @@ class _Window:
         self.owner = signature(user, "GetWindowThreadProcessId", w.DWORD, w.HWND, c.POINTER(w.DWORD))
         self.ancestor = signature(user, "GetAncestor", w.HWND, w.HWND, w.UINT)
         self.child_at = signature(user, "ChildWindowFromPointEx", w.HWND, w.HWND, w.POINT, w.UINT)
+        self.class_name = signature(user, "GetClassNameW", c.c_int, w.HWND, w.LPWSTR, c.c_int)
+        self.window_style = signature(user, "GetWindowLongW", c.c_long, w.HWND, c.c_int)
         self.map_point = signature(user, "MapWindowPoints", c.c_int, w.HWND, w.HWND, c.POINTER(w.POINT), w.UINT)
         self.send = signature(user, "SendMessageTimeoutW", c.c_ssize_t, w.HWND, w.UINT,
                               w.WPARAM, w.LPARAM, w.UINT, w.UINT, c.POINTER(c.c_size_t))
@@ -168,7 +170,7 @@ class _Window:
         packed = (point.x & 0xFFFF) | ((point.y & 0xFFFF) << 16)
         self.message("root", 0x020A, (delta & 0xFFFF) << 16, packed)  # WM_MOUSEWHEEL
 
-    def click_client(self, x, y, *, move_only=False):
+    def _client_target(self, x, y):
         self.check()
         root = self.owned("root")
         target = root
@@ -183,6 +185,26 @@ class _Window:
             target = child
         else:
             raise Blocked("Owned GUI control nesting exceeds the verification limit")
+        return root, target, point
+
+    def set_client_text(self, x, y, value):
+        root, target, _ = self._client_target(x, y)
+        name = c.create_unicode_buffer(64)
+        _require(self.class_name(target, name, len(name)))
+        if (target == root or name.value.casefold() != "edit"
+                or self.window_style(target, -16) & (0x0020 | 0x0800)):  # ES_PASSWORD | ES_READONLY
+            raise Blocked("Selected window control has no approved text input backend")
+        self.check()
+        if self._owner_thread(target) != self.thread or self.ancestor(target, 2) != root:
+            raise Blocked("GUI text target changed")
+        buffer = c.create_unicode_buffer(value)
+        result = c.c_size_t()
+        _require(self.send(target, 0x000C, 0, c.addressof(buffer), 0x23, 1000, c.byref(result)))
+        if not result.value:
+            raise Blocked("Owned edit control rejected text")
+
+    def click_client(self, x, y, *, move_only=False):
+        root, target, point = self._client_target(x, y)
         packed = (point.x & 0xFFFF) | ((point.y & 0xFFFF) << 16)
         def send_mouse(message, buttons):
             if self._owner_thread(target) != self.thread or self.ancestor(target, 2) != root:

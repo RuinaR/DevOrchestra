@@ -2,6 +2,7 @@
 import ctypes as c
 from ctypes import wintypes as w
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
@@ -12,6 +13,7 @@ from time import monotonic, sleep
 from zlib import compress, crc32
 
 from .gui_verification import _Window, _perform, _small_file, verified_image
+from .ledger import digest
 from .job_probe import _require
 from .lease import Blocked
 from .role_contract import _unique_object
@@ -234,11 +236,22 @@ def _capture(window, path, workers):
         raise Blocked(CAPTURE_BYTES)
     with path.open("xb") as stream:
         stream.write(png)
-    return {**verified_image(path)[1], "capture_backend": backend, "uniform_client": uniform}
+    left, top, client_width, client_height = client
+    # Compare the client pixels, excluding title bars, padding and the unused alpha channel.
+    x0, x1 = max(0, left), min(width, left + client_width)
+    y0, y1 = max(0, top), min(height, top + client_height)
+    client_digest = sha256()
+    for y in range(y0, y1):
+        line = data[(y * width + x0) * 4:(y * width + x1) * 4]
+        for channel in range(3):
+            client_digest.update(line[channel::4])
+    return {**verified_image(path)[1], "capture_backend": backend, "uniform_client": uniform,
+            "captured_at": datetime.now(timezone.utc).isoformat(), "client": list(client),
+            "client_sha256": client_digest.hexdigest()}
 
 
 def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None,
-                         play=None):
+                         play=None, executable=None):
     process = _require(signature(api, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)(0x101000, False, pid))
     member = signature(api, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
     try:
@@ -249,8 +262,25 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
 
         window = _Window({"root": hwnd}, {"root"}, pid, check, alive)
         try:
+            if executable is not None:
+                query = signature(api, "QueryFullProcessImageNameW", w.BOOL, w.HANDLE, w.DWORD,
+                                  w.LPWSTR, c.POINTER(w.DWORD))
+                name = c.create_unicode_buffer(32768)
+                length = w.DWORD(len(name))
+                _require(query(process, 0, name, c.byref(length)))
+                if Path(name.value).resolve() != executable.resolve():
+                    raise Blocked("Owned GUI process is not the approved executable")
+            times = signature(api, "GetProcessTimes", w.BOOL, w.HANDLE, *([c.POINTER(w.FILETIME)] * 4))
+            values = [w.FILETIME() for _ in range(4)]
+            _require(times(process, *(c.byref(value) for value in values)))
+            identity = digest([int(job), pid, hwnd, window.thread,
+                               values[0].dwHighDateTime, values[0].dwLowDateTime])
+
+            def capture(path):
+                return {**_capture(window, path, workers), "window_identity": identity}
+
             if play is not None:
-                return play(window, lambda path: _capture(window, path, workers))
+                return play(window, capture)
             if input_probe:
                 initial = window.dimensions()
                 requested = (initial[0] + 32, initial[1] + 24)
@@ -259,25 +289,24 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
                     check()
                     sleep(0.03)
                 if before_input is not None:
-                    before = _capture(window, before_input, workers)
-                    before["captured_at"] = datetime.now(timezone.utc).isoformat()
+                    before = capture(before_input)
                 window.message("root", 0x0100, 0x20, 0x00390001)  # WM_KEYDOWN, Space
                 window.message("root", 0x0101, 0x20, 0xC0390001)  # WM_KEYUP
                 if before_input is not None:
                     window.click_client(24, 24)
                     sleep(0.2)
                     check()
-                after = _capture(window, image_path, workers)
+                after = capture(image_path)
                 result = {"image": after, "initial_size": list(initial), "resized": list(requested)}
                 if before_input is not None:
-                    after["captured_at"] = datetime.now(timezone.utc).isoformat()
                     comparable = (not before["uniform_client"] and not after["uniform_client"]
+                                  and before["client"] == after["client"]
                                   and before["capture_backend"] == after["capture_backend"])
                     result.update(before_input=before, screen_changed=(
-                                      before["sha256"] != after["sha256"] if comparable else None),
+                                      before["client_sha256"] != after["client_sha256"] if comparable else None),
                                   input="SPACE_AND_CLIENT_CLICK_SENT")
                 return result
-            return _capture(window, image_path, workers)
+            return capture(image_path)
         finally:
             if alive():
                 window.close()
@@ -286,7 +315,7 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
 
 
 def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None, input_probe=True,
-                         play=None):
+                         play=None, executable=None):
     user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
     callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
     enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
@@ -318,7 +347,7 @@ def inspect_owned_window(api, job, deadline, check, image_path, workers, *, befo
             pid, hwnd = windows[0]
             sleep(0.4)
             return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=input_probe,
-                                   before_input=before_input, play=play)
+                                        before_input=before_input, play=play, executable=executable)
         sleep(0.05)
 
 

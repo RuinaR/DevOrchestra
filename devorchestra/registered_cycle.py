@@ -569,7 +569,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             candidate_base["player_report"] = {"origin": "USER_REPORTED", "ratings": player["ratings"],
                                                "finished": player["finished"]}
     play_policy = (adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI),
-                                         limits=play if isinstance(play, dict) else None, window_actions=True)
+                                         limits=play if isinstance(play, dict) else None, control_actions=True)
                    if play is not False else None)
     scope = {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),
@@ -1272,7 +1272,7 @@ class RegisteredSession(_FixtureSession):
 
         def interact(api, job, deadline):
             captured.update(inspect_owned_window(api, job, deadline, self.check, image_path, workers,
-                                                 input_probe=False))
+                                                 input_probe=False, executable=executable))
 
         argv = [*trial_flags(self.work, writable=False, tool_root=build, runtime_root=runtime_root),
                 *_args(executable, profile=PROFILE)]
@@ -1526,6 +1526,11 @@ def _verify_signoff(session, count, key, status):
         count_verified = 0
         if attachment and play_report.get("has_frames"):
             frames = play_report.get("frames", attachment["frames"])
+            allowed_runs = {session.fields["run_id"], scope.get("resume", {}).get("parent_run_id")}
+            if any(frame.get("observation_version") == 1 and
+                   (frame.get("project_id") != scope["project_id"] or frame.get("run_id") not in allowed_runs)
+                   for frame in frames):
+                raise Blocked("Adaptive play evidence belongs to another execution")
             count_verified = adaptive_play.verify_action_chain(frames, played, session.source(),
                                                                policy=scope["adaptive_play"])
             if adaptive_play.review_frames(frames) != attachment["frames"]:

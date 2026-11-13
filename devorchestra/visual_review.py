@@ -1,5 +1,6 @@
 """Bind owned GUI evidence to a bounded, independent Codex review."""
 import json
+from hashlib import sha256
 from pathlib import Path
 import re
 from struct import error as StructError, unpack_from
@@ -131,7 +132,9 @@ def read_frames(ledger, evidence):
         data, observed = verified_image(path, frame["sha256"])
         if any(observed[key] != frame[key] for key in ("width", "height", "file")):
             raise Blocked("Visual artifact dimensions changed")
-        _verify_pixels(data, frame["width"], frame["height"])
+        pixels = _verify_pixels(data, frame["width"], frame["height"])
+        if "client_sha256" in frame:
+            _verify_client(frame, pixels)
         result.append(data)
     return result
 
@@ -164,6 +167,27 @@ def _verify_pixels(data, width, height):
             raise ValueError
     except (ValueError, ZlibError, StructError):
         raise Blocked("Owned GUI capture contains invalid PNG pixels") from None
+    return pixels
+
+
+def _verify_client(frame, pixels):
+    width, height = frame["width"], frame["height"]
+    client = frame.get("client")
+    if not isinstance(client, list) or len(client) != 4 or any(type(value) is not int for value in client):
+        raise Blocked("Owned GUI client geometry is invalid")
+    left, top, client_width, client_height = client
+    x0, x1 = max(0, left), min(width, left + client_width)
+    y0, y1 = max(0, top), min(height, top + client_height)
+    if x0 >= x1 or y0 >= y1:
+        raise Blocked("Owned GUI client geometry is invalid")
+    checksum = sha256()
+    stride = width * 3 + 1
+    for y in range(y0, y1):
+        line = pixels[y * stride + 1 + x0 * 3:y * stride + 1 + x1 * 3]
+        for channel in (2, 1, 0):
+            checksum.update(line[channel::3])
+    if checksum.hexdigest() != frame["client_sha256"]:
+        raise Blocked("Owned GUI client pixels changed")
 
 
 def stage(ledger, evidence, directory):
