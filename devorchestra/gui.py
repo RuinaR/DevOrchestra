@@ -1102,7 +1102,8 @@ class CommandCenter:
                  else "STARTING" if local and running else "UNSETTLED")
         label_text = REGISTERED_STATES.get(state, state)
         cycle = progress["cycle"] if progress else 0
-        role = REGISTERED_LABELS.get(recent.get("phase"))
+        preview_blocked = (progress or {}).get("preview_recovery_review")
+        role = "Reviewer 준비" if preview_blocked else REGISTERED_LABELS.get(recent.get("phase"))
         heading = f"자동 개발 · {label_text}"
         if cycle:
             heading += f" · {cycle}사이클"
@@ -1169,7 +1170,7 @@ class CommandCenter:
                                          (f"\n검증률 {verified / total:.0%}" if total and progress else ""))
         if not self.registered_budget.winfo_manager():
             self.registered_budget.pack(fill="x", pady=(7, 0))
-        target = recent.get("target")
+        target = recent.get("target") or roles.get("manager-planning", {}).get("target")
         if target in scope["criteria"]:
             detail.append(f"현재 기준 · {scope['criteria'][target]['text'][:180]}")
         if stop := (progress or {}).get("stop"):
@@ -1200,7 +1201,7 @@ class CommandCenter:
             self.registered_issues.pack_forget()
         if reviewed := (progress or {}).get("latest_progress", {}).get("newly_reviewed_without_functional_check"):
             detail.append("새로 검토 수용 · " + ", ".join(reviewed) + " · 기능 검증 대기")
-        if delivery := (progress or {}).get("latest_progress", {}).get("delivery"):
+        if (delivery := (progress or {}).get("latest_progress", {}).get("delivery")) and delivery["criterion"] == target:
             evidence = {"PASSED": "독립 검사 통과", "FAILED": "독립 검사 실패",
                         "MISSING": "검사 증거 미확인", "UNCONFIGURED": "기준별 독립 검사 미설정"}
             artifact = ("문서 변경" if delivery["document_only"] else
@@ -1231,7 +1232,7 @@ class CommandCenter:
         for phase, (_, badge) in zip(REGISTERED_PHASES, self.phases):
             row = roles.get(phase)
             outcome = self.registered_role_state(row, end, bool(local and running))
-            if phase == "reviewer" and (progress or {}).get("preview_recovery_review"):
+            if phase == "reviewer" and preview_blocked:
                 outcome = "BLOCKED"
             glyph = "●" if phase == active_phase else "○" if not row else "◆"
             badge.configure(text=f"{glyph}  {REGISTERED_LABELS[phase]}\n{REGISTERED_STATES.get(outcome, outcome)}",
@@ -1241,7 +1242,9 @@ class CommandCenter:
                      "Developer": "developer", "Reviewer": "reviewer", "Verifier": "verifier"}[name]
             row = roles.get(phase, {})
             outcome = self.registered_role_state(row, end, bool(local and running))
-            status.configure(text=REGISTERED_STATES.get(outcome, outcome), fg=MUTED if not row else color(outcome))
+            if phase == "reviewer" and preview_blocked:
+                outcome = "BLOCKED"
+            status.configure(text=REGISTERED_STATES.get(outcome, outcome), fg=MUTED if outcome == "WAITING" else color(outcome))
             parts = [REGISTERED_LABELS[phase]]
             if phase == active_phase:
                 parts.append(REGISTERED_ACTIONS[phase])
