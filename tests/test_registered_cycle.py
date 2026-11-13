@@ -21,6 +21,44 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_project_work_contract_and_document_only_implementation(self):
+        from devorchestra import cycle_progress
+        from devorchestra.project_evidence import discovery, preview_entry
+
+        plan = {"criterion": "C1", "mode": "edit", "plan": "Show a result after validation",
+                "deliverable": "implementation", "components": "UI and validation",
+                "verification": "Run the project test", "evidence": "Result appears for accepted input"}
+        self.assertEqual(plan, registered_cycle._parse_plan(json.dumps(plan), ["C1"], evidence_contract=True))
+        with self.assertRaises(registered_cycle.PlanFormatError):
+            registered_cycle._parse_plan(json.dumps({**plan, "deliverable": "documentation"}), ["C1"],
+                                         evidence_contract=True)
+        self.assertEqual(len(discovery({"src/Tool.csproj": {}, "project.godot": {}, "pyproject.toml": {}})), 3)
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "Example.exe").write_bytes(b"MZ" + bytes(58) + (64).to_bytes(4, "little") + b"PE\0\0")
+            manifest = root / "preview.json"
+            files = {"Example.exe": {}, "preview.json": {}}
+            manifest.write_text('{"kind":"windows-gui","entry":"Example.exe"}', encoding="ascii")
+            self.assertEqual("Example.exe", preview_entry(root, files))
+            manifest.write_text('{"kind":"windows-gui","entry":"../outside.exe"}', encoding="ascii")
+            with self.assertRaises(Blocked):
+                preview_entry(root, files)
+        criteria = {"C1": {"checks": []}, "C2": {"checks": [{"title": "C2"}]},
+                    "C3": {"checks": [{"title": "C3"}]}}
+        checked = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
+                   "runtime": registered_cycle.BASELINE_VERIFIER, "integrity": "PASS", "verdict": "FAIL",
+                   "observations": [{"title": "C2", "expected": True, "actual": False},
+                                    {"title": "C3", "status": "NOT_VERIFIED"}]}
+        comparison = cycle_progress.compare(criteria, {}, checked)
+        self.assertEqual({"C1": "UNCONFIGURED", "C2": "FAILED", "C3": "MISSING"}, comparison["criterion_evidence"])
+        comparison["criteria"]["C1"] = "USER_TEST_REQUIRED"
+        scope = {"criteria": criteria, "verifier": {"mode": registered_cycle.BASELINE_VERIFIER},
+                 "project_evidence_contract": 1}
+        self.assertEqual(1, registered_cycle._cycle_stagnation(
+            scope, "C1", "ACCEPT", checked, comparison, set(), ["README.md"], 0))
+        self.assertTrue(comparison["delivery"]["document_only"])
+        self.assertFalse(comparison["delivery"]["independent_criterion_improvement"])
+
     def test_subscription_admission_and_signoff_without_token_reservation(self):
         from devorchestra.ai_usage import SUBSCRIPTION_MODE, subscription_quota
 
@@ -679,7 +717,10 @@ class RegisteredCycleTests(unittest.TestCase):
                     self.assertIn("+Documented fixture behavior with UTF-8 입력.", options["stdin_bytes"].decode("utf-8"))
                     self.assertGreater(len(options["stdin_bytes"]), 32767)
                 message = {"manager-planning": json.dumps({"criterion": keys[0 if recover else cycle - 1],
-                                                           "plan": "Update the text"}),
+                                                           "mode": "edit", "plan": "Update the text",
+                                                           "deliverable": "implementation", "components": "Text output",
+                                                           "verification": "Run the approved exact-output check",
+                                                           "evidence": "Expected greeting or signoff"}),
                            "developer": "Edited",
                            "reviewer": ("REWORK\n1. Fix the placeholder.\n\nThe display still needs the greeting."
                                         if recover and not manager_recovery and cycle == 1 else "ACCEPT — the diff meets the criterion."),

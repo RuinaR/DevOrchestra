@@ -1107,6 +1107,13 @@ class CommandCenter:
             detail.append(f"변경 파일 {len(changed)}개 · {', '.join(changed[:5])[:250]}")
         if reviewed := (progress or {}).get("latest_progress", {}).get("newly_reviewed_without_functional_check"):
             detail.append("새로 검토 수용 · " + ", ".join(reviewed) + " · 기능 검증 대기")
+        if delivery := (progress or {}).get("latest_progress", {}).get("delivery"):
+            evidence = {"PASSED": "독립 검사 통과", "FAILED": "독립 검사 실패",
+                        "MISSING": "검사 증거 미확인", "UNCONFIGURED": "기준별 독립 검사 미설정"}
+            artifact = ("문서 변경" if delivery["document_only"] else
+                        "산출물 변경" if delivery["artifact_changed"] else "기존 후보")
+            detail.append(f"{delivery['criterion']} · {artifact} · "
+                          f"{evidence.get(delivery['verification'], '검사 증거 미확인')}")
         if criteria := (progress or {}).get("criteria"):
             detail.append("완료 기준 · " + " · ".join(
                 f"{key} {REGISTERED_STATES.get(value, value)}" for key, value in criteria.items()))

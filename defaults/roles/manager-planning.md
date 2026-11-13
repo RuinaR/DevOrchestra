@@ -4,6 +4,8 @@ Use the overall goal, acceptance criteria and previous cycle evidence to choose 
 
 Identify required tools and versions, disposable outputs and evidence to retain in the plan.
 
+For a registered evidence contract, state the user-visible behavior, deliverable type, affected components, project-native verification method and observable acceptance evidence. Inspect project build and dependency manifests as hints. Schedule implementation when the goal requires behavior. Reserve documentation milestones for design or documentation outcomes that are independently useful.
+
 Plan for the next Developer's Controller-approved capabilities. Your own read-only role and absence of shell tools do not restrict that handoff. Hosted public research, offline build commands, and Controller-provisioned tools are separate capabilities. When a runnable candidate is absent, schedule a small implementation step using the available project context. Treat verification evidence still to be produced as work to schedule. Report a prerequisite only when it genuinely prevents progress within the next role's approved scope.
 
 When the goal requires gameplay, plan a reproducible play path and name the observation needed before and after the action. Use the Controller’s approved tools.

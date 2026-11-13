@@ -28,12 +28,12 @@ def compare(criteria, previous, verifier):
     """Use only Controller-observed verdicts and unambiguous owner-bound checks."""
     usable = (verifier.get("phase") == "verifier" and verifier.get("outcome") == "COMPLETED"
               and verifier.get("owned_tree") == "DRAINED"
-              and verifier.get("verdict") in {"PASS", "FAIL"})
+              and verifier.get("verdict") in {"PASS", "FAIL", "NOT_VALIDATED"})
     observed = verifier.get("observations", []) if usable else []
     if verifier.get("runtime") == "mxc-dotnet-sdk-project-v1":
         # Test status is reported over stdout shared with the code under test.
         observed = [row for row in observed if row.get("input") == "BUILD"]
-    current = {}
+    current, evidence = {}, {}
     for key, criterion in criteria.items():
         states = []
         for check in criterion["checks"]:
@@ -45,11 +45,15 @@ def compare(criteria, previous, verifier):
                 states.append(digest(matched[0]["expected"]) == digest(matched[0]["actual"]))
         if False in states:
             current[key] = "REGRESSED" if previous.get(key) in {"VERIFIED", "REGRESSED"} else "BLOCKED"
+            evidence[key] = "FAILED"
         elif states and all(state is True for state in states):
             current[key] = "VERIFIED"
+            evidence[key] = "PASSED"
         else:
             current[key] = "NOT_VERIFIED"
+            evidence[key] = "MISSING" if states else "UNCONFIGURED"
     return {"criteria": current,
+            "criterion_evidence": evidence,
             "newly_verified": [key for key in current if current[key] == "VERIFIED"
                                and previous.get(key) != "VERIFIED"],
             "regressed": [key for key in current if current[key] == "REGRESSED"

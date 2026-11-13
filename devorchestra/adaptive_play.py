@@ -156,7 +156,7 @@ def _candidate(session, cycle, verification):
         return directory, "GamePilot.exe", game["executable"]["sha256"], ["--resolution", "800x540"]
     preview = verification.get("visual_preview", {})
     if preview.get("status") == "CAPTURED":
-        return session.scratch / f"{cycle}-gui-build", "app.exe", preview["executable_sha256"], []
+        return session.scratch / f"{cycle}-gui-build", preview.get("entry", "app.exe"), preview["executable_sha256"], []
     return None
 
 
@@ -171,12 +171,13 @@ def run(session, cycle, key, verification, context):
     if target is None or not _budget(session):
         return [], [], "NO_PLAYABLE_CANDIDATE" if target is None else "PLAY_BUDGET"
     directory, name, expected, args = target
-    if policy == approval(godot=True) and name != "GamePilot.exe":
+    game_export = verification.get("game", {}).get("outcome") == "PASS"
+    if policy == approval(godot=True) and not game_export:
         return [], [], "NO_PLAYABLE_CANDIDATE"
     binary = directory / name
     check_path(binary)
     bundle_options = {}
-    if name == "GamePilot.exe":
+    if game_export:
         if fingerprint(binary, GAME_EXECUTABLE_LIMIT)["sha256"] != expected:
             raise Blocked("Approved game executable changed")
         directory = session.logs(f"{cycle}-play-game")
@@ -187,10 +188,12 @@ def run(session, cycle, key, verification, context):
         with (directory / "override.cfg").open("xb") as config:
             config.write(GODOT_PLAY_OVERRIDE)
         bundle_options = {"max_file_bytes": GAME_EXECUTABLE_LIMIT}
+    if not game_export:
+        bundle_options = {"max_file_bytes": 256 * 1024**2}
     bundle = snapshot(directory, **bundle_options)
     if bundle["files"].get(name, {}).get("sha256") != expected:
         raise Blocked("Approved play executable changed")
-    if name == "app.exe" and digest(bundle) != verification["visual_preview"]["bundle_sha256"]:
+    if verification.get("visual_preview", {}).get("status") == "CAPTURED" and digest(bundle) != verification["visual_preview"]["bundle_sha256"]:
         raise Blocked("Approved play preview bundle changed")
     logs = session.logs(f"{cycle}-adaptive-play")
     ledger = session.runner.ledger
@@ -316,7 +319,7 @@ def run(session, cycle, key, verification, context):
     argv = [*trial_flags(session.work, writable=False, tool_root=directory, shell_tools=False),
             *_args(binary, *args, profile=PROFILE)]
     try:
-        result = _observe(session.binary, argv, directory, logs, session.verify_env, seconds=policy["seconds"],
+        result = _observe(session.binary, argv, binary.parent, logs, session.verify_env, seconds=policy["seconds"],
                           memory=1024**3, check=session.check, output_limit=65536, encoding="utf-8", interact=interact)
         game_clear = result["job_active"] == 0
         if result["exitCode"]:

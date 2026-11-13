@@ -656,8 +656,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 if not isinstance(verifier.get("executable"), str) or not verifier["executable"].strip():
                     raise ValueError("검증 도구를 선택하거나 ‘기본 검증 사용’을 누르세요.")
                 checks = verifier.get("checks")
-                if not isinstance(checks, dict) or checks.keys() != criteria.keys():
-                    raise ValueError("독립 검증 설정에 등록된 완료 기준별 검사 항목을 입력하세요.")
+                if not isinstance(checks, dict) or not checks or not checks.keys() <= criteria.keys():
+                    raise ValueError("독립 검증 설정에 등록된 완료 기준의 검사 항목을 하나 이상 입력하세요.")
                 missing = [key for key, check in checks.items()
                            if not isinstance(check, dict) or not isinstance(check.get("stdout"), str)
                            or not check["stdout"]]
