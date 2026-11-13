@@ -371,12 +371,12 @@ class NativeManagerTests(unittest.TestCase):
         self.assertEqual(public_instruction("project")["text"], messages[0]["text"].strip())
         self.assertEqual(public_instruction("manager-planning")["text"], messages[1]["text"].strip())
 
-    def register_manager_project(self):
+    def register_manager_project(self, *, request_budget=8192):
         source = self.replica.parent / "requirements"
         source.mkdir()
         (source / "goal.md").write_text("Synthetic planning requirement", encoding="utf-8")
         catalog = Catalog(self.ledger)
-        limits = {"seconds": 10, "tokens": 8192, "cost_microunits": 0}
+        limits = {"seconds": 10, "tokens": request_budget, "cost_microunits": 0}
         catalog.save_limits(limits, 0)
         project = new_project("sample", "Sample", self.request.goal)
         project.update(local_path=str(source), acceptance=["Check fixture"], budget=limits)
@@ -423,7 +423,8 @@ class NativeManagerTests(unittest.TestCase):
     def test_subscription_manager_binds_review_and_records_only_validated_output(self):
         from devorchestra import subscription_developer, subscription_manager
 
-        self.register_manager_project()
+        # The transport also bounds serialized request bytes by this budget.
+        self.register_manager_project(request_budget=32768)
         proposal = {"disposition": "PROPOSED", "priority_reason": "Fixture", "task_spec": "Adjust fixture",
                     "proposed_paths": ["fixture.txt"], "acceptance_checks": ["Check fixture"],
                     "stop_conditions": [], "work_kind": "PRODUCT", "product_outcome": "Fixture",
