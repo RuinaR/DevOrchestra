@@ -16,4 +16,6 @@ If the Controller grants an approved play tool, observe the owned window, select
 
 An approved adaptive-play turn asks for one structured action from a fresh owned-window frame. Respond with the requested action schema. At visual signoff, use the recorded actions and before/after frames to reproduce issues, and mark input acceptance or gameplay behavior NOT_VERIFIED when the observations do not establish it.
 
+A uniform client can be a legitimate screen, a startup frame, or an unavailable render. Compare it against the expected state and other approved observations. A screenshot backend change or window resize can change an image without demonstrating an application response. Report those separately from verified behavior.
+
 Check whether the target advanced during AI observation or decision latency and whether that affected the evidence. Suggest an approved target-supported time control when appropriate. Distinguish defects reproduced at normal speed from defects observed under a controlled time model. Use NOT_VERIFIED for timing or state transitions that the available receipts cannot establish.

@@ -22,6 +22,40 @@ def _tls_bundle():
     return [asset] if asset.is_file() else []
 
 
+def _build_window_capture(root, staging):
+    from devorchestra.mxc_host_probe import _observe
+
+    windows = Path(os.environ["SystemRoot"])
+    program_files = Path(os.environ["ProgramFiles(x86)"])
+    vswhere = program_files / "Microsoft Visual Studio/Installer/vswhere.exe"
+    vs = subprocess.check_output(
+        [str(vswhere), "-latest", "-products", "*", "-requires",
+         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+        timeout=15, text=True).strip()
+    vcvars = Path(vs) / "VC/Auxiliary/Build/vcvars64.bat"
+    sdk = program_files / "Windows Kits/10/Include"
+    versions = [path for path in sdk.glob("10.*") if
+                (path / "cppwinrt/winrt/Windows.Graphics.Capture.h").is_file()
+                and (path / "um/windows.graphics.capture.interop.h").is_file()]
+    if not vs or not vcvars.is_file() or not versions:
+        raise SystemExit("WINDOW_CAPTURE_BUILD_REQUIRES_MSVC_AND_WINDOWS_SDK")
+    version_dir = max(versions, key=lambda path: tuple(map(int, path.name.split("."))))
+    compiler = staging / "capture-build.cmd"
+    compiler.write_text(
+        f'@call "{vcvars}" {version_dir.name}\n@if errorlevel 1 exit /b 1\n'
+        f'@cl /nologo /std:c++17 /EHsc /O2 /MT /I"{version_dir / "cppwinrt"}" '
+        f'"{root / "tools/window_capture.cpp"}" /Fe:window_capture.exe '
+        '/link d3d11.lib dwmapi.lib windowsapp.lib user32.lib\n', encoding="ascii")
+    log = staging / "capture-build"
+    log.mkdir()
+    result = _observe(windows / "System32/cmd.exe", ["/d", "/c", compiler.name], staging, log,
+                      dict(os.environ), seconds=90, memory=1024**3, check=lambda: None,
+                      output_limit=16384)
+    if result["exitCode"] or result["job_active"]:
+        raise SystemExit(f'WINDOW_CAPTURE_BUILD_FAILED: {result["stdout"]}')
+    return staging / "window_capture.exe"
+
+
 def _package(root, output, argv):
     import ctypes as c
     from ctypes import wintypes as w
@@ -116,12 +150,14 @@ def main():
             "VarFileInfo([VarStruct('Translation',[1033,1200])])])", encoding="utf-8",
         )
         tls_assets = _tls_bundle()
+        capture_helper = _build_window_capture(root, staging)
         _package(root, staging, [
             "-m", "PyInstaller", "--onefile", "--windowed", "--noupx",
             "--name", "DevOrchestra", "--paths", str(root), "--specpath", str(staging),
             "--workpath", str(staging / "work"), "--distpath", str(output / "dist"),
             "--add-data", f"{metadata};devorchestra", "--add-data", f"{root / 'defaults'};defaults",
             "--add-data", f"{root / 'devorchestra' / 'ui_assets'};devorchestra/ui_assets",
+            "--add-binary", f"{capture_helper};devorchestra",
             *(arg for asset in tls_assets for arg in ("--add-data", f"{asset};.")),
             "--version-file", str(resource), str(launcher),
         ])

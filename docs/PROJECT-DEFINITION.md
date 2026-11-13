@@ -6,6 +6,10 @@
 
 프로젝트의 빌드 구성과 의존성 파일을 작업 계획에 반영한다. 모델이 제안한 빌드·실행·테스트는 승인 범위에서 수행하며, 독립 Verifier는 사용자가 연결한 검사와 증거만 판정한다. 산출물 변경, 문서 마일스톤, 실제 기준의 검증 진척을 구분한다. Windows GUI 검토는 소유 스테이징에서 선언한 실행 파일과 해시가 일치하는 번들을 대상으로 한다.
 
+Windows GUI 브로커는 `PrintWindow`가 사용 가능한 클라이언트 화면을 확보하지 못할 때 소유 HWND에 대한 Windows Graphics Capture를 시도한다. 보조 프로세스는 별도 단기 Job에서 회수하고 Windows의 캡처 표시와 정책을 유지한다. 같은 승인 아래의 관찰·행동·재관찰은 키, 창 내부 클릭·이동, 새 승인에 포함된 스크롤과 크기 변경을 사용한다. 단색 클라이언트는 관찰로 남기며 기대 상태와 비교한다. 캡처 방식 전환이나 크기 변경만으로 기능을 검증하지 않는다.
+
+UI Automation의 Invoke·Value·SelectionItem·Scroll 패턴은 앱이 제공할 때 의미 기반 조작에 적합하다. 현재 자율 브로커는 이 패턴을 호출하지 않는다. 창 메시지는 UIPI와 앱 입력 구현의 영향을 받으며 포커스나 Raw Input에 의존하는 프로그램은 별도 검증이 필요하다. 전역 입력이나 데스크톱 캡처로 대체하지 않는다. [Microsoft UI Automation 패턴](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controlpatternsoverview) · [창 메시지와 UIPI](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw)
+
 반복되는 문제는 공통 실행·검증 계약에서 해결한다. 프로젝트별 경로, 실행 파일명, 엔진 버전은 승인된 설정과 검증 어댑터에서 해석한다. 공통 변경은 영향을 받는 여러 프로젝트 유형에서 확인한다. Reviewer는 재현 가능한 문제와 후속 검사 방법을 Developer에게 전달한다.
 
 Command Center는 최근 승인 세션의 동결 기준 중 독립 확인된 비율을 표시한다. 구현 검토, 재작업, 검증 실패, 입력 대기와 미검증은 별도로 표시한다. 프로젝트별 개발 설정은 사용자 저장소에 보관하고, 세션 시작이나 재개 시 Controller가 실제 승인 계약을 다시 확인한다.

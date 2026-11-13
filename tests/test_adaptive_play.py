@@ -20,6 +20,33 @@ def proposal(action="keys", keys=("ENTER",), ms=45, x=0, y=0):
 
 
 class PlayTests(unittest.TestCase):
+    def test_scroll_and_resize_require_explicit_approval(self):
+        client = (8, 30, 500, 250)
+        for row in (proposal(action="scroll", keys=(), ms=-120, x=100, y=80),
+                    proposal(action="resize", keys=(), ms=0, x=900, y=600)):
+            raw = json.dumps(row)
+            with self.assertRaises(Blocked):
+                adaptive_play.parse(raw, client)
+            self.assertEqual(row, adaptive_play.parse(raw, client, adaptive_play.WINDOW_ACTIONS))
+
+    def test_compositor_frame_is_not_client_content(self):
+        from devorchestra.mxc_owned_gui import _client_uniform
+
+        width, height = 100, 100
+        pixels = bytearray(width * height * 4)
+        pixels[0] = 255
+        self.assertTrue(_client_uniform(pixels, width, height, (0, 0, width, height)))
+        pixels[(20 * width + 25) * 4] = 255
+        self.assertFalse(_client_uniform(pixels, width, height, (0, 0, width, height)))
+
+    def test_capture_backend_change_is_not_verified_input(self):
+        frames = [{"id": f"P{i}", "source_sha256": "source", "executable_sha256": "exe",
+                   "sha256": str(i), "capture_backend": backend}
+                  for i, backend in enumerate(("PRINT_WINDOW", "WINDOWS_GRAPHICS_CAPTURE"))]
+        actions = [{"step": 1, "before": "0", "after": "1", "action": {"action": "keys"},
+                    "result": "SCREEN_CHANGED"}]
+        self.assertEqual(0, adaptive_play.verify_action_chain(frames, actions, "source"))
+
     def test_explicit_play_limits_preserve_the_input_contract(self):
         policy = adaptive_play.approval(limits={"input_steps": 24, "seconds": 900})
         self.assertEqual(48, policy["steps"])

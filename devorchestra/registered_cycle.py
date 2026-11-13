@@ -20,7 +20,7 @@ from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder, _signed_offline
-from .mxc_owned_gui import CAPTURE_DIMENSIONS, OPTIONAL_CAPTURE_STOPS, inspect_owned_window
+from .mxc_owned_gui import CAPTURE_DIMENSIONS, inspect_owned_window, optional_capture_stop
 from .native_command_probe import ARCHIVE_SHA256, CODE_MODE_HOST_SHA256, RELEASE_SHA256, _staging
 from .native_cycle import ROLES, ROLE_TOKENS, _FixtureSession
 from .native_developer_trial import (
@@ -569,7 +569,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             candidate_base["player_report"] = {"origin": "USER_REPORTED", "ratings": player["ratings"],
                                                "finished": player["finished"]}
     play_policy = (adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI),
-                                         limits=play if isinstance(play, dict) else None)
+                                         limits=play if isinstance(play, dict) else None, window_actions=True)
                    if play is not False else None)
     scope = {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),
@@ -1181,13 +1181,9 @@ class RegisteredSession(_FixtureSession):
             except OwnedMxcStopped as error:
                 if str(error) == "MXC probe timeout" and self.signoff_started is not None:
                     self.verification_seconds()
-                if capture_only and str(error) in {"Owned verification window did not appear",
-                                                   "Owned process exited before window observation",
-                                                   "Owned window rendered no usable visual evidence", "MXC probe timeout"}:
+                if capture_only and optional_capture_stop(error):
                     continue
-                if (self.scope.get("project_evidence_contract") and str(error) in {
-                        "Owned verification window did not appear", "Owned process exited before window observation",
-                        "Owned window rendered no usable visual evidence", "MXC probe timeout"}):
+                if self.scope.get("project_evidence_contract") and optional_capture_stop(error):
                     self.check_image()
                     observations.append({"title": key, "level": spec.get("level", "functional"),
                                          "status": "NOT_VERIFIED", "reason": str(error)})
@@ -1287,7 +1283,7 @@ class RegisteredSession(_FixtureSession):
                                                  memory=1024**3, check=self.check, output_limit=8192,
                                                  interact=interact))
         except OwnedMxcStopped as error:
-            if str(error) not in OPTIONAL_CAPTURE_STOPS:
+            if not optional_capture_stop(error):
                 raise
             return {"status": "NOT_VERIFIED", "reason": "GUI_PREVIEW_WINDOW_OR_CAPTURE_UNAVAILABLE",
                     "detail": str(error)}

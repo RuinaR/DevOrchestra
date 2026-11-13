@@ -161,6 +161,13 @@ class _Window:
     def click(self, name):
         self.message(name, 0x00F5)  # BM_CLICK, no desktop input
 
+    def scroll_client(self, x, y, delta):
+        self.check()
+        point = w.POINT(x, y)
+        _require(self.client_to_screen(self.owned("root"), c.byref(point)))
+        packed = (point.x & 0xFFFF) | ((point.y & 0xFFFF) << 16)
+        self.message("root", 0x020A, (delta & 0xFFFF) << 16, packed)  # WM_MOUSEWHEEL
+
     def click_client(self, x, y, *, move_only=False):
         self.check()
         root = self.owned("root")

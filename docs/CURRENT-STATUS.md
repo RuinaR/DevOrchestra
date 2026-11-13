@@ -1,5 +1,7 @@
 # 현재 상태
 
+**범용 소유 창 캡처.** Windows Graphics Capture를 `PrintWindow` 보완 경로로 연결했다. Windows 10 1903 이상에서 HWND 단위 캡처 API를 사용하며 프레임 풀, D3D 텍스처와 실행 시간을 제한한다. Windows의 캡처 표시를 유지한다. Windows 11에서 독립 Godot 사본의 일반 실행 메뉴를 WGC로 캡처했다. 비활성 창을 네 번 캡처했을 때 클라이언트는 단색이었고 소유 창 입력 3회 이후 화면 변화가 없었다. 기능 플레이는 `NOT_VERIFIED`다. WinForms는 실제 소유 창과 오프라인 시험 응답으로 입력 3회 및 화면 전환을 확인했다. 새 온라인 AI 호출은 없었다. 새 승인에서는 소유 창 스크롤과 크기 조절을 사용할 수 있다. [Microsoft HWND 캡처 API](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow) · [프레임 풀](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframepool)
+
 **MRGame 10사이클 종료와 Windows 재현.** Seq 1057에 후보가 저장됐고 Seq 1058은 `CHECKPOINT_SAVED` 및 소유 Job `DRAINED`를 기록했다. 최종 Manager는 C14를 `USER_TEST_REQUIRED`로 남겼다. 보존된 이전 Godot 4.5.1 EXE와 PCK를 독립 시험 폴더에 복사해 검증했다. 정상 설정에서는 게임 메뉴가 캡처됐고 창이 전경에 남았다. 실행 폴더에만 `no_focus`를 적용하면 전경 차단을 피했으나 `PrintWindow`에서 클라이언트가 단색으로 캡처됐다. ANGLE에서도 같았다. 독립 실행 Job과 임시 빌드는 회수했다. Windows 소유 창 캡처는 클라이언트 영역을 검사하며 빈 화면을 이미지 검토에 전달하지 않는다. AI 플레이 한도는 새 승인에서 조정할 수 있다. MRGame 실시간 자율 플레이의 재검증과 온라인 재개는 대기 중이다.
 
 **새 운영실과 MRGame 재개.** EXE `c6aad37cf1cb`의 일반 창과 최대화 화면에서 고정 제어, 역할 흐름, 활동 탭, 저장된 권한 및 Seq 991 재개 검토를 확인했다. 9사이클 C14에서 오디오 코드와 QA가 변경됐다. Reviewer는 두 효과음 채널이 모두 사용 중일 때 승패 효과음이 누락될 수 있다고 지적했고 최종 Manager는 `REWORK`를 확정했다. 독립 Verifier는 무결성 `PASS`, 기능 `NOT_VALIDATED`였다. 새 프리뷰는 Godot 시작 화면까지 확인했다. 외부 GUI 입력 없이도 게임 창이 전경에 남았으므로 자율 입력은 0회였다. Seq 1027에서 10사이클 계획이 시작됐다.

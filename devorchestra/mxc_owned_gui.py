@@ -3,8 +3,10 @@ import ctypes as c
 from ctypes import wintypes as w
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import re
 from struct import pack
+from tempfile import TemporaryDirectory
 from threading import Thread
 from time import monotonic, sleep
 from zlib import compress, crc32
@@ -17,9 +19,15 @@ from .system_powershell import _api as signature
 
 CAPTURE_DIMENSIONS = "Owned capture dimensions exceed the bound"
 CAPTURE_BYTES = "Owned capture PNG exceeds the byte bound"
+NO_CLIENT_FRAME = "Owned window rendered no usable visual evidence"
 OPTIONAL_CAPTURE_STOPS = frozenset({CAPTURE_DIMENSIONS, CAPTURE_BYTES,
     "Owned verification window did not appear", "Owned process exited before window observation",
-    "Owned window rendered no usable visual evidence", "MXC probe timeout"})
+    NO_CLIENT_FRAME, "MXC probe timeout", "Owned GUI window changed during capture"})
+
+
+def optional_capture_stop(error):
+    reason = str(error)
+    return reason in OPTIONAL_CAPTURE_STOPS or reason.startswith(NO_CLIENT_FRAME + " (")
 
 def validate(value):
     from .gui_project import _text, _validate_step
@@ -73,7 +81,8 @@ def verify_images(ledger, evidence, run_id, scenario, *, require_pass=True):
                 or scene["expected"] != approved["expected"]
                 or (require_pass and scene["observed"] != approved["expected"])):
             raise Blocked("WinForms capture does not match the approved scene")
-        if verified_image(folder / image["file"], image["sha256"])[1] != image:
+        verified = verified_image(folder / image["file"], image["sha256"])[1]
+        if any(image.get(key) != value for key, value in verified.items()):
             raise Blocked("WinForms image dimensions changed")
     return evidence
 
@@ -124,16 +133,78 @@ def _render(hwnd, width, height):
     return data
 
 
+def _client_uniform(data, width, height, client):
+    left, top, client_width, client_height = client
+    # Ignore the compositor's one-pixel frame at the client boundary.
+    x0, x1 = max(0, left + 2), min(width, left + client_width - 2)
+    y0, y1 = max(0, top + 2), min(height, top + client_height - 2)
+    if x0 >= x1 or y0 >= y1:
+        raise Blocked(NO_CLIENT_FRAME)
+    first = data[(y0 * width + x0) * 4:(y0 * width + x0) * 4 + 3]
+    for row in range(y0, y1):
+        offset = (row * width + x0) * 4
+        line = data[offset:offset + (x1 - x0) * 4]
+        if any(line[channel::4] != first[channel:channel + 1] * (x1 - x0) for channel in range(3)):
+            return False
+    return True
+
+
+def _graphics_capture(window, width, height, parent):
+    from .mxc_host_probe import OwnedMxcStopped, _observe
+    import os
+
+    helper = Path(__file__).with_name("window_capture.exe")
+    if not helper.is_file():
+        return None, "NOT_INSTALLED"
+    with TemporaryDirectory(prefix="wgc-", dir=parent) as folder:
+        scratch = Path(folder)
+        pixels = scratch / "frame.bgra"
+        window.check()
+        argv = [str(value) for value in (window.owned("root"), window.pid, window.thread, width, height, pixels)]
+        try:
+            result = _observe(helper, argv, scratch, scratch, {"SystemRoot": os.environ["SystemRoot"]},
+                              seconds=4, check=window.check, process_limit=1, output_limit=128)
+        except OwnedMxcStopped as error:
+            window.check()
+            if str(error) != "MXC probe timeout":
+                raise
+            return None, "TIMEOUT"
+        window.check()
+        window.owned("root")
+        if result["exitCode"]:
+            status = result["stdout"].strip()
+            return None, status if re.fullmatch(r"0x[0-9A-F]{8}", status) else f"EXIT_{result['exitCode']}"
+        if not pixels.is_file():
+            return None, "MISSING_FRAME"
+        with pixels.open("rb") as stream:
+            data = stream.read(width * height * 4 + 1)
+        return (data, "CAPTURED") if len(data) == width * height * 4 else (None, "INVALID_FRAME")
+
+
 def _capture(window, path, workers):
     from concurrent.futures import Future
 
+    window.check()
     width, height = window.dimensions()
+    if not 100 <= width <= 2048 or not 100 <= height <= 2048:
+        raise Blocked(CAPTURE_DIMENSIONS)
+    client = window.client_in_image()
     future = Future()
 
     def render():
         try:
-            future.set_result(_render(window.owned("root"), width, height))
-        except (Blocked, OSError, ValueError) as error:
+            try:
+                data = _render(window.owned("root"), width, height)
+            except OSError:
+                data = None
+            if data is not None and not _client_uniform(data, width, height, client):
+                future.set_result((data, "PRINT_WINDOW", False))
+                return
+            data, status = _graphics_capture(window, width, height, path.parent)
+            if data is None:
+                raise Blocked(f"{NO_CLIENT_FRAME} (Windows Graphics Capture: {status})")
+            future.set_result((data, "WINDOWS_GRAPHICS_CAPTURE", _client_uniform(data, width, height, client)))
+        except Exception as error:
             future.set_exception(error)
 
     worker = Thread(target=render, daemon=True)
@@ -142,18 +213,10 @@ def _capture(window, path, workers):
     while not future.done():
         window.check()
         worker.join(0.03)
-    data = future.result()
-    # Window chrome can make PrintWindow look successful while the game client is blank.
-    left, top, client_width, client_height = window.client_in_image()
-    x0, x1 = max(0, left), min(width, left + client_width)
-    y0, y1 = max(0, top), min(height, top + client_height)
-    if x0 >= x1 or y0 >= y1:
-        raise Blocked("Owned window rendered no usable visual evidence")
-    first = data[(y0 * width + x0) * 4:(y0 * width + x0) * 4 + 3]
-    if all(data[(row * width + col) * 4:(row * width + col) * 4 + 3] == first
-           for row in range(y0, y1, max(1, (y1 - y0) // 64))
-           for col in range(x0, x1, max(1, (x1 - x0) // 64))):
-        raise Blocked("Owned window rendered no usable visual evidence")
+    data, backend, uniform = future.result()
+    window.check()
+    if window.dimensions() != (width, height) or window.client_in_image() != client:
+        raise Blocked("Owned GUI window changed during capture")
     stride = width * 4
     rows = []
     for offset in range(0, len(data), stride):
@@ -171,7 +234,7 @@ def _capture(window, path, workers):
         raise Blocked(CAPTURE_BYTES)
     with path.open("xb") as stream:
         stream.write(png)
-    return verified_image(path)[1]
+    return {**verified_image(path)[1], "capture_backend": backend, "uniform_client": uniform}
 
 
 def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None,
@@ -208,7 +271,10 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
                 result = {"image": after, "initial_size": list(initial), "resized": list(requested)}
                 if before_input is not None:
                     after["captured_at"] = datetime.now(timezone.utc).isoformat()
-                    result.update(before_input=before, screen_changed=before["sha256"] != after["sha256"],
+                    comparable = (not before["uniform_client"] and not after["uniform_client"]
+                                  and before["capture_backend"] == after["capture_backend"])
+                    result.update(before_input=before, screen_changed=(
+                                      before["sha256"] != after["sha256"] if comparable else None),
                                   input="SPACE_AND_CLIENT_CLICK_SENT")
                 return result
             return _capture(window, image_path, workers)
