@@ -302,14 +302,18 @@ class CommandCenter:
 
         operations = tk.Frame(body, bg=BG)
         operations.grid(row=3, column=0, sticky="ew", padx=18, pady=8)
-        timeline = section(operations, "실행 단계")
+        timeline = section(operations, "프로젝트 요약")
         timeline.pack(fill="x")
-        self.registered_status = label(timeline, fg=CYAN, bold=True)
-        self.registered_detail = label(timeline, fg=MUTED)
+        self.registered_status = label(timeline, size=17, fg=CYAN, bold=True)
         self.registered_meter = ttk.Progressbar(timeline, mode="determinate")
-        self.registered_cancel = ttk.Button(timeline, text="개발 중단", command=self.cancel_registered_run)
-        on_width(timeline, lambda width: self.registered_detail.configure(wraplength=max(230, width - 40)))
-        lane = tk.Frame(timeline, bg=PANEL)
+        metrics = tk.Frame(timeline, bg=PANEL)
+        self.registered_metrics = metrics
+        self.registered_values = [label(metrics, bg=TILE, bold=True, size=12) for _ in range(4)]
+        self.flow_cards(metrics, self.registered_values, 175)
+        self.registered_budget = label(timeline, fg=MUTED)
+        flow = section(operations, "역할 흐름")
+        flow.pack(fill="x", pady=(8, 0))
+        lane = tk.Frame(flow, bg=PANEL)
         lane.pack(fill="x", pady=(5, 0))
         self.phases = []
         for name in ("PLAN", "DEVELOP", "REVIEW", "VERIFY", "DECIDE"):
@@ -317,11 +321,32 @@ class CommandCenter:
             self.phases.append((name, badge))
         self.flow_cards(lane, [badge for _, badge in self.phases], 115)
 
-        operators = section(operations, "역할별 실행 근거")
+        task = section(operations, "현재 작업")
+        self.registered_task = task
+        self.registered_operators = operators = section(operations, "역할별 실행 근거")
+        self.registered_detail = label(task, fg=INK)
+        self.registered_detail.pack(fill="x")
+        self.registered_cancel = ttk.Button(task, text="개발 중단", command=self.cancel_registered_run)
+        on_width(task, lambda width: self.registered_detail.configure(wraplength=max(200, width - 34)))
+        issues = section(operations, "오류 및 조치")
+        self.registered_issues = issues
+        self.registered_issue = label(issues, fg=AMBER)
+        self.registered_issue.pack(fill="x")
+        on_width(issues, lambda width: self.registered_issue.configure(wraplength=max(200, width - 34)))
+        self.registered_issue_button = ttk.Button(issues, text="오류 원문 보기")
+        self.registered_issue_button.pack(side="left", pady=(5, 0))
+        self.registered_recovery_button = ttk.Button(issues, text="재개 조건 검토")
+
         operators.pack(fill="x", pady=(8, 0))
+        self.registered_recent = label(operators, fg=MUTED)
+        self.registered_recent.pack(fill="x", pady=(0, 4))
+        on_width(operators, lambda width: self.registered_recent.configure(wraplength=max(200, width - 34)))
         self.registered_history_button = ttk.Button(operators, text="전체 진행 작업 보기", state="disabled",
                                                     command=self.show_registered_history)
         self.registered_history_button.pack(anchor="e")
+        self.registered_criteria_button = ttk.Button(operators, text="완료 기준별 상태", state="disabled",
+                                                     command=self.show_registered_criteria)
+        self.registered_criteria_button.pack(anchor="e", pady=(4, 0))
         roster = tk.Frame(operators, bg=PANEL)
         roster.pack(fill="x", pady=(5, 0))
         self.cards = {}
@@ -799,8 +824,7 @@ class CommandCenter:
             detail.configure(text="")
         self.update_active_card()
         self.registered_history_button.configure(state="disabled")
-        for widget in (self.registered_status, self.registered_detail, self.registered_cancel, self.registered_meter):
-            widget.pack_forget()
+        self.clear_registered_summary()
         self.run_filter.configure(values=())
         self.run_filter.set("")
         self.render_audit()
@@ -882,6 +906,8 @@ class CommandCenter:
                                                    for line in criteria[:3])
             if len(criteria) > 3:
                 goal += f"\n외 {len(criteria) - 3}개 · 목표와 완료 기준 편집에서 확인"
+            if getattr(self, "page", None) == "operations" and view.get("registered_progress"):
+                goal = " ".join(text.split())[:185] + ("…" if len(" ".join(text.split())) > 185 else "")
         if handoff:
             goal += "\n감독형 작업 · " + stage_title
             if handoff.get("artifacts"):
@@ -1007,6 +1033,34 @@ class CommandCenter:
             if self.view:
                 self.render_registered(self.view)
 
+    def clear_registered_summary(self):
+        self.registered_status.configure(text="자동 개발 기록 대기", fg=MUTED)
+        self.registered_status.pack(fill="x")
+        for widget in (self.registered_metrics, self.registered_budget, self.registered_task,
+                       self.registered_issues, self.registered_cancel, self.registered_meter):
+            widget.pack_forget()
+        self.registered_recent.configure(text="")
+        self.registered_criteria_button.configure(state="disabled")
+
+    def registered_readout(self, title, text):
+        panel = self.panel()
+        panel.title(title)
+        panel.geometry("700x480")
+        detail = self.editor_box(panel, height=20)
+        detail.insert("1.0", text)
+        detail.configure(state="disabled")
+
+    def show_registered_criteria(self):
+        progress = (self.view or {}).get("registered_progress")
+        if not progress:
+            return
+        names = {"VERIFIED": "독립 검증 완료", "IMPLEMENTED": "구현 검토 · 검증 대기", "REWORK": "재작업",
+                 "BLOCKED": "차단", "NEEDS_INPUT": "입력 대기", "NOT_VERIFIED": "미검증"}
+        entries = [f"{names[key]} {amount}개" for key, amount in progress["criterion_counts"].items()]
+        rows = [f"{key} · {names[state]}\n{progress['scope']['criteria'][key]['text']}"
+                for key, state in progress["criterion_statuses"].items()]
+        self.registered_readout("완료 기준별 상태", " · ".join(entries) + "\n\n" + "\n\n".join(rows))
+
     def render_registered(self, view):
         job = self.registered_job
         running = bool(job and not job["settled"])
@@ -1029,8 +1083,7 @@ class CommandCenter:
             self.update_active_card()
             self.registered_history_button.configure(state="disabled")
             self.render_registered_history(view, None, ())
-            for widget in (self.registered_status, self.registered_detail, self.registered_cancel, self.registered_meter):
-                widget.pack_forget()
+            self.clear_registered_summary()
             return
         scope = progress["scope"] if progress else local["scope"]
         end = ((local or {}).get("result") or (progress or {}).get("end"))
@@ -1053,20 +1106,24 @@ class CommandCenter:
         heading = f"자동 개발 · {label_text}"
         if cycle:
             heading += f" · {cycle}사이클"
-        if role and not end:
+        if role and (not end or state in {"BLOCKED", "SIGNOFF_PENDING", "REQUEST_UNKNOWN"}):
             heading += f" · {role}"
         self.registered_history_button.configure(state="normal")
+        self.registered_criteria_button.configure(state="normal" if progress else "disabled")
         self.render_registered_history(view, progress, activities)
         self.mission.configure(text=f"{view['project_name']}  /  {heading.removeprefix('자동 개발 · ')}", fg=color(state))
-        self.registered_status.configure(text=heading, fg=color(state))
-        lane = self.phases[0][1].master
+        self.registered_status.configure(text=f"{view['project_name']} · {heading.removeprefix('자동 개발 · ')}", fg=color(state))
         if not self.registered_status.winfo_manager():
-            self.registered_status.pack(fill="x", before=lane, pady=(4, 0))
+            self.registered_status.pack(fill="x", pady=(2, 8))
+        if not self.registered_metrics.winfo_manager():
+            self.registered_metrics.pack(fill="x")
+        if not self.registered_task.winfo_manager():
+            self.registered_task.pack(fill="x", before=self.registered_operators, pady=(8, 0))
         if progress:
             self.registered_meter.configure(maximum=max(1, len(scope["criteria"])),
                                             value=progress["criterion_counts"]["VERIFIED"])
             if not self.registered_meter.winfo_manager():
-                self.registered_meter.pack(fill="x", before=lane, pady=(4, 0))
+                self.registered_meter.pack(fill="x", pady=(4, 0))
         else:
             self.registered_meter.pack_forget()
         used = (end or {}).get("known_reported_tokens", (progress or {}).get("tokens", 0))
@@ -1078,14 +1135,18 @@ class CommandCenter:
             budget += f" · 경과 {int(elapsed):,} / {scope['seconds']:,}초"
         if (progress or {}).get("usage_unknown"):
             budget += " · 일부 사용량 미확정"
-        detail = [budget]
+        detail = []
+        counts = (progress or {}).get("criterion_counts", {})
+        total = len(scope["criteria"])
+        verified = counts.get("VERIFIED", 0)
+        changed = (progress or {}).get("changed", ())
+        for widget, value in zip(self.registered_values, (
+                f"{verified} / {total}\n독립 검증 완료", f"{counts.get('IMPLEMENTED', 0)}\n구현 검토 · 검증 대기",
+                f"{counts.get('REWORK', 0)} / {counts.get('BLOCKED', 0) + counts.get('NEEDS_INPUT', 0)}\n재작업 / 차단·입력 대기",
+                f"{len(changed)}\n변경 파일")):
+            widget.configure(text=value)
+        quota_text = ""
         if progress:
-            counts = progress["criterion_counts"]
-            total = len(scope["criteria"])
-            detail.insert(0, f"전체 기준 {total}개 · 독립 검증 {counts['VERIFIED']}개"
-                          + (f" ({counts['VERIFIED'] / total:.0%})" if total else ""))
-            detail.insert(1, f"구현·기능 검증 대기 {counts['IMPLEMENTED']} · 미검증 {counts['NOT_VERIFIED']} · "
-                          f"재작업 {counts['REWORK']} · 차단·입력 대기 {counts['BLOCKED']}")
             detail.append(f"세션 {progress['run_id']} · 원장 Seq {progress['latest_sequence']}")
             if started := progress.get("started_at"):
                 detail.append(f"시작 {datetime.fromtimestamp(started):%m-%d %H:%M:%S}")
@@ -1099,32 +1160,44 @@ class CommandCenter:
                      and all(w["resets_at"] is None or w["resets_at"] > now for w in quota.get("windows", ())))
             left = quota.get("remaining") if fresh else None
             value = "UNKNOWN" if left is None else f"{left:g}%"
-            detail.append(f"구독 잔여량 기반 개발 · 공식 잔여 {value} · 10% 이하 종료 예약")
+            quota_text = f" · 공식 잔여 {value} · 10% 이하 종료 예약"
             if checked is not None:
                 timestamp = datetime.fromtimestamp(checked).strftime("%m-%d %H:%M:%S")
-                detail.append(f"마지막 조회 {timestamp} · "
+                detail.append(f"구독 마지막 조회 {timestamp} · "
                               + REGISTERED_STATES.get("QUOTA_" + quota["status"], quota["status"]))
-            for window in quota.get("windows", ()):
-                reset = window["resets_at"]
-                reset_text = datetime.fromtimestamp(reset, timezone.utc).strftime("%m-%d %H:%M UTC") if reset else "UNKNOWN"
-                remaining = window["remaining"] if fresh and quota.get("status") == "AVAILABLE" else None
-                percent = f"{remaining:g}%" if remaining is not None else "UNKNOWN"
-                detail.append(f"{window['bucket']} · {window['window']} · 잔여 {percent} · 초기화 {reset_text}")
+        self.registered_budget.configure(text=budget + quota_text +
+                                         (f"\n검증률 {verified / total:.0%}" if total and progress else ""))
+        if not self.registered_budget.winfo_manager():
+            self.registered_budget.pack(fill="x", pady=(7, 0))
         target = recent.get("target")
         if target in scope["criteria"]:
             detail.append(f"현재 기준 · {scope['criteria'][target]['text'][:180]}")
         if stop := (progress or {}).get("stop"):
             detail.append(f"종료 예약 · {REGISTERED_STATES.get(stop, stop)}")
-        if reason:
+        if reason or state in {"SIGNOFF_PENDING", "NEEDS_INPUT", "CHECKPOINT_SAVED", "REQUEST_UNKNOWN", "BLOCKED"}:
             hint = {"Role did not return a valid verdict": "모델 응답의 판정을 읽지 못했습니다. 이어서 개발에서 보존된 응답을 확인하세요.",
                     "NO_PROGRESS": "현재 승인 범위에서 더 진행할 기준을 찾지 못했습니다. 보류 사유를 확인하세요.",
                     "NEEDS_INPUT": "현재 진행할 수 있는 기준이 없습니다. 아래에 표시된 자료나 권한을 검토하세요."}
-            detail.append(hint.get(reason, str(reason)[:300]))
-        if deferred := (progress or {}).get("deferred"):
-            detail.append(f"보류 기준 {len(deferred)}개 · " + " · ".join(
-                f"{key} {item['reason'][:160]}" for key, item in list(deferred.items())[:3]))
-        if changed := (progress or {}).get("changed"):
-            detail.append(f"변경 파일 {len(changed)}개 · {', '.join(changed[:5])[:250]}")
+            short = ("검토용 Windows 빌드의 임시 경로를 열지 못했습니다 (WinError 3)."
+                     if (progress or {}).get("preview_recovery_review") else
+                     hint.get(reason, str(reason or label_text).splitlines()[0][:160]))
+            recovery = ((progress or {}).get("preview_recovery_review") or self.can_resume_registered(progress))
+            self.registered_issue.configure(text=short + ("\n재개 전에 후보와 승인 범위를 다시 검사합니다." if recovery else ""))
+            full = str(reason or label_text)
+            deferred = (progress or {}).get("deferred", {})
+            if deferred:
+                full += "\n\n" + "\n".join(f"{key} · {item['reason']}" for key, item in deferred.items())
+            self.registered_issue_button.configure(command=lambda: self.registered_readout("오류 및 조치 근거", full))
+            if recovery:
+                from .gui_registered_cycle import show
+                self.registered_recovery_button.configure(command=lambda: show(self, view["project_id"], resume_only=True))
+                self.registered_recovery_button.pack(side="left", padx=6, pady=(5, 0))
+            else:
+                self.registered_recovery_button.pack_forget()
+            if not self.registered_issues.winfo_manager():
+                self.registered_issues.pack(fill="x", after=self.registered_task, pady=(8, 0))
+        else:
+            self.registered_issues.pack_forget()
         if reviewed := (progress or {}).get("latest_progress", {}).get("newly_reviewed_without_functional_check"):
             detail.append("새로 검토 수용 · " + ", ".join(reviewed) + " · 기능 검증 대기")
         if delivery := (progress or {}).get("latest_progress", {}).get("delivery"):
@@ -1137,13 +1210,17 @@ class CommandCenter:
         if active_phase and (message := next((msg for number, phase, msg, kind in reversed(activities)
                                               if number == cycle and phase == active_phase and kind == "activity"), None)):
             detail.append(f"최근 활동 · {message}")
+        if active_phase and (plan := next((msg for number, phase, msg, kind in reversed(activities)
+                                           if number == cycle and phase == active_phase and kind == "handoff"), None)):
+            detail.append(f"작업 인계 · {plan[:420]}")
         self.registered_detail.configure(text="\n".join(detail))
-        if not self.registered_detail.winfo_manager():
-            self.registered_detail.pack(fill="x", before=lane, pady=(3, 5))
+        recent_activity = [msg for _, _, msg, kind in activities if kind == "activity"][-3:]
+        self.registered_recent.configure(text="\n".join(recent_activity) if recent_activity else
+                                         f"변경 파일 {len(changed)}개 · 역할 결과와 파일은 전체 진행 작업에서 확인")
         if local and running:
             self.registered_cancel.configure(state="disabled" if local["cancelled"].is_set() else "normal")
             if not self.registered_cancel.winfo_manager():
-                self.registered_cancel.pack(anchor="w", before=lane, pady=(0, 4))
+                self.registered_cancel.pack(anchor="w", pady=(5, 0))
         else:
             self.registered_cancel.pack_forget()
         owned = (end or {}).get("owned_tree")
@@ -1154,8 +1231,11 @@ class CommandCenter:
         for phase, (_, badge) in zip(REGISTERED_PHASES, self.phases):
             row = roles.get(phase)
             outcome = self.registered_role_state(row, end, bool(local and running))
-            badge.configure(text=f"{REGISTERED_LABELS[phase]}\n{REGISTERED_STATES.get(outcome, outcome)}",
-                            fg=MUTED if not row else color(outcome))
+            if phase == "reviewer" and (progress or {}).get("preview_recovery_review"):
+                outcome = "BLOCKED"
+            glyph = "●" if phase == active_phase else "○" if not row else "◆"
+            badge.configure(text=f"{glyph}  {REGISTERED_LABELS[phase]}\n{REGISTERED_STATES.get(outcome, outcome)}",
+                            fg=MUTED if outcome == "WAITING" else color(outcome), bg=EDGE if phase == active_phase else TILE)
         for name, (status, evidence) in self.cards.items():
             phase = {"Manager": "manager-final" if "manager-final" in roles else "manager-planning",
                      "Developer": "developer", "Reviewer": "reviewer", "Verifier": "verifier"}[name]
@@ -1332,9 +1412,22 @@ class CommandCenter:
         text = "\n".join(lines) or "작업 기록을 기다리는 중입니다."
         if detail.get("1.0", "end-1c") != text:
             at_end = detail.yview()[1] >= 0.99
+            previous = detail.get("1.0", "end-1c")
+            old_lines, new_lines = previous.splitlines(), text.splitlines()
+            common = 0
+            for old, new in zip(old_lines, new_lines):
+                if old != new:
+                    break
+                common += 1
             detail.configure(state="normal")
-            detail.delete("1.0", "end")
-            detail.insert("1.0", text)
+            if common:
+                index = f"{common}.end"
+                detail.delete(index, "end")
+                if common < len(new_lines):
+                    detail.insert(index, "\n" + "\n".join(new_lines[common:]))
+            else:
+                detail.delete("1.0", "end")
+                detail.insert("1.0", text)
             detail.configure(state="disabled")
             if at_end:
                 detail.see("end")

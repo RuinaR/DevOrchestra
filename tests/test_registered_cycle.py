@@ -583,6 +583,27 @@ class RegisteredTrustTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"), "Requires signed local Windows tools")
 class RegisteredCycleTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows extended paths")
+    def test_preview_inventory_reads_deep_paths_and_rejects_missing_files(self):
+        from tempfile import TemporaryDirectory
+        from devorchestra.replica_evidence import snapshot
+
+        with TemporaryDirectory(dir=Path.cwd()) as folder:
+            root = Path(folder)
+            item = root / ("a" * 100) / ("b" * 100) / ("c" * 50 + ".cache")
+            native = Path("\\\\?\\" + str(item))
+            native.parent.mkdir(parents=True)
+            try:
+                native.write_bytes(b"fixture")
+                image = snapshot(root, long_local=True)
+                self.assertEqual(7, image["files"][item.relative_to(root).as_posix()]["bytes"])
+                with patch("devorchestra.replica_evidence.fingerprint", side_effect=FileNotFoundError):
+                    with self.assertRaises(FileNotFoundError):
+                        snapshot(root, long_local=True)
+            finally:
+                native.unlink(missing_ok=True)
+                native.parent.rmdir()
+                native.parent.parent.rmdir()
     def test_onboard_run_verify_and_review_original_write(self):
         self._exercise(False)
 

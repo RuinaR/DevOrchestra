@@ -396,6 +396,12 @@ class _FixtureSession:
         path.mkdir()
         return path
 
+    @staticmethod
+    def runtime_environment(environment, root):
+        return {**environment, **dict.fromkeys(
+            ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "HOME", "TEMP", "TMP"), str(root)),
+            "PSModuleAnalysisCachePath": str(root / "ModuleAnalysisCache")}
+
     def owned(self, invoke):
         self.owned_verified = False
         try:
@@ -581,7 +587,8 @@ class _FixtureSession:
                 normal_check()
         argv = _exec_argv(self.work, self.scope["model"], prompt, writable=writable,
                           tool_root=tool_root, shell_tools=shell_tools, extra_read_roots=extra_read_roots,
-                          scratch_root=scratch_root, images=images, output_schema=output_schema, web_research=research)
+                          scratch_root=scratch_root, runtime_root=tool_environment_root, images=images,
+                          output_schema=output_schema, web_research=research)
         stdin = {}
         # Leave room for the executable path and Windows quoting expansion.
         if len(list2cmdline(argv).encode("utf-16-le")) >= 48000:
@@ -591,9 +598,7 @@ class _FixtureSession:
         memory_evidence = {}
         environment = self.env
         if tool_environment_root is not None:
-            environment = {**environment, **dict.fromkeys(
-                ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "HOME", "TEMP", "TMP"), str(tool_environment_root))}
-            environment["PSModuleAnalysisCachePath"] = str(tool_environment_root / "ModuleAnalysisCache")
+            environment = self.runtime_environment(environment, tool_environment_root)
         try:
             result = _observe(self.binary, argv,
                               self.work, role_log, environment, seconds=timeout, check=observed_check,

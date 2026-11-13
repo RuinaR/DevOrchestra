@@ -158,7 +158,8 @@ class ProjectionTests(unittest.TestCase):
                      "safety", "resources", "run_filter", "role_filter", "render_audit",
                      "overview", "verify_overview", "approval_button",
                      "registered_status", "registered_detail", "registered_cancel", "registered_history_button",
-                     "registered_meter"):
+                     "registered_meter", "registered_metrics", "registered_budget", "registered_task",
+                     "registered_issues", "registered_recent", "registered_criteria_button"):
             setattr(center, attr, Mock())
         center.phases = [(name, Mock()) for name in ("PLAN", "DEV", "REV", "VFY", "DEC")]
         center.cards = {"Manager": (Mock(), Mock())}

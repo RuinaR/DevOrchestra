@@ -882,16 +882,15 @@ class RegisteredSession(_FixtureSession):
         self.package_network_failure = None
         if preview := self.scope.get("resume", {}).get("saved_preview"):
             recovery = self.runner.ledger.local_directory("recovery") / preview["directory"]
-            bundle = snapshot(recovery, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
+            bundle = snapshot(recovery, max_file_bytes=GUI_PREVIEW_MAX_BYTES, long_local=True)
             if digest(bundle) != preview["sha256"]:
                 raise Blocked("보존한 Windows 미리보기 파일이 변경됐습니다.")
             build = self.logs(f"{self.scope['resume']['cycle']}-gui-build")
             for name in bundle["files"]:
                 source = recovery / _relative(name)
                 target = build / _relative(name)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                copyfile(source, target)
-            if snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES)["files"] != bundle["files"]:
+                _copy_preview_file(source, target)
+            if snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES, long_local=True)["files"] != bundle["files"]:
                 raise Blocked("보존한 Windows 미리보기 복원을 확인할 수 없습니다.")
         if self.scope["verifier"].get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
             self.game_scratch = self.scratch / "developer-game"
@@ -1053,6 +1052,7 @@ class RegisteredSession(_FixtureSession):
             scratch_root = self.logs(f"{cycle}-developer-build")
             prompt += (f"\nUse {scratch_root} for generated build outputs, caches and temporary test files. "
                        "Keep source, project configuration and reusable assets in the replica.")
+        runtime_root = self.logs(f"{cycle}-developer-data") if scratch_root is not None and phase == "developer" else None
         try:
             with self.portable_tools(cycle, phase, selected_tools) as portable:
                 extra_roots = (Path(tool["template"]).parent,) if game and phase == "developer" else ()
@@ -1073,7 +1073,7 @@ class RegisteredSession(_FixtureSession):
                                                     (not game or phase == "developer") else None,
                                                     extra_read_roots=extra_roots,
                                                     scratch_root=scratch_root,
-                                                    tool_environment_root=scratch_root if phase == "developer" else None,
+                                                    tool_environment_root=runtime_root,
                                                     shell_tools=phase in self.scope["shell_roles"] and not images,
                                                     images=images, image_evidence=image_evidence,
                                                     response_schema=response_schema,
@@ -1245,7 +1245,11 @@ class RegisteredSession(_FixtureSession):
         check_path(build)
         if not build.is_dir():
             return {"status": "NOT_VERIFIED", "reason": "PREVIEW_BUILD_DIRECTORY_MISSING"}
-        bundle = snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
+        try:
+            bundle = snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES, long_local=True)
+        except FileNotFoundError:
+            self.check_image()
+            return {"status": "NOT_VERIFIED", "reason": "PREVIEW_ARTIFACT_DISAPPEARED"}
         if (self.scope.get("project_evidence_contract") and "preview.json" not in bundle["files"]):
             reason = ("PREVIEW_MANIFEST_MISSING" if any(name.lower().endswith(".exe") for name in bundle["files"])
                       else "PREVIEW_EXECUTABLE_MISSING")
@@ -1259,6 +1263,7 @@ class RegisteredSession(_FixtureSession):
         executable = build / _relative(name)
         identity = bundle["files"][name]
         logs = self.logs(f"{cycle}-preview")
+        runtime_root = self.logs(f"{cycle}-preview-data")
         image_path = logs / "preview.png"
         workers, captured = [], {}
 
@@ -1266,9 +1271,11 @@ class RegisteredSession(_FixtureSession):
             captured.update(inspect_owned_window(api, job, deadline, self.check, image_path, workers,
                                                  input_probe=False))
 
-        argv = [*trial_flags(self.work, writable=False, tool_root=build), *_args(executable, profile=PROFILE)]
+        argv = [*trial_flags(self.work, writable=False, tool_root=build, runtime_root=runtime_root),
+                *_args(executable, profile=PROFILE)]
         try:
-            result = self.owned(lambda: _observe(self.binary, argv, executable.parent, logs, self.verify_env,
+            environment = self.runtime_environment(self.verify_env, runtime_root)
+            result = self.owned(lambda: _observe(self.binary, argv, executable.parent, logs, environment,
                                                  seconds=min(30, self.verification_seconds()),
                                                  memory=1024**3, check=self.check, output_limit=8192,
                                                  interact=interact))
@@ -1289,7 +1296,7 @@ class RegisteredSession(_FixtureSession):
                     self.owned_verified = False
                     raise Blocked("Owned GUI capture worker did not settle")
             self.check_image()
-            if snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES) != bundle:
+            if snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES, long_local=True) != bundle:
                 raise Blocked("GUI preview bundle changed during verification")
         if result["job_active"]:
             self.owned_verified = False
@@ -1542,6 +1549,14 @@ def _verify_signoff(session, count, key, status):
     return checked, comparison
 
 
+def _copy_preview_file(source, target):
+    check_path(source, long_local=True)
+    check_path(target, long_local=True)
+    native_target = Path("\\\\?\\" + str(target))
+    native_target.parent.mkdir(parents=True, exist_ok=True)
+    copyfile(Path("\\\\?\\" + str(source)), native_target)
+
+
 def _save_signoff(session):
     state = session.signoff_state
     if not state:
@@ -1555,7 +1570,7 @@ def _save_signoff(session):
     build = session.scratch / f"{state['cycle']}-gui-build"
     if (session.scope.get("token_mode") == SUBSCRIPTION_MODE and not state.get("review")
             and not state.get("pending_visual") and build.is_dir()):
-        bundle = snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
+        bundle = snapshot(build, max_file_bytes=GUI_PREVIEW_MAX_BYTES, long_local=True)
         try:
             name = preview_entry(build, bundle["files"], legacy=not session.scope.get("project_evidence_contract"))
         except Blocked:
@@ -1569,9 +1584,8 @@ def _save_signoff(session):
         for name in bundle["files"]:
             source = build / _relative(name)
             target = artifact / _relative(name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            copyfile(source, target)
-        saved = snapshot(artifact, max_file_bytes=GUI_PREVIEW_MAX_BYTES)
+            _copy_preview_file(source, target)
+        saved = snapshot(artifact, max_file_bytes=GUI_PREVIEW_MAX_BYTES, long_local=True)
         if saved["files"] != bundle["files"]:
             raise Blocked("Windows 미리보기 보존을 확인할 수 없습니다.")
         state["saved_preview"] = {"directory": artifact.name, "sha256": digest(saved)}
@@ -2299,6 +2313,89 @@ def _cycles(session, initial_plan=None, *, continuation=None):
     return stop(count, outcome="CYCLE_LIMIT", feedback=feedback)
 
 
+def _interrupted_preview(rows):
+    if len(rows) < 5:
+        return False
+    start, end = rows[0], rows[-1]
+    diff, capture = rows[-3:-1]
+    reason = end.get("reason") or ""
+    prefix = re.fullmatch(r"native-command-[a-z0-9_]+", start.get("workspace", ""))
+    cycle = diff.get("cycle")
+    return bool(prefix and type(cycle) is int and cycle > 0
+                and end.get("outcome") == "BLOCKED" and reason.startswith("[WinError 3]")
+                and f"{prefix[0]}\\tmp\\{cycle}-gui-build\\" in reason.replace("\\\\", "\\")
+                and end.get("owned_tree") == "DRAINED" and end.get("usage_complete") is True
+                and end.get("staging_cleanup") == {"status": "RETAINED_FOR_RECOVERY", "workspace": prefix[0]}
+                and diff["kind"] == "native_inspection_developer_diff"
+                and capture["kind"] == "native_inspection_review_capture_started" and capture.get("cycle") == cycle
+                and diff.get("source_sha256") == capture.get("source_sha256") == end.get("replica_sha256"))
+
+
+def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
+    start, end = rows[0], rows[-1]
+    prior = start["scope"]
+    approval = start["approval_sha256"]
+    cycle = rows[-3]["cycle"]
+    role = next((row for row in reversed(rows) if row["kind"] == "native_inspection_role_result"), {})
+    intent = next((row for row in reversed(rows) if row["kind"] == "native_inspection_role_intent"), {})
+    target = role.get("target")
+    settled = [row for row in rows if row["kind"] == "native_inspection_role_result" and "provider_usage" in row]
+    dispatched = [row for row in rows if row["kind"] == "native_inspection_role_intent" and "role_call" in row]
+    if (approval != digest(prior) or not prior.get("project_edit") or not prior.get("visual_preview")
+            or any(row.get("approval_sha256") != approval for row in rows)
+            or len(dispatched) != len(settled) or len(settled) != end.get("model_turns_dispatched")
+            or any(not isinstance(row.get("provider_usage"), dict)
+                   or any(row.get(field) != call.get(field) for field in ("cycle", "phase", "target"))
+                   for row, call in zip(settled, dispatched))
+            or sum(row["provider_usage"]["input_tokens"] + row["provider_usage"]["output_tokens"]
+                   for row in settled) != end.get("known_reported_tokens")
+            or target not in prior["criteria"] or (role.get("phase"), role.get("cycle")) != ("developer", cycle)
+            or role.get("outcome") != "COMPLETED" or role.get("process_result") != "EXITED"
+            or role.get("exit_code") != 0 or role.get("owned_tree") != "DRAINED"
+            or intent.get("phase") != "developer" or intent.get("cycle") != cycle
+            or any(row.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
+                   for row in events if row["kind"] == "native_inspection_intent")):
+        raise Blocked("Developer 정상 완료, 사용량 및 미사용 복구 기록을 확인할 수 없습니다.")
+    ledger = runner.ledger
+    source, replica, frozen, onboarding = baseline(ledger, prior["project_id"])
+    image = snapshot(replica)
+    catalog = Catalog(ledger).read()
+    if (str(source) != prior["original"] or str(replica) != prior["replica"]
+            or catalog["projects"][prior["project_id"]]["revision"] != prior["project_revision"]
+            or digest(onboarding) != prior["onboarding_sha256"] or not original_matches(source, frozen)
+            or digest(image) != end["replica_sha256"]
+            or digest({**image, "files": frozen["files"]}) != onboarding["replica_sha256"]):
+        raise Blocked("원본 또는 개발 후보의 Git·파일 상태가 일치하지 않습니다.")
+    read_frozen_requirements(catalog, prior["project_id"], prior["requirements"], ledger.state_boundary)
+    with _git(ledger, source) as (git, _):
+        if _scan(source, git, frozen["local_examples"]) != frozen:
+            raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
+    changed = sorted(name for name in frozen["files"].keys() | image["files"].keys()
+                     if frozen["files"].get(name) != image["files"].get(name))
+    _editable_paths(changed, prior["protected_edit_paths"], limit=4096)
+    if not changed or not set(rows[-3]["changed"]) <= set(end["changed"]):
+        raise Blocked("개발 변경 범위를 확인할 수 없습니다.")
+    if any(name not in end["changed"] for name in changed):
+        raise Blocked("개발 기록에 없는 후보 변경이 있습니다.")
+    diff = _project_review_diff(replica, changed, {name: _review_text(source, name, frozen) for name in changed},
+                                frozen["files"], image)
+    if not diff or len(diff) > MAX_DIFF:
+        raise Blocked("검토에 사용할 누적 변경의 한도를 확인하세요.")
+    status = dict.fromkeys(prior["criteria"], "NOT_STARTED")
+    status.update(end["criteria_status"])
+    if status.keys() != prior["criteria"].keys():
+        raise Blocked("동결 완료 기준을 확인할 수 없습니다.")
+    resume = {"mode": "signoff", "parent_run_id": start["run_id"], "cycle": cycle, "criterion": target,
+              "criteria_status": status, "changed": changed, "changed_total": end["changed"],
+              "diff_sha256": digest(diff), "parent_reported_tokens": end["known_reported_tokens"],
+              "interrupted_preview": True}
+    return ({**prior, "resume": resume, "replica_sha256": digest(image), "ledger_head": head,
+             "expires": expires, "seconds": seconds, "tokens": None, "model_calls_max": 2,
+             "adaptive_play": None,
+             "files": changed, "permissions": ["replica-read", "offline-shell", "pinned-verifier"],
+             "shell_roles": ["reviewer"], "graceful_stop": game_pilot.graceful_policy(followup=True)}, diff)
+
+
 def _resume_contract(runner, events, head, project, expires, seconds, tokens, renew=False, *,
                      require_proof=True, graceful=False):
     now = time()
@@ -2315,6 +2412,8 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
             return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
         if outcome == MANUAL_CHECKPOINT:
             return _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens, now)
+        if _interrupted_preview(rows):
+            return _resume_interrupted_preview(runner, events, head, rows, expires, seconds)
         raise Blocked("구독 잔여량과 보존된 진행 기록을 확인한 뒤 새 세션 승인을 검토하세요.")
     if rows and can_review_postprocess(rows[-1]):
         return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
@@ -2504,7 +2603,7 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
         if preview.get("directory") != f"registered-preview-{start['run_id']}":
             raise Blocked("Windows 미리보기 보존 경로가 일치하지 않습니다.")
         artifact = runner.ledger.local_directory("recovery") / preview["directory"]
-        if digest(snapshot(artifact, max_file_bytes=GUI_PREVIEW_MAX_BYTES)) != preview.get("sha256"):
+        if digest(snapshot(artifact, max_file_bytes=GUI_PREVIEW_MAX_BYTES, long_local=True)) != preview.get("sha256"):
             raise Blocked("보존한 Windows 미리보기 파일이 변경됐습니다.")
         resume["saved_preview"] = preview
     if checkpoint.get("documentation"):

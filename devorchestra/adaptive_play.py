@@ -189,13 +189,14 @@ def run(session, cycle, key, verification, context):
             config.write(GODOT_PLAY_OVERRIDE)
         bundle_options = {"max_file_bytes": GAME_EXECUTABLE_LIMIT}
     if not game_export:
-        bundle_options = {"max_file_bytes": 256 * 1024**2}
+        bundle_options = {"max_file_bytes": 256 * 1024**2, "long_local": True}
     bundle = snapshot(directory, **bundle_options)
     if bundle["files"].get(name, {}).get("sha256") != expected:
         raise Blocked("Approved play executable changed")
     if verification.get("visual_preview", {}).get("status") == "CAPTURED" and digest(bundle) != verification["visual_preview"]["bundle_sha256"]:
         raise Blocked("Approved play preview bundle changed")
     logs = session.logs(f"{cycle}-adaptive-play")
+    runtime_root = session.logs(f"{cycle}-play-data")
     ledger = session.runner.ledger
     folder = ledger.local_directory("recovery", create=True) / f"play-{session.fields['run_id']}-{cycle}"
     check_path(folder)
@@ -316,10 +317,11 @@ def run(session, cycle, key, verification, context):
 
         inspect_owned_window(api, job, deadline, session.check, None, workers, play=play)
 
-    argv = [*trial_flags(session.work, writable=False, tool_root=directory, shell_tools=False),
+    argv = [*trial_flags(session.work, writable=False, tool_root=directory, shell_tools=False, runtime_root=runtime_root),
             *_args(binary, *args, profile=PROFILE)]
     try:
-        result = _observe(session.binary, argv, binary.parent, logs, session.verify_env, seconds=policy["seconds"],
+        result = _observe(session.binary, argv, binary.parent, logs,
+                          session.runtime_environment(session.verify_env, runtime_root), seconds=policy["seconds"],
                           memory=1024**3, check=session.check, output_limit=65536, encoding="utf-8", interact=interact)
         game_clear = result["job_active"] == 0
         if result["exitCode"]:

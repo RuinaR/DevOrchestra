@@ -27,6 +27,8 @@ def criterion_statuses(criteria, checked, implemented, rework, deferred):
             result[key] = "REWORK"
         elif state == "VERIFIED":
             result[key] = "VERIFIED"
+        elif deferred and isinstance(deferred, dict) and deferred.get(key, {}).get("kind") == "PREREQUISITE":
+            result[key] = "NEEDS_INPUT"
         elif state == "BLOCKED" or key in deferred:
             result[key] = "BLOCKED"
         elif key in implemented:
@@ -37,7 +39,7 @@ def criterion_statuses(criteria, checked, implemented, rework, deferred):
 
 
 def registered_progress(events, project, *, onboarding_sequence=0):
-    from .registered_cycle import KIND, _recoverable_pre_developer_stop, prerequisite_scope_hash
+    from .registered_cycle import KIND, _interrupted_preview, _recoverable_pre_developer_stop, prerequisite_scope_hash
 
     start = next((row for row in reversed(events) if row["kind"] == "native_inspection_intent"
                   and row.get("probe_kind") == KIND and row.get("project_id") == project), None)
@@ -117,7 +119,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             end = row
     criteria = end.get("criteria_status", criteria) if end else criteria
     statuses = criterion_statuses(scope.get("criteria", {}), criteria, implemented, rework, deferred)
-    counts = dict.fromkeys(("VERIFIED", "IMPLEMENTED", "NOT_VERIFIED", "REWORK", "BLOCKED"), 0)
+    counts = dict.fromkeys(("VERIFIED", "IMPLEMENTED", "NOT_VERIFIED", "REWORK", "BLOCKED", "NEEDS_INPUT"), 0)
     for status in statuses.values():
         counts[status] += 1
     return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
@@ -125,6 +127,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
             "started_at": start.get("started_at"),
             "criterion_statuses": statuses, "criterion_counts": counts,
             "tool_preflight_recoverable": _recoverable_pre_developer_stop(rows),
+            "preview_recovery_review": scope.get("token_mode") == "subscription-quota" and _interrupted_preview(rows),
             "end": end, "checkpoint_kind": rows[-2]["kind"] if end and len(rows) > 1 else None,
             "cycle": cycle, "roles": roles, "stop": stop, "quota": quota,
             "latest_progress": latest_progress, "deferred": deferred,

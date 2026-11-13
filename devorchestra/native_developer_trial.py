@@ -33,7 +33,7 @@ DEFAULT_MODEL = "gpt-6.1-sol"
 
 
 def trial_flags(work, *, writable=True, code_mode=False, tool_root=None, shell_tools=True,
-                extra_read_roots=(), scratch_root=None, web_research=False):
+                extra_read_roots=(), scratch_root=None, runtime_root=None, web_research=False):
     """Keep every temporary override on the owned process command line."""
     rules = ((":root", "deny"), (":minimal", "read"), (str(work), "write" if writable else "read"),
              (str(work / ".git"), "read"))
@@ -44,6 +44,8 @@ def trial_flags(work, *, writable=True, code_mode=False, tool_root=None, shell_t
         if not writable:
             raise Blocked("Only the Developer may write to development scratch")
         rules += ((str(scratch_root), "write"),)
+    if runtime_root is not None:
+        rules += ((str(runtime_root), "write"),)
     filesystem = "{ " + ", ".join(f"{json.dumps(path)} = {json.dumps(access)}" for path, access in rules) + " }"
     enabled = {"code_mode", "code_mode_host"} if code_mode else set()
     if shell_tools:
@@ -281,7 +283,7 @@ def _verify_output(binary, work, output, environment, check, *, test_command="ca
 
 
 def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tools=True,
-               extra_read_roots=(), scratch_root=None, images=(), output_schema=None, web_research=False):
+               extra_read_roots=(), scratch_root=None, runtime_root=None, images=(), output_schema=None, web_research=False):
     schema_args = ["--output-schema", str(output_schema)] if output_schema is not None else []
     attachments = []
     for path in images:
@@ -291,7 +293,8 @@ def _exec_argv(work, model, prompt, *, writable=True, tool_root=None, shell_tool
     if attachments:
         attachments.append("--")  # The final image option accepts multiple positional filenames.
     return [*trial_flags(work, writable=writable, code_mode=True, tool_root=tool_root, shell_tools=shell_tools,
-                         extra_read_roots=extra_read_roots, scratch_root=scratch_root, web_research=web_research),
+                         extra_read_roots=extra_read_roots, scratch_root=scratch_root,
+                         runtime_root=runtime_root, web_research=web_research),
             "exec", "--ignore-user-config", "--json",
             "--ephemeral", "--model", model, "--cd", str(work), *schema_args, *attachments, prompt]
 

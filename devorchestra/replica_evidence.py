@@ -9,14 +9,19 @@ from .lease import Blocked
 from .ledger import check_path, digest
 
 
-def fingerprint(path, limit=64 * 1024 * 1024, *, installed_executable=False):
-    check_path(path, installed_executable=installed_executable)
-    before = path.lstat()
+def _native(path, long_local):
+    return Path("\\\\?\\" + str(path)) if long_local else path
+
+
+def fingerprint(path, limit=64 * 1024 * 1024, *, installed_executable=False, long_local=False):
+    check_path(path, installed_executable=installed_executable, long_local=long_local)
+    io_path = _native(path, long_local)
+    before = io_path.lstat()
     if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
         raise Blocked("Replica file is unsupported or exceeds the evidence limit")
     checksum = sha256()
     size = 0
-    with path.open("rb") as stream:
+    with io_path.open("rb") as stream:
         if not os.path.samestat(before, os.fstat(stream.fileno())):
             raise Blocked("Replica file identity changed")
         while chunk := stream.read(1024 * 1024):
@@ -25,7 +30,7 @@ def fingerprint(path, limit=64 * 1024 * 1024, *, installed_executable=False):
                 raise Blocked("Replica file exceeded the evidence limit")
             checksum.update(chunk)
         after = os.fstat(stream.fileno())
-    if (not os.path.samestat(after, path.lstat()) or size != before.st_size
+    if (not os.path.samestat(after, io_path.lstat()) or size != before.st_size
             or after.st_mtime_ns != before.st_mtime_ns):
         raise Blocked("Replica file changed during inspection")
     return {"sha256": checksum.hexdigest(), "bytes": size}
@@ -64,7 +69,7 @@ def _git_identity(root):
     return result
 
 
-def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2):
+def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2, long_local=False):
     """Capture files without following links or invoking Git or a build tool."""
     if owned_staging is not None:
         check_path(owned_staging)
@@ -77,13 +82,13 @@ def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2):
     git = _git_identity(root)
     while directories:
         directory = directories.pop()
-        check_path(directory)
-        with os.scandir(directory) as entries:
+        check_path(directory, long_local=long_local)
+        with os.scandir(_native(directory, long_local)) as entries:
             for item in entries:
                 count += 1
                 if count > 4096:
                     raise Blocked("Replica exceeds the evidence entry limit")
-                path = Path(item.path)
+                path = directory / item.name
                 if path == owned_staging:
                     continue
                 relative = path.relative_to(root).as_posix()
@@ -95,11 +100,11 @@ def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2):
                     continue
                 if item.name.casefold() in (".git", ".ai-local"):
                     raise Blocked("Nested Git or private data in the replica")
-                check_path(path)
+                check_path(path, long_local=long_local)
                 if item.is_dir(follow_symlinks=False):
                     directories.append(path)
                     continue
-                file = fingerprint(path, min(max_file_bytes, 256 * 1024**2 - total))
+                file = fingerprint(path, min(max_file_bytes, 256 * 1024**2 - total), long_local=long_local)
                 total += file["bytes"]
                 files[relative] = file
     if _git_identity(root) != git:
