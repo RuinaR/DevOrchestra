@@ -1047,15 +1047,22 @@ class RegisteredSession(_FixtureSession):
                            "and document the approved design in docs/GAME-DESIGN.md.")
         elif phase == "developer" and self.scope.get("visual_preview"):
             scratch_root = self.logs(f"{cycle}-gui-build")
+            play_launch = (
+                "The approved QA mode needs the owned preview to open as a normal focusable window. "
+                "Use normal startup activation and avoid focus-suppression settings in the disposable bundle. "
+                "Do not use desktop input or activate any external window from a build or test command. "
+                if (self.scope.get("adaptive_play") or {}).get("foreground") else
+                "For AI play, use a project-supported non-activating QA launch and verify it actually renders "
+                "and receives window-targeted input without taking focus. Keep this setting in the disposable "
+                "preview bundle (for example Godot's executable-local override.cfg when compatible). "
+            )
             prompt += (
                 "\nIf the current code has a runnable Windows GUI and the approved offline tools can build it, "
                 f"build a preview under {scratch_root} and keep required sidecar files beside its executable. "
                 'Write preview.json at that folder root as {"kind":"windows-gui","entry":"relative/path.exe"}. '
                 "Build from the current replica. The Controller will launch that EXE without arguments, "
                 "offline, and capture its owned startup window. Keep a visible window open for observation. "
-                "For AI play, use a project-supported non-activating QA launch and verify it actually renders "
-                "and receives window-targeted input without taking focus. Keep this setting in the disposable "
-                "preview bundle (for example Godot's executable-local override.cfg when compatible). "
+                + play_launch +
                 "Report any unsupported input or rendering separately. Do not change the production startup. "
                 "Keep generated files out of the replica. If the project has no runnable GUI yet, "
                 "continue the planned development and leave the preview absent."
