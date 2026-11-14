@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+from pathlib import Path
 import sqlite3
 from time import sleep
 import sys
@@ -21,6 +22,12 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     commands.add_parser("init")
     commands.add_parser("local-status", help="Inspect project-local storage without creating it")
+    inspect_recovery = commands.add_parser("registered-safe-abort", help="Review or close a drained registered run")
+    for option in ("project", "run", "request"):
+        inspect_recovery.add_argument("--" + option, required=True)
+    inspect_recovery.add_argument("--expires", type=int, required=True)
+    inspect_recovery.add_argument("--approve", metavar="REVIEW_SHA256")
+    inspect_recovery.add_argument("--installed-state", action="store_true", help="Use the AppData operating ledger")
     manager_check = commands.add_parser("manager-preflight", help="Inspect Manager backend admission without starting Codex")
     manager_check.add_argument("--project", required=True)
     manager_turn = commands.add_parser("manager-turn", help="Review or approve one registered Manager turn")
@@ -213,6 +220,16 @@ def main():
             print(canonical(preflight()))
             return 2
         ledger = Ledger.for_project()
+        if args.action == "registered-safe-abort":
+            from .registered_recovery import close
+
+            if args.installed_state:
+                local = os.environ.get("LOCALAPPDATA")
+                if not local:
+                    raise Blocked("The installed state location is unavailable")
+                ledger = Ledger.for_project(Path(local) / "DevOrchestra")
+            print(canonical(close(ledger, args.project, args.run, args.request, args.expires, approval=args.approve)))
+            return 0
         if args.action == "native-egress-trial":
             from .native_egress_trial import trial
 

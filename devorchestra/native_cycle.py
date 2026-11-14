@@ -29,6 +29,17 @@ from .replica_evidence import changes, snapshot
 from .shutdown import HELD, shutdown_state
 
 
+SUPERVISOR_CALLBACK_FAILED = "SUPERVISOR_CALLBACK_FAILED"
+
+
+def _report_activity(callback, cycle, phase, message, kind):
+    try:
+        callback(cycle, phase, message, kind)
+    except Exception as error:
+        # Translate only observer exceptions. The owned runner still drains its Job.
+        raise Blocked(SUPERVISOR_CALLBACK_FAILED) from error
+
+
 def _live_activity(kind, item):
     """Project public event types into fixed UI text without retaining model content."""
     if kind == "turn.started":
@@ -343,12 +354,15 @@ class _FixtureSession:
                     if not isinstance(event, dict):
                         continue
                     kind = event.get("type")
+                    if not isinstance(kind, str):
+                        continue
                     terminal |= kind == "turn.completed"
                     item = event.get("item", {})
                     if kind in {"thread.started", "turn.started", "turn.completed", "turn.failed",
                                 "item.started", "item.updated", "item.completed"}:
                         last_progress = now
-                    if isinstance(item, dict) and item.get("type") == "command_execution":
+                    if (isinstance(item, dict) and item.get("type") == "command_execution"
+                            and isinstance(item.get("id"), str)):
                         if kind == "item.started":
                             active.add(item.get("id"))
                         elif kind == "item.completed":
@@ -588,7 +602,7 @@ class _FixtureSession:
         else:
             timeout = self.seconds(phase)
         activity = getattr(self, "activity", None)
-        report = (lambda label: activity(cycle, phase, label)) if activity else None
+        report = (lambda label: _report_activity(activity, cycle, phase, label, "activity")) if activity else None
         observed_check = (self.progress_check(phase, role_started, role_log, output_limit, report=report,
                                               settle_image_exit=bool(images))
                           if graceful or report or images else self.check)
@@ -623,7 +637,7 @@ class _FixtureSession:
             process_result = "TERMINATED_AND_DRAINED"
             result = {"stdout": "", "exitCode": None, "job_active": 0}
             expired_image_turn = bool(images) and stop_cause in {"TIME_LIMIT", "APPROVAL_EXPIRED"}
-            if (stop_cause in {"MXC probe timeout", "MODEL_SETTLED_EXIT_DELAY"}
+            if (stop_cause in {"MXC probe timeout", "MODEL_SETTLED_EXIT_DELAY", SUPERVISOR_CALLBACK_FAILED}
                     or (graceful and stop_cause == "MODEL_IDLE_TIMEOUT") or expired_image_turn):
                 # _observe raises this only after proving that the owned Job is empty.
                 try:
@@ -674,20 +688,21 @@ class _FixtureSession:
         if memory_evidence:
             receipt["memory"] = memory_evidence
         stdout = role_log / "probe.stdout"
-        if writable and outcome == "REQUEST_UNKNOWN" and stdout.is_file():
+        if (writable and outcome == "REQUEST_UNKNOWN" or stop_cause == SUPERVISOR_CALLBACK_FAILED) and stdout.is_file():
             raw = _read_observation(stdout, output_limit + 1)
             if len(raw) <= output_limit:
                 receipt["retained_stdout_sha256"] = sha256(raw).hexdigest()
-                from .recovery_evidence import read_commands
+                if writable:
+                    from .recovery_evidence import read_commands
 
-                try:
-                    _, completed, _ = read_commands(stdout, output_limit, receipt["retained_stdout_sha256"])
-                except (Blocked, OSError):
-                    receipt["retained_command_diagnostic"] = "UNAVAILABLE"
-                else:
-                    if completed:
-                        item, command, _, _ = completed[-1]
-                        receipt["last_settled_tool"] = {"item": item, "command_sha256": digest(command)}
+                    try:
+                        _, completed, _ = read_commands(stdout, output_limit, receipt["retained_stdout_sha256"])
+                    except (Blocked, OSError):
+                        receipt["retained_command_diagnostic"] = "UNAVAILABLE"
+                    else:
+                        if completed:
+                            item, command, _, _ = completed[-1]
+                            receipt["last_settled_tool"] = {"item": item, "command_sha256": digest(command)}
         if response.get("web_search_events"):
             receipt["web_search_events"] = response["web_search_events"]
         if response.get("empty_discovery_count"):
@@ -710,6 +725,8 @@ class _FixtureSession:
             receipt["manager_decision"] = decision if decision in {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"} else "INVALID"
         self.phases.append({"cycle": cycle, "phase": phase, **receipt})
         self.record("native_inspection_role_result", cycle=cycle, phase=phase, target=target, **receipt)
+        if stop_cause == SUPERVISOR_CALLBACK_FAILED:
+            raise Blocked(stop_cause)
         if self.scope.get("token_mode") == SUBSCRIPTION_MODE and outcome == "REQUEST_UNKNOWN":
             if "PROVIDER_RATE_LIMIT" in receipt.get("cli_failure_signals", ()):
                 self.request_stop("QUOTA_LIMIT_REACHED", phase)

@@ -23,7 +23,7 @@ from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder, _signed_offline
 from .mxc_owned_gui import CAPTURE_DIMENSIONS, inspect_owned_window, optional_capture_stop
 from .native_command_probe import ARCHIVE_SHA256, CODE_MODE_HOST_SHA256, RELEASE_SHA256, _staging
-from .native_cycle import ROLES, ROLE_TOKENS, _FixtureSession
+from .native_cycle import ROLES, ROLE_TOKENS, SUPERVISOR_CALLBACK_FAILED, _FixtureSession, _report_activity
 from .native_developer_trial import (
     DEFAULT_MODEL, PROFILE, _check_cached_model, _check_dedicated_config, _cli_evidence,
     _diagnostic, _read_observation, trial_flags,
@@ -1471,7 +1471,7 @@ def _handoff(session, cycle, phase, summary):
     report = getattr(session, "activity", None)
     if report:
         safe = visual.safe_unverified([" ".join(summary.split())])[0]
-        report(cycle, phase, safe[:240], "handoff")
+        _report_activity(report, cycle, phase, safe[:240], "handoff")
 
 
 def _handoff_status(state):
@@ -3958,6 +3958,14 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                    "usage_complete": session.usage_complete, "owned_tree": "DRAINED",
                    "changed": getattr(session, "changes", []), "replica_sha256": session.source() if hasattr(session, "image") else None,
                    "staging_cleanup": cleanup}
+        if (reason == SUPERVISOR_CALLBACK_FAILED and session.phases
+                and (phase := session.phases[-1]).get("phase") == "manager-planning"
+                and phase.get("process_stop_reason") == SUPERVISOR_CALLBACK_FAILED
+                and phase.get("process_result") == "TERMINATED_AND_DRAINED"):
+            from .registered_recovery import DRAINED_MARKER
+
+            session.record(DRAINED_MARKER, cycle=phase["cycle"], owned_tree="DRAINED",
+                           staged_evidence_retained=preserve)
         ledger.append(session.count, session.fence, receipt, allow_shutdown=True)
         return receipt
 

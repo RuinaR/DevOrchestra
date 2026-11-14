@@ -108,8 +108,10 @@ def last_run(events):
 
 
 def native_unresolved(events):
+    from .registered_recovery import RECOVERED, verifies
+
     pending = set()
-    for event in events:
+    for index, event in enumerate(events):
         if event["kind"] == "native_role_intent":
             pending.add(event["agent_run_id"])
         elif event["kind"] == "native_role_result":
@@ -118,6 +120,9 @@ def native_unresolved(events):
             pending.add(("inspection", event["request_id"]))
         elif event["kind"] == "native_inspection_result":
             pending.discard(("inspection", event["request_id"]))
+        elif event["kind"] == RECOVERED:
+            if verifies(events[:index], event):
+                pending.discard(("inspection", event["request_id"]))
         elif event["kind"] == "native_manager_intent":
             pending.add(("manager", event["request_id"]))
         elif event["kind"] == "native_manager_result":
