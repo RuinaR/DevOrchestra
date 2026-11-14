@@ -78,6 +78,18 @@ class PlayTests(unittest.TestCase):
         with patch.object(adaptive_play, "monotonic", return_value=2):
             self.assertFalse(adaptive_play._wait_for_background(window, 2))
 
+    def test_foreground_approval_requires_owned_focus_and_limits_actions(self):
+        policy = adaptive_play.approval(foreground=True)
+        adaptive_play.validate_policy(policy)
+        self.assertNotIn("resize", policy["actions"])
+        with self.assertRaises(Blocked):
+            adaptive_play.validate_policy({**policy, "actions": list(adaptive_play.CONTROL_ACTIONS)})
+        window = Mock()
+        window.is_foreground.return_value = False
+        with self.assertRaisesRegex(Blocked, "lost foreground"):
+            adaptive_play.apply(window, proposal(), (0, 0, 500, 300), foreground=True)
+        window.key.assert_not_called()
+
     def test_action_shape_and_coordinates_are_enforced(self):
         client = (8, 30, 500, 250)
         self.assertEqual(proposal(), adaptive_play.parse(json.dumps(proposal()), client))

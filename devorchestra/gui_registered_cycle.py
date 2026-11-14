@@ -49,6 +49,7 @@ def _scope_preferences(scope):
             values[field] = str(amount)
     if policy := scope.get("adaptive_play"):
         values.update((field, str(policy[key])) for field, key in PLAY_FIELDS.items() if key in policy)
+        values["play_foreground"] = policy.get("foreground") is True
     return values
 
 
@@ -150,9 +151,13 @@ def _play_approval(scope):
         extra = "창 내부 스크롤과 제한된 크기 변경을 허용합니다. " if "scroll" in play["actions"] else ""
         if "text" in play["actions"]:
             extra += "표준 Windows 편집 컨트롤에 시험 문자열 입력을 허용합니다. "
+        foreground = ("전경 QA · 소유 HWND에 직접 클릭과 키 메시지를 보냅니다. "
+                      "창이 전경에서 벗어나면 입력을 중단합니다. "
+                      if play.get("foreground") else "")
+        mouse = "창 내부 클릭" if foreground else "창 내부 클릭·이동"
         return (f"\nAI 플레이 · 사이클당 추가 모델 최대 {play['steps']}회, 소유 창 실행 최대 {play['seconds']}초. "
                 f"{inputs}"
-                "창 내부 클릭·이동과 600ms 이내 최대 3키 동시 입력을 허용합니다. "
+                f"{foreground}{mouse}과 600ms 이내 최대 3키 동시 입력을 허용합니다. "
                 f"{extra}허용 키: {', '.join(play['keys'])}. 각 화면을 Codex에 전송합니다.")
     return ""
 
@@ -263,6 +268,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
               wraplength=580).pack(anchor="w")
     use_images = tk.BooleanVar(panel, value=draft.get("use_images") is True)
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
+    play_foreground = tk.BooleanVar(panel, value=draft.get("play_foreground") is True)
     spec = None
     play_entries = {}
 
@@ -272,6 +278,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                         command=lambda: use_images.set(True) if use_play.get() else None).pack(anchor="w")
         if is_godot and project == game_pilot.PROJECT and not resume_only:
             return
+        ttk.Checkbutton(body, text="전경 QA · 승인된 소유 창에 클릭·키 메시지 직접 전달",
+                        variable=play_foreground).pack(anchor="w")
         limits = ttk.Frame(body)
         limits.pack(fill="x")
         for field, title in (("play_inputs", "사이클당 AI 입력 상한 (1~64회)"),
@@ -343,7 +351,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         preferences = {key: variable.get() for key, variable in grants.items()}
         preferences.update((key, entries[key].get()) for key in (*BUDGET_FIELDS, "files"))
         preferences.update(whole_replica=whole.get(), token_mode=SUBSCRIPTION_MODE if subscription.get() else "fixed",
-                           use_images=use_images.get(), use_play=use_play.get())
+                           use_images=use_images.get(), use_play=use_play.get(),
+                           play_foreground=play_foreground.get())
         preferences.update((field, entry.get().strip()) for field, entry in play_entries.items())
         if spec is not None:
             try:
@@ -787,7 +796,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     files, permissions, verifier, role_tokens["manager-planning"])
             play = use_play.get()
-            if play and any(entry.get().strip() for entry in play_entries.values()):
+            if play and (play_foreground.get() or any(entry.get().strip() for entry in play_entries.values())):
                 from . import adaptive_play
                 default = adaptive_play.approval(godot=registered_cycle.godot_verifier_spec(verifier))
                 try:
@@ -795,7 +804,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                             for field, key in PLAY_FIELDS.items()}
                 except ValueError as error:
                     raise ValueError("AI 플레이 입력 횟수와 실행 시간은 정수로 입력하세요.") from error
-                adaptive_play.approval(limits=play)
+                adaptive_play.approval(limits=play, foreground=play_foreground.get())
+                if play_foreground.get():
+                    play["foreground"] = True
         except (RuntimeError, ValueError) as error:
             state.set(str(error))
             return

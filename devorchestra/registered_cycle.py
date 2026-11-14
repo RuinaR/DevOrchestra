@@ -569,8 +569,12 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         if player:
             candidate_base["player_report"] = {"origin": "USER_REPORTED", "ratings": player["ratings"],
                                                "finished": player["finished"]}
+    play_limits = dict(play) if isinstance(play, dict) else None
+    foreground = play_limits.pop("foreground", False) if play_limits is not None else False
+    if type(foreground) is not bool:
+        raise Blocked("Invalid foreground play approval")
     play_policy = (adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI),
-                                         limits=play if isinstance(play, dict) else None, control_actions=True)
+                                         limits=play_limits, control_actions=True, foreground=foreground)
                    if play is not False else None)
     scope = {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),
