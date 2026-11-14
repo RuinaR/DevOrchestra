@@ -678,6 +678,16 @@ class _FixtureSession:
             raw = _read_observation(stdout, output_limit + 1)
             if len(raw) <= output_limit:
                 receipt["retained_stdout_sha256"] = sha256(raw).hexdigest()
+                from .recovery_evidence import read_commands
+
+                try:
+                    _, completed, _ = read_commands(stdout, output_limit, receipt["retained_stdout_sha256"])
+                except (Blocked, OSError):
+                    receipt["retained_command_diagnostic"] = "UNAVAILABLE"
+                else:
+                    if completed:
+                        item, command, _, _ = completed[-1]
+                        receipt["last_settled_tool"] = {"item": item, "command_sha256": digest(command)}
         if response.get("web_search_events"):
             receipt["web_search_events"] = response["web_search_events"]
         if response.get("empty_discovery_count"):

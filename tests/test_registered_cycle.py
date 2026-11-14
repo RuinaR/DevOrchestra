@@ -21,6 +21,75 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_windows_memory_signal_is_independent_of_turn_lifecycle(self):
+        from devorchestra.native_developer_trial import _failure_evidence
+        evidence = _failure_evidence('{"type":"turn.started"}', b"memory allocation of 84704 bytes failed")
+        self.assertEqual(["turn.started"], evidence["cli_events"])
+        self.assertEqual(["CLI_MEMORY_ALLOCATION_FAILED"], evidence["cli_failure_signals"])
+
+    def test_one_functional_check_binds_real_fixture_output_to_only_its_criterion(self):
+        rc = registered_cycle
+        acceptance = ["Sum two numbers", "Paint the result in a GUI"]
+        key, other = cycle_progress.freeze(acceptance, None)
+        criteria = cycle_progress.freeze(acceptance, {key: [{"title": key}]})
+        with TemporaryDirectory() as folder:
+            work = Path(folder)
+            fixture = work / "sum_fixture.py"
+            fixture.write_text("import sys\nprint(sum(map(int, sys.argv[1:])))\n", encoding="ascii")
+            check = {"args": ["-B", fixture.name, "2", "3"], "inputs": [fixture.name],
+                     "stdout": "5", "level": "functional"}
+            image = {"files": {fixture.name: rc.fingerprint(fixture)}}
+            with patch.object(rc, "_signed_offline", return_value=True):
+                spec = rc._tools({"executable": sys.executable, "checks": {key: check}}, criteria, image, [])
+            session = Mock()
+            session.scope = {"verifier": spec, "criteria": criteria}
+            session.signoff_state = {}
+            session.image, session.work = image, work
+            session.source.return_value = digest(image)
+            session.owned.side_effect = lambda operation: operation()
+            session.logs.return_value = work
+
+            def observe(_launcher, argv, cwd, *_args, **_kwargs):
+                self.assertEqual(check["args"], argv[-len(check["args"]):])
+                result = subprocess.run([sys.executable, *check["args"]], cwd=cwd, capture_output=True,
+                                        text=True, check=False, timeout=10)
+                return {"stdout": result.stdout, "stderr": result.stderr, "exitCode": result.returncode,
+                        "job_active": 0}
+
+            with patch.object(rc, "_observe", side_effect=observe) as launch:
+                receipt = rc.RegisteredSession.verify_registered(session, 1)
+                fixture.write_text("print(6)\n", encoding="ascii")
+                image["files"][fixture.name] = rc.fingerprint(fixture)
+                failed = rc.RegisteredSession.verify_registered(session, 2)
+                self.assertEqual(2, launch.call_count)
+            self.assertEqual({key: "VERIFIED", other: "NOT_VERIFIED"},
+                             cycle_progress.compare(criteria, {}, receipt)["criteria"])
+            self.assertEqual("FAILED", cycle_progress.compare(criteria, {}, failed)["criterion_evidence"][key])
+            self.assertNotEqual(receipt["observations"][0]["input_sha256"][fixture.name],
+                                failed["observations"][0]["input_sha256"][fixture.name])
+
+    def test_controller_distinguishes_failed_missing_and_unclassified_evidence(self):
+        classify = registered_cycle._decision_cause
+        self.assertEqual("VERIFICATION_FAILED", classify("C1", "REWORK",
+                         {"criterion_evidence": {"C1": "FAILED"}}, "REWORK"))
+        self.assertEqual("VERIFICATION_MISSING", classify("C1", "ACCEPT",
+                         {"criterion_evidence": {"C1": "UNCONFIGURED"}}, "USER_TEST_REQUIRED"))
+        self.assertEqual("REVIEW_FINDING_UNCLASSIFIED", classify("C1", "REWORK",
+                         {"criterion_evidence": {"C1": "MISSING"}}, "REWORK"))
+        self.assertEqual("ENVIRONMENT_BLOCKED", classify("C1", "ACCEPT",
+                         {"criterion_environment_blocked": True}, "USER_TEST_REQUIRED"))
+
+    def test_preview_size_evidence_identifies_boundary_without_execution(self):
+        from devorchestra.replica_evidence import EvidenceSizeLimit, snapshot
+
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "preview.dat"
+            path.write_bytes(b"12345")
+            with self.assertRaises(EvidenceSizeLimit) as raised:
+                snapshot(path.parent, max_file_bytes=4)
+            self.assertEqual({"relative_path": "preview.dat", "file_bytes": 5, "prior_bytes": 0,
+                              "effective_file_limit": 4, "total_limit": 256 * 1024**2}, raised.exception.bundle)
+
     def test_direct_postprocess_publishes_saved_paths_before_next_cycle(self):
         rc = registered_cycle
         comparison = {"criteria": {"first": "USER_TEST_REQUIRED", "second": "NOT_STARTED"}}
@@ -354,6 +423,10 @@ class RegisteredTrustTests(unittest.TestCase):
         self.assertNotIn("Prior Reviewer findings", session.call.call_args_list[-1].args[3])
         self.assertEqual("C1", next(item.kwargs["target"] for item in session.record.call_args_list
                                    if item.args[0] == "native_inspection_criterion_deferred"))
+        transition = next(item.kwargs for item in session.record.call_args_list
+                          if item.args[0] == "native_inspection_goal_transition")
+        self.assertEqual(("C1", "C2", "REPEATED_NO_PROGRESS"),
+                         (transition["previous_target"], transition["target"], transition["reason"]))
 
     def test_missing_prerequisite_saves_checkpoint_without_dispatching_developer(self):
         scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Compare sources", "checks": []}},

@@ -11,6 +11,14 @@ from .ledger import check_path, digest
 EVIDENCE_SIZE_LIMIT = "Replica file exceeds the evidence limit"
 
 
+class EvidenceSizeLimit(Blocked):
+    def __init__(self, *, limit, file_bytes):
+        super().__init__(EVIDENCE_SIZE_LIMIT)
+        self.limit = limit
+        self.file_bytes = file_bytes
+        self.bundle = None
+
+
 def _native(path, long_local):
     return Path("\\\\?\\" + str(path)) if long_local else path
 
@@ -22,7 +30,7 @@ def fingerprint(path, limit=64 * 1024 * 1024, *, installed_executable=False, lon
     if not stat.S_ISREG(before.st_mode):
         raise Blocked("Replica file is unsupported")
     if before.st_size > limit:
-        raise Blocked(EVIDENCE_SIZE_LIMIT)
+        raise EvidenceSizeLimit(limit=limit, file_bytes=before.st_size)
     checksum = sha256()
     size = 0
     with io_path.open("rb") as stream:
@@ -31,7 +39,7 @@ def fingerprint(path, limit=64 * 1024 * 1024, *, installed_executable=False, lon
         while chunk := stream.read(1024 * 1024):
             size += len(chunk)
             if size > limit:
-                raise Blocked("Replica file exceeded the evidence limit")
+                raise EvidenceSizeLimit(limit=limit, file_bytes=size)
             checksum.update(chunk)
         after = os.fstat(stream.fileno())
     if (not os.path.samestat(after, io_path.lstat()) or size != before.st_size
@@ -108,7 +116,13 @@ def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2, long_loca
                 if item.is_dir(follow_symlinks=False):
                     directories.append(path)
                     continue
-                file = fingerprint(path, min(max_file_bytes, 256 * 1024**2 - total), long_local=long_local)
+                try:
+                    file = fingerprint(path, min(max_file_bytes, 256 * 1024**2 - total), long_local=long_local)
+                except EvidenceSizeLimit as error:
+                    error.bundle = {"relative_path": relative, "file_bytes": error.file_bytes,
+                                    "prior_bytes": total, "effective_file_limit": error.limit,
+                                    "total_limit": 256 * 1024**2}
+                    raise
                 total += file["bytes"]
                 files[relative] = file
     if _git_identity(root) != git:

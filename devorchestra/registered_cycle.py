@@ -31,7 +31,7 @@ from .native_developer_trial import (
 from .owned_artifacts import _remove_owned_tree
 from .project_onboarding import _git, _protected, _relative, _scan
 from .project_evidence import discovery, preview_entry
-from .replica_evidence import EVIDENCE_SIZE_LIMIT, fingerprint, snapshot
+from .replica_evidence import EVIDENCE_SIZE_LIMIT, EvidenceSizeLimit, fingerprint, snapshot
 from .replica_readiness import baseline, original_matches
 from .role_contract import _unique_object
 
@@ -422,12 +422,17 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image, *,
               if progress_checkpoint else None)
     deferred = {key: value for key, value in saved_progress.get("deferred_criteria", {}).items()
                 if key in prior["criteria"]} if progress_checkpoint else {}
+    verification_wait = saved_progress.get("verification_wait") if progress_checkpoint else None
+    if (manual and progress_checkpoint
+            and (saved_progress.get("feedback") or {}).get("next_work") == "INDEPENDENT_VERIFICATION"):
+        verification_wait = saved_progress["feedback"]["target"]
     if rework and end.get("outcome") == "NO_PROGRESS" and not deferred:
         # Older checkpoints only retained the last rejected criterion. Avoid immediately pinning it again.
         deferred[rework["target"]] = {"kind": "REPEATED_NO_PROGRESS", "reason": rework["review"]}
     return {"run_id": end["run_id"], "receipt_sha256": digest(end), "changed": end["changed"],
             **({"tool_plan": saved_progress["tool_plan"]} if progress_checkpoint and "tool_plan" in saved_progress else {}),
             **({"rework": rework} if rework else {}),
+            **({"verification_wait": verification_wait} if verification_wait in prior["criteria"] else {}),
             **({"deferred_criteria": deferred,
                 "prerequisite_scope_sha256": prerequisite_scope_hash(prior)}
                if deferred else {}),
@@ -1123,6 +1128,7 @@ class RegisteredSession(_FixtureSession):
                 "\nIf the current code has a runnable Windows GUI and the approved offline tools can build it, "
                 f"build a preview under {scratch_root} and keep required sidecar files beside its executable. "
                 'Write preview.json at that folder root as {"kind":"windows-gui","entry":"relative/path.exe"}. '
+                "Keep the preview tree limited to the executable and its required runtime files. "
                 "Build from the current replica. The Controller will launch that EXE without arguments, "
                 "offline, and capture its owned startup window. Keep a visible window open for observation. "
                 + play_launch +
@@ -1135,6 +1141,9 @@ class RegisteredSession(_FixtureSession):
             prompt += (f"\nUse {scratch_root} for generated build outputs, caches and temporary test files. "
                        "Keep source, project configuration and reusable assets in the replica.")
         runtime_root = self.logs(f"{cycle}-developer-data") if scratch_root is not None and phase == "developer" else None
+        if runtime_root is not None and self.scope.get("visual_preview") and not game:
+            prompt += (f"\nUse approved scratch {runtime_root} for diagnostic logs and intermediate builds. "
+                       "The Controller inspects the complete preview tree, including all required runtime sidecars.")
         try:
             with self.portable_tools(cycle, phase, selected_tools) as portable:
                 extra_roots = (Path(tool["template"]).parent,) if game and phase == "developer" else ()
@@ -1279,7 +1288,10 @@ class RegisteredSession(_FixtureSession):
             actual_values = [result["exitCode"], actual, bool(result["stderr"])]
             observation = {"title": key, "expected": _expected_observation(spec),
                            "exit_code": result["exitCode"], "stdout_sha256": digest(actual),
-                           "level": spec.get("level", "functional")}
+                           "level": spec.get("level", "functional"),
+                           "executable_sha256": tool["identity"]["sha256"],
+                           "check_sha256": digest(spec),
+                           "input_sha256": {name: self.image["files"][name]["sha256"] for name in spec["inputs"]}}
             if "screen_changed" in spec:
                 actual_values.append(visual.get("screen_changed"))
                 if visual:
@@ -1291,7 +1303,6 @@ class RegisteredSession(_FixtureSession):
                     for image in (before, after):
                         copyfile(image, artifact / image.name)
                     observation["gui"] = {**visual, "artifact_directory": artifact.name}
-                    observation["executable_sha256"] = tool["identity"]["sha256"]
             observations.append({**observation, "actual": digest(actual_values)})
         if capture_only:
             return {"phase": "review-capture", "outcome": "COMPLETED", "owned_tree": "DRAINED",
@@ -1313,8 +1324,10 @@ class RegisteredSession(_FixtureSession):
     def capture_review(self, cycle):
         self.record("native_inspection_review_capture_started", cycle=cycle, source_sha256=self.source())
         capture = self.verify_registered(cycle, capture_only=True)
+        size = capture.get("visual_preview", {}).get("size_evidence")
         self.record("native_inspection_review_capture_result", cycle=cycle, source_sha256=self.source(),
-                    owned_tree=capture["owned_tree"], capture_sha256=digest(capture))
+                    owned_tree=capture["owned_tree"], capture_sha256=digest(capture),
+                    **({"preview_size": size} if size is not None else {}))
         return capture
 
     def capture_preview(self, cycle):
@@ -1329,11 +1342,10 @@ class RegisteredSession(_FixtureSession):
         except FileNotFoundError:
             self.check_image()
             return {"status": "NOT_VERIFIED", "reason": "PREVIEW_ARTIFACT_DISAPPEARED"}
-        except Blocked as error:
-            if str(error) != EVIDENCE_SIZE_LIMIT:
-                raise
+        except EvidenceSizeLimit as error:
             self.check_image()
-            return {"status": "NOT_VERIFIED", "reason": "PREVIEW_BUNDLE_SIZE_LIMIT"}
+            return {"status": "NOT_VERIFIED", "reason": "PREVIEW_BUNDLE_SIZE_LIMIT",
+                    "size_evidence": error.bundle}
         if (self.scope.get("project_evidence_contract") and "preview.json" not in bundle["files"]):
             reason = ("PREVIEW_MANIFEST_MISSING" if any(name.lower().endswith(".exe") for name in bundle["files"])
                       else "PREVIEW_EXECUTABLE_MISSING")
@@ -1623,6 +1635,9 @@ def _verify_signoff(session, count, key, status):
     verification = {key: checked[key] for key in ("source_sha256", "verdict", "owned_tree") if key in checked}
     session.signoff_state["verification"] = verification
     comparison = cycle_progress.compare(criteria, status, checked)
+    if any(row.get("title") == key and row.get("status") == "NOT_VERIFIED" and row.get("reason")
+           for row in checked.get("observations", ())):
+        comparison["criterion_environment_blocked"] = True
     if scope.get("adaptive_play"):
         play_report = session.signoff_state.get("play_report", {})
         played = play_report.get("actions", ())
@@ -1745,10 +1760,30 @@ def _save_postprocess(session, error):
     _save_signoff(session)
 
 
+def _decision_cause(key, review, comparison, expected):
+    evidence = comparison.get("criterion_evidence", {}).get(key)
+    if comparison.get("regressed") or evidence == "FAILED":
+        return "VERIFICATION_FAILED"
+    if review != "ACCEPT":
+        # A free-text rejection does not establish the underlying cause.
+        return "REVIEW_FINDING_UNCLASSIFIED"
+    if comparison.get("criterion_environment_blocked"):
+        return "ENVIRONMENT_BLOCKED"
+    if comparison.get("visual_unavailable_sha256"):
+        return "VERIFICATION_MISSING"
+    if evidence in {"UNCONFIGURED", "MISSING"}:
+        return "VERIFICATION_MISSING"
+    if expected == "USER_TEST_REQUIRED":
+        return "USER_ACTION_REQUIRED"
+    return None
+
+
 def _decide(session, count, key, review, comparison, expected):
     status = comparison["criteria"]
+    cause = _decision_cause(key, review, comparison, expected)
     session.record("native_inspection_cycle_progress", cycle=count, **comparison, source_sha256=session.source(),
-                   controller_decision=expected, reviewer=review)
+                   controller_decision=expected, reviewer=review,
+                   **({"decision_cause": cause} if cause else {}))
     _handoff(session, count, "manager-final",
              f"Reviewer 판정 {_handoff_status(review)} · 현재 기준 검증 {_handoff_status(status[key])} · "
              f"새로 검증된 기준 {len(comparison['newly_verified'])}개 · 회귀 {len(comparison['regressed'])}개. "
@@ -2006,7 +2041,9 @@ def _save_progress_stop(session, cycle, accepted, *, outcome="NO_PROGRESS", feed
                    changed=session.changes, accepted_without_functional_check=sorted(accepted),
                    **({"deferred_criteria": deferred} if deferred else {}),
                    **({"tool_plan": tool_plan} if tool_plan else {}),
-                   **({"rework": rework} if rework else {}))
+                   **({"rework": rework} if rework else {}),
+                   **({"verification_wait": feedback["target"]}
+                      if feedback and feedback.get("next_work") == "INDEPENDENT_VERIFICATION" else {}))
     return outcome
 
 
@@ -2057,6 +2094,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             feedback = {**(feedback or {}), "earlier_review": rework}
         else:
             feedback = rework
+    if prior_candidate.get("verification_wait") in criteria and not rework:
+        feedback = {**(feedback or {}), "target": prior_candidate["verification_wait"],
+                    "next_work": "INDEPENDENT_VERIFICATION"}
     if continuation:
         count, stagnant = continuation["cycle"], continuation["stagnant"]
         status, feedback = continuation["criteria_status"], continuation["feedback"]
@@ -2089,7 +2129,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         session.check_image()
         session.progress, session.cycles_checked = status, count
         # Persist only the bounded continuation summary.
-        next_context = {key: feedback[key] for key in ("target", "change_hash", "next", "review", "instruction", "verification")
+        next_context = {key: feedback[key] for key in (
+                        "target", "change_hash", "next", "review", "instruction", "verification", "next_work")
                         if feedback and key in feedback}
         session.record("native_inspection_manual_checkpoint", cycle=count, criteria_status=status,
                        source_sha256=session.source(), changed=session.changes, stagnant=stagnant,
@@ -2156,12 +2197,19 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         if (feedback and feedback.get("next") == "REWORK" and feedback.get("target") in pending
                 and not (scope.get("project_evidence_contract") and stagnant >= 1)):
             pending = [feedback["target"]]
+        verification_target = (feedback or {}).get("target")
+        if (review_candidate and (feedback or {}).get("next_work") == "INDEPENDENT_VERIFICATION"
+                and verification_target in pending and verification_target in scope["verifier"].get("checks", {})):
+            pending = [verification_target]
         brief = scope["verifier"].get("manager_brief")
         game_context = f"Game brief (project data): {brief}\n" if brief else ""
         if scope.get("visual_preview"):
             game_context += ("The owner approved visual review when a runnable Windows GUI exists. "
                              "If relevant to the frozen goal, plan toward a preview build with the approved "
                              "files and installed tools. A GUI is not required for a non-GUI project. ")
+        if feedback and feedback.get("next_work") == "INDEPENDENT_VERIFICATION":
+            game_context += ("Preserve the work awaiting verification. Carry its unresolved check forward; "
+                             "if it is deferred, choose an independently verifiable task and explain the transition. ")
         if base:
             game_context += ("Continue the existing Lantern Ruins design and preserve the implemented features. "
                              "Use the earlier plan as project context. Choose the next missing work independently. "
@@ -2262,6 +2310,12 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             session.record("native_inspection_plan_accepted", cycle=count, phase="manager-planning",
                            target=plan["criterion"], mode=plan.get("mode", "edit"), plan_sha256=digest(plan))
         key = plan["criterion"]
+        previous_target = (feedback or {}).get("target")
+        if previous_target and previous_target != key:
+            prior_deferral = deferred.get(previous_target)
+            session.record("native_inspection_goal_transition", cycle=count, previous_target=previous_target,
+                           target=key, source_sha256=session.source(),
+                           reason=prior_deferral["kind"] if prior_deferral else "MANAGER_SELECTED_ELIGIBLE_CRITERION")
         if plan.get("mode") == "needs-input":
             defer(count, key, "PREREQUISITE", plan["plan"])
             if eligible == {key}:
@@ -2404,6 +2458,11 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             return final
         if final == "USER_TEST_REQUIRED":
             feedback = {"target": key, "change_hash": digest(diff), "next": final}
+            if _decision_cause(key, review, comparison, final) == "VERIFICATION_MISSING":
+                feedback["instruction"] = ("Functional evidence is missing. Preserve this implementation. "
+                                           "Use an approved check or request the missing verification; "
+                                           "do not edit code solely to replace missing evidence.")
+                feedback["next_work"] = "INDEPENDENT_VERIFICATION"
             if (scope["cycles"] is None or count < scope["cycles"]) and save_if_requested():
                 return MANUAL_CHECKPOINT
             if not getattr(session, "stop_reason", None) and eligible - {key} and (
@@ -3680,6 +3739,10 @@ def _resume_remaining(session, diff):
                 "verifier": checked.get("observations", [])}
     if "delivery" in comparison:
         feedback["verification"] = comparison["delivery"]
+    if final == "USER_TEST_REQUIRED" and _decision_cause(key, review, comparison, final) == "VERIFICATION_MISSING":
+        feedback["instruction"] = ("Functional evidence is missing. Preserve this implementation and request "
+                                   "or use the approved independent check.")
+        feedback["next_work"] = "INDEPENDENT_VERIFICATION"
     if postprocess and not session.stop_reason:
         deferred = dict(saved.get("deferred_criteria", {}))
         if direct and final == "USER_TEST_REQUIRED" and session.scope["criteria"].keys() - deferred.keys() - {key}:
