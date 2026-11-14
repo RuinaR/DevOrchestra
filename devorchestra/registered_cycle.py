@@ -435,7 +435,7 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image, *,
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
               manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False, game_limits=None, visual_review=False,
-              play=False, tools=None):
+              play=False, tools=None, direct_branch=None):
     now = time()
     if (type(play) not in (bool, dict) or
             (play is not False and (not visual_review or game_limits is None))):
@@ -471,7 +471,24 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     source, replica, frozen, onboarding = baseline(ledger, project)
     if source == replica or source.is_relative_to(replica) or replica.is_relative_to(source):
         raise Blocked("The onboarded replica and original must be separate")
+    direct = None
+    if direct_branch is not None:
+        from . import direct_git
+
+        if game or type(direct_branch) is not str or not re.fullmatch(
+                r"(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+", direct_branch):
+            raise Blocked("Invalid direct Git branch")
+        if direct_git.pending(events, project):
+            raise Blocked("Resolve the pending direct Git publication before starting another cycle")
+        direct = direct_git.admit(source, ledger.local_directory("temp", create=True),
+                                  lambda: runner._check_diagnostic_fence(len(events), head), direct_branch)
+        replica = source
     image = snapshot(replica)
+    migration = next((item for item in reversed(events) if direct and item["kind"] == "direct_git_migrated"
+                      and item.get("project_id") == project and item.get("commit") == direct["head"]
+                      and item.get("source_sha256") == digest(image)), None)
+    if migration and cycles is not None:
+        raise Blocked("Use the existing unlimited cycle setting for migration continuation")
     project_edit = not game and files == []
     is_godot = any(name.casefold() == "project.godot" for name in image["files"])
     generic_gui = godot_verifier_spec(spec)
@@ -479,11 +496,11 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
                  or set(files) != set(game_pilot.DEVELOPMENT_FILES)
                  or (game_limits is None and (seconds, tokens, cycles) != (1500, 350000, 2))):
         raise Blocked("The game pilot requires its approved file scope")
-    if not original_matches(source, frozen):
+    if direct is None and not original_matches(source, frozen):
         raise Blocked("Original no longer matches onboarding")
     candidate_base = None
     prior_replica_candidate = None
-    if digest(image) != onboarding["replica_sha256"]:
+    if direct is None and digest(image) != onboarding["replica_sha256"]:
         prior_rows = [row for row in events if row.get("project_id") == project and row.get("probe_kind") == KIND]
         from_progress_checkpoint = (len(prior_rows) >= 2
                                     and prior_rows[-2]["kind"] == "native_inspection_progress_checkpoint")
@@ -494,9 +511,10 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             raise Blocked("Replica no longer matches onboarding")
         else:
             candidate_base = _verified_game_base(ledger, events, replica, image, frozen, onboarding, files)
-    with _git(ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("Original Git inventory changed after onboarding")
+    if direct is None:
+        with _git(ledger, source) as (git, _):
+            if _scan(source, git, frozen["local_examples"]) != frozen:
+                raise Blocked("Original Git inventory changed after onboarding")
     if not project_edit:
         _editable_paths(files)
     catalog = Catalog(ledger).read()
@@ -544,6 +562,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         raise Blocked("Registered requirements cannot be changed by the Developer")
     protected = sorted(set(data["documents"].values()) | source_requirement_paths
                        | {path for check in verifier.get("checks", {}).values() for path in check["inputs"]})
+    if direct:
+        protected = sorted(set(protected) | {".gitattributes", ".gitmodules"})
     if prior_replica_candidate and prior_replica_candidate.get("unsettled_candidate"):
         if {name.casefold() for name in protected} & {
                 name.casefold() for name in prior_replica_candidate["changed"]}:
@@ -583,7 +603,10 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             **({"visual_preview": "scratch-windows-exe"}
                if visual_review and not visual_capture_configured(verifier) else {}),
             "project_evidence_contract": 1,
-            "onboarding_sha256": digest(onboarding), "original_head": frozen["head"], "original_git": frozen["git"],
+            "onboarding_sha256": digest(onboarding), "original_head": direct["head"] if direct else frozen["head"],
+            "original_git": image["git"] if direct else frozen["git"],
+            **({"development_mode": direct_git.MODE, "direct_git": direct, "project_name": data["name"]} if direct else {}),
+            **({"direct_git_migration": migration["scope"]} if migration else {}),
             "original_changes": {key: frozen[key] for key in ("staged", "raw_worktree_changed", "local_examples")},
             "replica_sha256": digest(image), "files": sorted(files),
             **({"project_edit": True, "protected_edit_paths": protected, "planning_protocol": PLANNING_PROTOCOL}
@@ -627,11 +650,11 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     return scope
 
 
-def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None):
+def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None, direct_branch=None):
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
         return _contract(runner, events, head, *args, game_limits=soft_limits, visual_review=visual_review,
-                         play=play, tools=tools)
+                         play=play, tools=tools, direct_branch=direct_branch)
 
 
 def _game_args(archive, expires, limits=None):
@@ -880,6 +903,8 @@ class RegisteredSession(_FixtureSession):
     def prepare(self):
         _, _, self.original_image, _ = baseline(self.runner.ledger, self.scope["project_id"])
         self.image = snapshot(self.work)
+        self.direct_binding = self.scope.get("direct_git")
+        self.direct_files = self.image["files"]
         if self.source() != self.scope["replica_sha256"]:
             raise Blocked("Approved replica changed")
         self.check_image()
@@ -906,7 +931,7 @@ class RegisteredSession(_FixtureSession):
 
     def check_image(self):
         if (snapshot(self.work, owned_staging=getattr(self, "portable_root", None)) != self.image
-                or not original_matches(self.original, self.original_image)):
+                or (not self.scope.get("direct_git") and not original_matches(self.original, self.original_image))):
             raise Blocked("Replica or original changed outside the admitted role")
         catalog = Catalog(self.runner.ledger).read()
         if catalog["projects"][self.scope["project_id"]]["revision"] != self.scope["project_revision"]:
@@ -919,6 +944,38 @@ class RegisteredSession(_FixtureSession):
                 raise Blocked("Approved game tool identity changed")
         elif "executable" in tool and fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
             raise Blocked("Approved executable identity changed")
+
+    def publish_cycle(self, cycle, criterion, verdict, comparison):
+        if not self.direct_binding:
+            return
+        from . import direct_git
+
+        if not self.owned_verified or not self.usage_complete:
+            raise Blocked("Git publication requires settled usage and owned Jobs")
+        self.check_image()
+        current = self.image["files"]
+        paths = sorted(name for name in self.direct_files.keys() | current.keys()
+                       if self.direct_files.get(name) != current.get(name))
+        if paths:
+            _editable_paths(paths, self.scope.get("protected_edit_paths", ()), limit=4096)
+        verified = sum(value == "VERIFIED" for value in comparison["criteria"].values())
+        message = (f"{self.scope['project_name']} cycle {cycle}: {criterion} ({verdict})\n\n"
+                   f"Ledger Seq {self.count}\nIndependent verification: {verified}/{len(comparison['criteria'])}\n"
+                   + "\n".join(paths[:24]))
+
+        def record(kind, **facts):
+            self.record(kind, cycle=cycle, criterion=criterion, verdict=verdict, **facts)
+
+        try:
+            head = direct_git.publish(self.work, self.scratch, self.check, self.direct_binding,
+                                      self.image, paths, message, record)
+        finally:
+            actual = snapshot(self.work)
+            if actual["files"] != current:
+                raise Blocked("Git publication changed candidate files")
+            self.image = actual
+        self.direct_binding = {**self.direct_binding, "head": head}
+        self.direct_files = current
 
     @contextmanager
     def portable_tools(self, cycle, phase, selected=None):
@@ -1035,6 +1092,10 @@ class RegisteredSession(_FixtureSession):
         tool = self.scope["verifier"]
         game = tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI)
         scratch_root = None
+        if phase == "developer" and self.scope.get("direct_git"):
+            prompt += ("\nThis checkout is the approved Git working tree. The Controller alone stages, commits and pushes. "
+                       "Keep private operating notes, machine paths, temporary outputs and test logs in session scratch. "
+                       "Project Markdown may contain only portable project paths and user-facing or developer documentation.")
         if game and phase == "developer" and allowed_paths is None:
             scratch_root = self.game_scratch
             prompt += ("\nThe Manager's read-only planning instructions do not restrict your approved Developer edits. "
@@ -1130,7 +1191,7 @@ class RegisteredSession(_FixtureSession):
         whole = self.scope.get("project_edit")
         if ({k: v for k, v in updated.items() if k != "files"} !=
                 {k: v for k, v in self.image.items() if k != "files"}
-                or not original_matches(self.original, self.original_image)
+                or (not self.scope.get("direct_git") and not original_matches(self.original, self.original_image))
                 or (not whole and any(name not in before or name not in new for name in changed))):
             raise Blocked("Developer changed Git identity, original or an unapproved path")
         if not changed:
@@ -1924,6 +1985,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
     scope = session.scope
     project = scope["project_id"]
     criteria = scope["criteria"]
+    migration = scope.get("direct_git_migration")
     status = dict.fromkeys(criteria, "NOT_STARTED")
     base = scope.get("candidate_base")
     if base:
@@ -1975,6 +2037,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         session.cycles_checked = count
         session.progress = status
         session.changes = continuation["changed"]
+    elif migration:
+        count = migration["cycle"]
+        session.cycles_checked = count
     pause = getattr(session, "pause", None)
 
     def stop(cycle, *, outcome="NO_PROGRESS", feedback=None, tool_plan=None):
@@ -2303,6 +2368,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         expected = _expected_final(scope, key, comparison, review)
         rework = expected == "REWORK"
         final = _decide(session, count, key, review, comparison, expected)
+        if scope.get("direct_git"):
+            session.publish_cycle(count, key, final, comparison)
         session.signoff_state = {}
         if final == "COMPLETED":
             return final
@@ -3266,16 +3333,29 @@ def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens
             or type(expires) is not int or not now + seconds + 2700 < expires <= now + seconds + 3000):
         raise Blocked("남은 승인 예산으로 다음 작업을 시작할 수 없습니다.")
     source, replica, frozen, onboarding = baseline(runner.ledger, prior["project_id"])
+    direct = prior.get("direct_git")
+    if direct:
+        from . import direct_git
+
+        replica = source
+        if direct_git.pending(events, prior["project_id"]):
+            raise Blocked("Resolve the pending direct Git publication before resuming")
+        direct = direct_git.admit(source, runner.ledger.local_directory("temp", create=True),
+                                  lambda: runner._check_diagnostic_fence(len(events), head),
+                                  direct["ref"].removeprefix("refs/heads/"))
+        if direct["url"] != prior["direct_git"]["url"]:
+            raise Blocked("Direct Git origin changed after approval")
     image = digest(snapshot(replica))
     if (str(source) != prior["original"] or str(replica) != prior["replica"]
             or digest(onboarding) != prior["onboarding_sha256"]
             or Catalog(runner.ledger).read()["projects"][prior["project_id"]]["revision"] != prior["project_revision"]
-            or not original_matches(source, frozen)
+            or (not direct and not original_matches(source, frozen))
             or image != checkpoint["source_sha256"] or image != end["replica_sha256"]):
         raise Blocked("The original, project configuration or checkpoint replica has changed")
-    with _git(runner.ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("Original Git inventory changed after onboarding")
+    if not direct:
+        with _git(runner.ledger, source) as (git, _):
+            if _scan(source, git, frozen["local_examples"]) != frozen:
+                raise Blocked("Original Git inventory changed after onboarding")
     resume = {key: checkpoint[key] for key in ("cycle", "criteria_status", "changed", "stagnant",
                                                "known", "reviewed", "failures", "feedback")}
     if checkpoint.get("deferred_criteria"):
@@ -3285,6 +3365,7 @@ def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens
     resume.update(mode="next-cycle", parent_run_id=start["run_id"],
                   parent_reported_tokens=end["known_reported_tokens"])
     return ({**prior, "resume": resume, "replica_sha256": image, "ledger_head": head, "expires": expires,
+             **({"direct_git": direct, "replica_head": direct["head"]} if direct else {}),
              "seconds": seconds, "tokens": tokens, "model_calls_max": calls}, None)
 
 
@@ -3478,9 +3559,10 @@ def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False,
 
 
 def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None,
-        pause=None, play=False, tools=None):
+        pause=None, play=False, tools=None, direct_branch=None):
     return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits,
-                visual_review=visual_review, activity=activity, pause=pause, play=play, tools=tools)
+                visual_review=visual_review, activity=activity, pause=pause, play=play, tools=tools,
+                direct_branch=direct_branch)
 
 
 def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False,
@@ -3492,14 +3574,15 @@ def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambd
 
 
 def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False,
-         visual_review=False, activity=None, pause=None, play=False, tools=None):
+         visual_review=False, activity=None, pause=None, play=False, tools=None, direct_branch=None):
     from .runtime import require_admission
 
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
         scope, diff = (_approved_resume_contract(runner, events, head, args, graceful) if resume
                        else (_contract(runner, events, head, *args, game=game, game_limits=game_limits,
-                                       visual_review=visual_review, play=play, tools=tools), None))
+                                       visual_review=visual_review, play=play, tools=tools,
+                                       direct_branch=direct_branch), None))
         if cancelled() or digest(scope) != approval:
             raise Blocked("Registered development approval changed")
         if any(event.get("approval_sha256") == approval for event in events):

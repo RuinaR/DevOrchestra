@@ -60,8 +60,23 @@ def registered_progress(events, project, *, onboarding_sequence=0):
                 if prior_candidate.get("prerequisite_scope_sha256") == prerequisite_scope_hash(scope) else {})
     deferred.update(scope.get("resume", {}).get("deferred_criteria", {}))
     tokens, usage_unknown = 0, False
+    git = None
+    if direct := scope.get("direct_git"):
+        git = {"branch": direct["ref"], "local": direct["head"], "remote": direct["head"],
+               "status": "SYNCED", "error": None}
     for row in rows:
         kind = row["kind"]
+        if git is not None:
+            if kind == "native_inspection_developer_diff":
+                git["status"] = "CHANGES"
+            elif kind == "direct_git_intent":
+                git["status"] = "STAGING"
+            elif kind == "direct_git_commit":
+                git.update(local=row["commit"], status="COMMITTED")
+            elif kind == "direct_git_pushed":
+                git.update(remote=row["remote_head"], status="SYNCED", error=None)
+            elif kind == "direct_git_push_pending":
+                git.update(status="PUSH_PENDING", error=row["reason"])
         number = row.get("cycle", cycle)
         if number > cycle:
             cycle, roles = number, {}
@@ -126,6 +141,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
     for status in statuses.values():
         counts[status] += 1
     return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
+            "direct_git": git,
             "run_id": start["run_id"], "latest_sequence": rows[-1].get("sequence", start["sequence"]),
             "started_at": start.get("started_at"),
             "criterion_statuses": statuses, "criterion_counts": counts,

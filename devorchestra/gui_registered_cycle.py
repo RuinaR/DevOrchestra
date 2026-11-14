@@ -50,6 +50,8 @@ def _scope_preferences(scope):
     if policy := scope.get("adaptive_play"):
         values.update((field, str(policy[key])) for field, key in PLAY_FIELDS.items() if key in policy)
         values["play_foreground"] = policy.get("foreground") is True
+    if git := scope.get("direct_git"):
+        values["direct_branch"] = git["ref"].removeprefix("refs/heads/")
     return values
 
 
@@ -269,6 +271,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     use_images = tk.BooleanVar(panel, value=draft.get("use_images") is True)
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
     play_foreground = tk.BooleanVar(panel, value=draft.get("play_foreground") is True)
+    direct_branch = tk.StringVar(panel, value=draft.get("direct_branch", ""))
     spec = None
     play_entries = {}
 
@@ -302,6 +305,22 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         return
     ttk.Button(body, text="등록 목표·기준 편집",
                command=lambda: save_budget() and (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
+    ttk.Label(body, text="원본 직접 Git 브랜치 · 비워 두면 기존 복제본 개발").pack(anchor="w")
+    ttk.Entry(body, textvariable=direct_branch).pack(fill="x")
+
+    def retry_git():
+        from . import direct_git
+
+        if center.confirm("Git 푸시 재시도", "원장에 기록된 로컬 커밋을 승인된 origin 브랜치로 다시 확인합니다.",
+                          parent=panel):
+            try:
+                commit = direct_git.retry(runner, project)
+            except (RuntimeError, OSError, ValueError) as error:
+                state.set(str(error))
+            else:
+                state.set(f"원격 HEAD 확인 · {commit}")
+
+    ttk.Button(body, text="미완료 Git 푸시 재시도", command=retry_git).pack(anchor="w")
     inputs = ttk.Frame(body)
     inputs.pack(fill="x")
     entries = {}
@@ -352,7 +371,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         preferences.update((key, entries[key].get()) for key in (*BUDGET_FIELDS, "files"))
         preferences.update(whole_replica=whole.get(), token_mode=SUBSCRIPTION_MODE if subscription.get() else "fixed",
                            use_images=use_images.get(), use_play=use_play.get(),
-                           play_foreground=play_foreground.get())
+                           play_foreground=play_foreground.get(), direct_branch=direct_branch.get().strip())
         preferences.update((field, entry.get().strip()) for field, entry in play_entries.items())
         if spec is not None:
             try:
@@ -546,7 +565,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         elif save_budget():
             panel.destroy()
 
-    def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False):
+    def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False,
+               direct_branch=None):
         nonlocal future, active
         future = Future()
         active = True
@@ -555,7 +575,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         restart_button.configure(state="disabled")
         state.set("승인 범위 확인 중")
         options = ({"graceful": graceful} if resume else
-                   {"soft_limits": soft_limits, "visual_review": visual_review, "play": play})
+                   {"soft_limits": soft_limits, "visual_review": visual_review, "play": play,
+                    "direct_branch": direct_branch})
         review_fn = registered_cycle.review_resume if resume else registered_cycle.review
         run_fn = registered_cycle.run_resume if resume else registered_cycle.run
 
@@ -701,6 +722,11 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             if result.get("research"):
                 summary += ("\n계획 Manager와 Developer가 공식 Codex 검색으로 공개 자료를 조사합니다. "
                             "검색어는 Codex 제공자에게 전달됩니다.")
+            if git := result.get("direct_git"):
+                summary += (f"\n원본 직접 개발 · {result['original']}\n"
+                            f"{git['url']} · {git['ref']} · 현재 HEAD {git['head'] or '첫 커밋 전'}\n"
+                            "사이클마다 Controller가 확정 변경을 커밋·푸시합니다. "
+                            "미검증 판정도 기록하며 원격 동기화 실패 시 다음 작업을 보류합니다.")
             if "developer_memory" in result:
                 summary += f"\nDeveloper Windows Job 커밋 한도 {result['developer_memory'] // 1024**2:,} MiB"
             if result.get("portable_source_policy"):
@@ -811,7 +837,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             state.set(str(error))
             return
         cancelled.clear()
-        submit(args, soft_limits=limits, visual_review=use_images.get(), play=play)
+        submit(args, soft_limits=limits, visual_review=use_images.get(), play=play,
+               direct_branch=direct_branch.get().strip() or None)
 
     def resume():
         try:

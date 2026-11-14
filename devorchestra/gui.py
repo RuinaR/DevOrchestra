@@ -1218,6 +1218,13 @@ class CommandCenter:
         verify_state = verifier.get("verdict") or self.registered_role_state(verifier, end, bool(local and running))
         review_summary = [f"Reviewer · {REGISTERED_STATES.get(review_state, review_state)}",
                           f"독립 Verifier · {REGISTERED_STATES.get(verify_state, verify_state)}"]
+        if git := (progress or {}).get("direct_git"):
+            review_summary.append(f"직접 Git · {git['branch'].removeprefix('refs/heads/')} · {git['status']}")
+            review_summary.append(f"로컬 {(git['local'] or '—')[:12]} · 원격 {(git['remote'] or '—')[:12]}")
+            detail.extend((f"원본 직접 Git · {scope['original']}",
+                           f"로컬 HEAD {git['local'] or '—'} · 원격 HEAD {git['remote'] or '—'}"))
+            if git["error"]:
+                review_summary.append(git["error"])
         if play := (progress or {}).get("play"):
             play_state = {"FOREGROUND_UNSAFE": "전경 창 감지 · 입력 차단",
                           "WINDOW_OR_CAPTURE_UNAVAILABLE": "사용 가능한 게임 화면 없음",
