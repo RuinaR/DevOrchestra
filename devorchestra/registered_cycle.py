@@ -30,7 +30,7 @@ from .native_developer_trial import (
 from .owned_artifacts import _remove_owned_tree
 from .project_onboarding import _git, _protected, _relative, _scan
 from .project_evidence import discovery, preview_entry
-from .replica_evidence import fingerprint, snapshot
+from .replica_evidence import EVIDENCE_SIZE_LIMIT, fingerprint, snapshot
 from .replica_readiness import baseline, original_matches
 from .role_contract import _unique_object
 
@@ -1254,6 +1254,11 @@ class RegisteredSession(_FixtureSession):
         except FileNotFoundError:
             self.check_image()
             return {"status": "NOT_VERIFIED", "reason": "PREVIEW_ARTIFACT_DISAPPEARED"}
+        except Blocked as error:
+            if str(error) != EVIDENCE_SIZE_LIMIT:
+                raise
+            self.check_image()
+            return {"status": "NOT_VERIFIED", "reason": "PREVIEW_BUNDLE_SIZE_LIMIT"}
         if (self.scope.get("project_evidence_contract") and "preview.json" not in bundle["files"]):
             reason = ("PREVIEW_MANIFEST_MISSING" if any(name.lower().endswith(".exe") for name in bundle["files"])
                       else "PREVIEW_EXECUTABLE_MISSING")
@@ -2337,7 +2342,10 @@ def _interrupted_preview(rows):
     path_failure = (prefix and reason.startswith("[WinError 3]")
                     and f"{prefix[0]}\\tmp\\{cycle}-gui-build\\" in reason.replace("\\\\", "\\"))
     return bool(prefix and type(cycle) is int and cycle > 0
-                and end.get("outcome") == "BLOCKED" and (path_failure or reason == CAPTURE_DIMENSIONS)
+                and end.get("outcome") == "BLOCKED" and (
+                    path_failure or reason in {CAPTURE_DIMENSIONS,
+                                               "Replica file is unsupported or exceeds the evidence limit",
+                                               EVIDENCE_SIZE_LIMIT})
                 and end.get("owned_tree") == "DRAINED" and end.get("usage_complete") is True
                 and end.get("staging_cleanup") == {"status": "RETAINED_FOR_RECOVERY", "workspace": prefix[0]}
                 and diff["kind"] == "native_inspection_developer_diff"

@@ -8,6 +8,8 @@ import stat
 from .lease import Blocked
 from .ledger import check_path, digest
 
+EVIDENCE_SIZE_LIMIT = "Replica file exceeds the evidence limit"
+
 
 def _native(path, long_local):
     return Path("\\\\?\\" + str(path)) if long_local else path
@@ -17,8 +19,10 @@ def fingerprint(path, limit=64 * 1024 * 1024, *, installed_executable=False, lon
     check_path(path, installed_executable=installed_executable, long_local=long_local)
     io_path = _native(path, long_local)
     before = io_path.lstat()
-    if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
-        raise Blocked("Replica file is unsupported or exceeds the evidence limit")
+    if not stat.S_ISREG(before.st_mode):
+        raise Blocked("Replica file is unsupported")
+    if before.st_size > limit:
+        raise Blocked(EVIDENCE_SIZE_LIMIT)
     checksum = sha256()
     size = 0
     with io_path.open("rb") as stream:
