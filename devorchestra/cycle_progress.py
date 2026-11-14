@@ -37,7 +37,8 @@ def compare(criteria, previous, verifier):
     for key, criterion in criteria.items():
         states = []
         for check in criterion["checks"]:
-            matched = [row for row in observed if all(field in row and digest(row[field]) == digest(value)
+            matched = [row for row in observed if row.get("coverage") != "partial"
+                       and all(field in row and digest(row[field]) == digest(value)
                                                       for field, value in check.items())]
             if len(matched) != 1 or not {"expected", "actual"} <= matched[0].keys():
                 states.append(None)

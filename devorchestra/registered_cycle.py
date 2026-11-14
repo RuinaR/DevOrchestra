@@ -1,5 +1,5 @@
 """Owner-approved native development on a registered, onboarded replica."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from difflib import unified_diff
 from hashlib import sha256
 import json
@@ -172,35 +172,46 @@ def _parse_verdict(message, options):
     return verdict, reason[:MAX_VERDICT_REASON].rstrip(), len(reason) > MAX_VERDICT_REASON
 
 
-def _tools(spec, criteria, image, writable):
-    if type(spec) is not dict or set(spec) != {"executable", "checks"}:
+def _tools(spec, criteria, image, writable, *, project_root=None):
+    if type(spec) is not dict or set(spec) not in ({"executable", "checks"}, {"package", "checks"}):
         raise Blocked("Specify an executable and one independent check per criterion")
-    if type(spec["executable"]) is not str or not spec["executable"].strip():
+    package = None
+    windows_text_check = False
+    if "package" in spec:
+        if project_root is None:
+            raise Blocked("A verifier package requires a registered project")
+        package = project_tools.verifier_package(spec["package"], project_root)
+    elif type(spec["executable"]) is not str or not spec["executable"].strip():
         raise Blocked("독립 검증 도구가 미설정입니다. 검증 실행 파일을 선택하세요.")
-    binary = Path(spec["executable"])
-    trusted = _known_folder(0x26)
-    windows_text_check = binary == _known_folder(0x24) / "System32" / "cmd.exe"
-    if binary.suffix.lower() != ".exe" or (not windows_text_check
-            and (not binary.is_relative_to(trusted) or binary.parent == trusted)):
-        raise Blocked("서명된 Program Files 검증 도구 또는 Windows 기본 텍스트 검사를 선택하세요.")
-    check_path(binary, installed_executable=True)
-    if windows_text_check:
-        from .system_powershell import _catalog_publisher, _open_locked
-
-        with _open_locked(binary, source="System32 verifier") as (_, handle):
-            if _catalog_publisher(binary, handle) != ("Microsoft Windows", "Microsoft Corporation"):
-                raise Blocked("Windows 기본 검사 도구의 Microsoft 카탈로그 서명을 확인할 수 없습니다.")
-            identity = fingerprint(binary, installed_executable=True)
-    elif not _signed_offline(binary):
-        raise Blocked("Verifier executable signature could not be verified")
     else:
-        identity = fingerprint(binary, installed_executable=True)
+        binary = Path(spec["executable"])
+        trusted = _known_folder(0x26)
+        windows_text_check = binary == _known_folder(0x24) / "System32" / "cmd.exe"
+        if binary.suffix.lower() != ".exe" or (not windows_text_check
+                and (not binary.is_relative_to(trusted) or binary.parent == trusted)):
+            raise Blocked("서명된 Program Files 검증 도구 또는 Windows 기본 텍스트 검사를 선택하세요.")
+        check_path(binary, installed_executable=True)
+        if windows_text_check:
+            from .system_powershell import _catalog_publisher, _open_locked
+
+            with _open_locked(binary, source="System32 verifier") as (_, handle):
+                if _catalog_publisher(binary, handle) != ("Microsoft Windows", "Microsoft Corporation"):
+                    raise Blocked("Windows 기본 검사 도구의 Microsoft 카탈로그 서명을 확인할 수 없습니다.")
+                identity = fingerprint(binary, installed_executable=True)
+        elif not _signed_offline(binary):
+            raise Blocked("Verifier executable signature could not be verified")
+        else:
+            identity = fingerprint(binary, installed_executable=True)
     checks = spec["checks"]
     if type(checks) is not dict or not checks or not checks.keys() <= criteria.keys():
         raise Blocked("Verification checks must use approved criterion IDs")
     for row in checks.values():
         required = {"args", "stdout", "inputs"}
-        if (type(row) is not dict or not required <= row.keys() <= required | {"screen_changed", "level"}
+        optional = {"coverage", "level"} if package else {"screen_changed", "level"}
+        if (type(row) is not dict or not required <= row.keys() <= required | optional
+                or (package and (row.get("coverage") not in ("partial", "criterion")
+                                 or row.get("level") not in ("static", "build", "functional", "run")
+                                 or (row["coverage"] == "criterion" and row["level"] != "functional")))
                 or row.get("level", "functional") not in (
                     "static", "build", "test", "run", "gui", "performance", "distribution", "functional")
                 or ("screen_changed" in row and (windows_text_check or type(row["screen_changed"]) is not bool))
@@ -218,9 +229,10 @@ def _tools(spec, criteria, image, writable):
                     or not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", path[0])
                     or path[0] not in image["files"] or _protected(path[0]) or row["inputs"]):
                 raise Blocked("Windows 기본 검사는 복제본의 일반 파일 하나를 읽는 type 명령만 지원합니다.")
-    return {"executable": str(binary), "root": str(binary.parent),
-            "identity": identity,
-            "checks": checks}
+    if package:
+        return {"package": package, "checks": checks,
+                "inputs": {name: image["files"][name] for row in checks.values() for name in row["inputs"]}}
+    return {"executable": str(binary), "root": str(binary.parent), "identity": identity, "checks": checks}
 
 
 def godot_verifier_spec(spec):
@@ -556,7 +568,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         if spec == {"mode": BASELINE_VERIFIER}:
             verifier = {"mode": BASELINE_VERIFIER}
         else:
-            verifier = _tools(spec, criteria, image, files)
+            verifier = _tools(spec, criteria, image, files, project_root=replica)
             for key in verifier["checks"]:
                 criteria[key]["checks"] = [{"title": key}]
     if type(visual_review) is not bool:
@@ -1248,8 +1260,18 @@ class RegisteredSession(_FixtureSession):
             self.check_image()
             stage = "review-capture" if capture_only else "verify"
             logs = self.logs(f"{cycle}-{stage}-{key}")
-            argv = [*trial_flags(self.work, writable=False, tool_root=Path(tool["root"])),
-                    *_args(Path(tool["executable"]), *spec["args"], profile=PROFILE)]
+            package = tool.get("package")
+            if package:
+                if any(name not in tool["inputs"] or self.image["files"].get(name) != tool["inputs"][name]
+                       for name in spec["inputs"]):
+                    raise Blocked("Approved verifier input changed")
+                entry, tool_root, inventory = project_tools.stage_verifier(package, logs, self.check)
+                executable_sha = inventory["files"][package["entry"]]["sha256"]
+            else:
+                entry, tool_root = Path(tool["executable"]), Path(tool["root"])
+                executable_sha = tool["identity"]["sha256"]
+            argv = [*trial_flags(self.work, writable=False, tool_root=tool_root, shell_tools=not package),
+                    *_args(entry, *spec["args"], profile=PROFILE)]
             seconds = self.verification_seconds()
             visual, workers = {}, []
             before, after = logs / "before-input.png", logs / "after-input.png"
@@ -1259,10 +1281,21 @@ class RegisteredSession(_FixtureSession):
                                                    before_input=before))
 
             try:
-                result = self.owned(lambda: _observe(self.binary, argv, self.work, logs, self.verify_env,
+                with ExitStack() as locked:
+                    if package:
+                        from .system_powershell import _open_locked
+
+                        for name in inventory["files"]:
+                            locked.enter_context(_open_locked(tool_root / _relative(name), source="Verifier runtime"))
+                        if snapshot(tool_root, max_file_bytes=project_tools.MAX_DOWNLOAD) != inventory:
+                            raise Blocked("Staged verifier runtime changed before launch")
+                        self.check_image()
+                    result = self.owned(lambda: _observe(self.binary, argv, self.work, logs, self.verify_env,
                                                      seconds=seconds, check=self.check,
                                                      output_limit=8192, encoding="utf-8",
                                                      interact=interact if "screen_changed" in spec else None))
+                    if package and snapshot(tool_root, max_file_bytes=project_tools.MAX_DOWNLOAD) != inventory:
+                        raise Blocked("Staged verifier runtime changed")
             except OwnedMxcStopped as error:
                 if str(error) == "MXC probe timeout" and self.signoff_started is not None:
                     self.verification_seconds()
@@ -1289,9 +1322,15 @@ class RegisteredSession(_FixtureSession):
             observation = {"title": key, "expected": _expected_observation(spec),
                            "exit_code": result["exitCode"], "stdout_sha256": digest(actual),
                            "level": spec.get("level", "functional"),
-                           "executable_sha256": tool["identity"]["sha256"],
+                           "executable_sha256": executable_sha,
                            "check_sha256": digest(spec),
                            "input_sha256": {name: self.image["files"][name]["sha256"] for name in spec["inputs"]}}
+            if package:
+                observation.update(coverage=spec["coverage"], package_sha256=package["identity"]["sha256"],
+                                   runtime_manifest_sha256=digest(inventory["files"]),
+                                   job_processes=result["job_total"],
+                                   execution_sha256=digest([self.scope["project_id"], self.fields["run_id"],
+                                                            cycle, key, self.source(), digest(spec)]))
             if "screen_changed" in spec:
                 actual_values.append(visual.get("screen_changed"))
                 if visual:
@@ -1629,6 +1668,26 @@ def _verify_signoff(session, count, key, status):
             raise Blocked("Visual candidate changed after Reviewer")
         visual.read_frames(session.runner.ledger, attachment["frames"])
     checked = session.verify_registered(count)
+    tool = scope["verifier"]
+    if tool.get("package"):
+        source = session.source()
+        seen = set()
+        for row in checked["observations"]:
+            if "actual" not in row:
+                continue
+            title = row["title"]
+            spec = tool["checks"].get(title)
+            if (title in seen or not spec or checked.get("source_sha256") != source
+                    or row.get("execution_sha256") != digest([scope["project_id"], session.fields["run_id"],
+                                                              count, title, source, digest(spec)])
+                    or row.get("check_sha256") != digest(spec)
+                    or row.get("input_sha256") != {name: tool["inputs"][name]["sha256"] for name in spec["inputs"]}
+                    or row.get("expected") != _expected_observation(spec)
+                    or row.get("level") != spec["level"]
+                    or row.get("coverage") != spec["coverage"]
+                    or row.get("package_sha256") != tool["package"]["identity"]["sha256"]):
+                raise Blocked("Verifier evidence does not bind to the approved execution and criterion")
+            seen.add(title)
     if attachment:
         session.record("native_inspection_visual_integrity", cycle=count, source_sha256=session.source(),
                        receipt_sha256=digest(checked), evidence_sha256=digest(attachment["frames"]), result="PASS")

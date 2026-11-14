@@ -33,6 +33,10 @@ def _scope_preferences(scope):
     verifier = scope["verifier"]
     if verifier.get("mode") in (registered_cycle.BASELINE_VERIFIER, game_pilot.REGISTERED_GUI):
         spec = {key: verifier[key] for key in ("mode", "tools_root") if key in verifier}
+    elif "package" in verifier:
+        package = verifier["package"]
+        spec = {"package": {"archive": package["archive"], "entry": package["entry"],
+                            "sha256": package["identity"]["sha256"]}, "checks": verifier["checks"]}
     elif {"executable", "checks"} <= verifier.keys():
         spec = {key: verifier[key] for key in ("executable", "checks")}
     else:
@@ -734,6 +738,13 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             elif verifier.get("mode") == game_pilot.REGISTERED_GUI:
                 verification = (f"Godot 엔진 {verifier['executable']}\n"
                                 "Windows EXE를 내보내 소유 창에 키 입력과 클릭을 보내고 입력 전후 화면을 캡처합니다.\n")
+            elif "package" in verifier:
+                package = verifier["package"]
+                verification = (f"검증 ZIP {package['archive']}\nSHA-256 {package['identity']['sha256']}\n"
+                                f"실행 파일 {package['entry']}\n"
+                                f"{checks}\n"
+                                + "\n".join(f"{key} · {row['level']} / {row['coverage']} · "
+                                            f"입력 {row['inputs']}" for key, row in verifier["checks"].items()) + "\n")
             else:
                 verification = f"검증 EXE {verifier['executable']}\n{checks}\n"
             quota_mode = result.get("token_mode") == SUBSCRIPTION_MODE
@@ -819,7 +830,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         try:
             verifier = read_spec()
             if verifier != default_verifier and not registered_cycle.godot_verifier_spec(verifier):
-                if not isinstance(verifier.get("executable"), str) or not verifier["executable"].strip():
+                if ("package" not in verifier and (not isinstance(verifier.get("executable"), str)
+                                                   or not verifier["executable"].strip())):
                     raise ValueError("검증 도구를 선택하거나 ‘기본 검증 사용’을 누르세요.")
                 checks = verifier.get("checks")
                 if not isinstance(checks, dict) or not checks or not checks.keys() <= criteria.keys():

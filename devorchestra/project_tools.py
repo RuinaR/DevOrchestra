@@ -225,6 +225,47 @@ def _copy_verified(source, target, proof, check):
     check()
 
 
+def verifier_package(spec, project_root):
+    """Freeze a specifically owner-selected local archive and native entry point."""
+    if (type(spec) is not dict or set(spec) != {"archive", "sha256", "entry"}
+            or any(type(value) is not str for value in spec.values())
+            or not re.fullmatch(r"[a-f0-9]{64}", spec["sha256"])):
+        raise Blocked("Specify a local verifier ZIP, its SHA-256 and a relative executable")
+    archive = Path(spec["archive"])
+    check_path(archive)
+    if (archive.suffix.lower() != ".zip" or archive.is_relative_to(project_root)
+            or _invalid_verifier_entry(spec["entry"])):
+        raise Blocked("Verifier ZIP must be outside the project and contain an approved native entry")
+    identity = fingerprint(archive, MAX_DOWNLOAD)
+    if identity["sha256"] != spec["sha256"]:
+        raise Blocked("Verifier ZIP SHA-256 differs from the approved digest")
+    return {"archive": str(archive), "entry": spec["entry"], "identity": identity}
+
+
+def _invalid_verifier_entry(entry):
+    path = _member_path(entry)
+    return (entry.endswith("/") or path.suffix.lower() != ".exe"
+            or path.name.casefold() in {"cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe",
+                                       "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe"})
+
+
+def stage_verifier(package, directory, check):
+    archive = directory / "approved-verifier.zip"
+    payload = directory / "verifier-tool"
+    _copy_verified(Path(package["archive"]), archive, package["identity"], check)
+    extract(archive, payload, check)
+    entry = payload / _member_path(package["entry"])
+    if not entry.is_file():
+        raise Blocked("Approved verifier entry is missing from the ZIP")
+    from .replica_evidence import snapshot, verify_pe
+
+    image = snapshot(payload, max_file_bytes=MAX_DOWNLOAD)
+    if package["entry"] not in image["files"]:
+        raise Blocked("Approved verifier entry spelling differs from the ZIP")
+    verify_pe(entry, image["files"][package["entry"]], limit=MAX_DOWNLOAD)
+    return entry, payload, image
+
+
 def _cache_path(ledger, sha):
     root = ledger.local_directory("state", create=True) / "tool-archives"
     check_path(root)

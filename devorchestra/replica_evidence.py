@@ -145,7 +145,7 @@ def revision(image):
     return digest(image)
 
 
-def verify_pe(path, expected):
+def verify_pe(path, expected, *, limit=64 * 1024**2):
     check_path(path)
     with path.open("rb") as stream:
         header = stream.read(64)
@@ -155,5 +155,5 @@ def verify_pe(path, expected):
         stream.seek(offset)
         if stream.read(4) != b"PE\0\0":
             raise Blocked("Declared EXE does not have a valid PE header")
-    if fingerprint(path) != expected:
+    if fingerprint(path, limit=limit) != expected:
         raise Blocked("EXE identity changed during inspection")

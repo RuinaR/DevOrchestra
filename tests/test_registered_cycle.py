@@ -21,6 +21,62 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_packaged_verifier_approval_pins_inputs_and_limits_coverage(self):
+        rc = registered_cycle
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            work = base / "project"
+            work.mkdir()
+            archive = base / "test.zip"
+            archive.write_bytes(b"fixture archive")
+            check = {"args": ["fixture.txt"], "stdout": "expected", "inputs": ["fixture.txt"],
+                     "coverage": "partial", "level": "functional"}
+            package = {"archive": str(archive), "entry": "bin/test.exe",
+                       "sha256": rc.fingerprint(archive)["sha256"]}
+            image = {"files": {"fixture.txt": {"sha256": "fixture", "bytes": 1}}}
+            criteria = {"C1": {"checks": [{"title": "C1"}]}}
+            config = {"package": package, "checks": {"C1": check}}
+            tool = rc._tools(config, criteria, image, [], project_root=work)
+            self.assertEqual(image["files"], tool["inputs"])
+            with self.assertRaises(Blocked):
+                rc._tools(config, criteria, image, ["fixture.txt"], project_root=work)
+            with self.assertRaises(Blocked):
+                rc._tools({"package": {**package, "entry": "../test.exe"}, "checks": {"C1": check}},
+                          criteria, image, [], project_root=work)
+            with self.assertRaises(Blocked):
+                rc._tools({"package": package, "checks": {"C1": {**check, "level": "static", "coverage": "criterion"}}},
+                          criteria, image, [], project_root=work)
+            observation = {"title": "C1", "actual": "matching", "expected": "matching", "coverage": "partial"}
+            receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
+                       "verdict": "PASS", "observations": [observation]}
+            self.assertEqual("NOT_VERIFIED", cycle_progress.compare(criteria, {}, receipt)["criteria"]["C1"])
+
+    def test_packaged_verifier_rejects_foreign_and_duplicate_observations(self):
+        rc = registered_cycle
+        key = "C1"
+        spec = {"args": ["input.txt"], "inputs": ["input.txt"], "stdout": "5",
+                "level": "functional", "coverage": "criterion"}
+        expected = rc._expected_observation(spec)
+        tool = {"checks": {key: spec}, "inputs": {"input.txt": {"sha256": "input"}},
+                "package": {"identity": {"sha256": "package"}}}
+        row = {"title": key, "actual": expected, "expected": expected, "check_sha256": digest(spec),
+               "input_sha256": {"input.txt": "input"}, "level": "functional", "coverage": "criterion",
+               "package_sha256": "package", "execution_sha256": digest(["project", "run", 1, key, "candidate", digest(spec)])}
+        receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
+                   "verdict": "PASS", "source_sha256": "candidate", "observations": [row]}
+        session = SimpleNamespace(scope={"criteria": {key: {"checks": [{"title": key}]}},
+                                         "verifier": tool, "project_id": "project"},
+                                  fields={"run_id": "run"}, source=lambda: "candidate",
+                                  signoff_state={"review": "ACCEPT"}, verify_registered=Mock(return_value=receipt))
+        status = {key: "NOT_STARTED"}
+        self.assertEqual("VERIFIED", rc._verify_signoff(session, 1, key, status)[1]["criteria"][key])
+        foreign = digest(["foreign", "run", 1, key, "candidate", digest(spec)])
+        for rows in ([row, row], [{**row, "execution_sha256": foreign}], [{**row, "title": "C2"}],
+                     [{**row, "input_sha256": {}}], [{**row, "check_sha256": digest({**spec, "args": []})}]):
+            with self.subTest(rows=rows), self.assertRaisesRegex(Blocked, "does not bind"):
+                session.verify_registered.return_value = {**receipt, "observations": rows}
+                rc._verify_signoff(session, 1, key, status)
+
     def test_windows_memory_signal_is_independent_of_turn_lifecycle(self):
         from devorchestra.native_developer_trial import _failure_evidence
         evidence = _failure_evidence('{"type":"turn.started"}', b"memory allocation of 84704 bytes failed")
