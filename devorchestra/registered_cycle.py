@@ -2589,6 +2589,73 @@ def retained_manual_checkpoint(start, checkpoint, end):
             and checkpoint.get("source_sha256") == source and checkpoint.get("changed") == end.get("changed"))
 
 
+def _resume_partial_direct(runner, events, head, rows, expires, seconds, tokens):
+    from . import direct_git
+
+    start, end = rows[0], rows[-1]
+    prior = start["scope"]
+    if (prior.get("token_mode") != SUBSCRIPTION_MODE or tokens is not None or
+            (seconds, tokens) != manual_remaining(prior, end)[:2]
+            or digest(prior) != start["approval_sha256"] or end["approval_sha256"] != start["approval_sha256"]
+            or end.get("owned_tree") != "DRAINED" or end.get("usage_complete") is not False
+            or end.get("staging_cleanup") != {"status": "RETAINED_FOR_RECOVERY", "workspace": start["workspace"]}
+            or not re.fullmatch(r"native-command-[a-z0-9_]+", start["workspace"])
+            or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
+                   for e in events if e["kind"] == "native_inspection_intent")):
+        raise Blocked("Partial recovery requires the unused, drained session and its remaining budget")
+    intents = [e for e in rows if e["kind"] == "native_inspection_role_intent" and "role_call" in e]
+    results = [e for e in rows if e["kind"] == "native_inspection_role_result" and "provider_usage" in e]
+    if (not intents or len(intents) != len(results) or len(intents) != end["model_turns_dispatched"]
+            or any(not isinstance(result.get("provider_usage"), dict) for result in results[:-1])):
+        raise Blocked("Partial recovery cannot reconcile the old model calls")
+    intent, result = intents[-1], results[-1]
+    cycle, key = intent["cycle"], intent["target"]
+    if (intent["phase"] != "developer" or key not in prior["criteria"] or cycle != end["cycle_count"] + 1
+            or intent["source_sha256"] != end["replica_sha256"]
+            or intent.get("approval_sha256") != start["approval_sha256"]
+            or any(intent[k] != result[k] for k in ("phase", "cycle", "target", "request_id", "approval_sha256"))
+            or result.get("outcome") != "REQUEST_UNKNOWN" or result.get("owned_tree") != "DRAINED"
+            or result.get("provider_usage") != "UNKNOWN"
+            or not any(e["kind"] == "native_inspection_plan_accepted" and e.get("cycle") == cycle
+                       and e.get("target") == key and e.get("approval_sha256") == start["approval_sha256"] for e in rows)
+            or any(e["kind"] == "native_inspection_developer_diff" and e.get("cycle") == cycle for e in rows)):
+        raise Blocked("Partial recovery requires the matching unfinished Developer request")
+    ledger = runner.ledger
+    project = prior["project_id"]
+    source, _, _, onboarding = baseline(ledger, project)
+    catalog = Catalog(ledger).read()
+    if (str(source) != prior["original"] or str(source) != prior["replica"]
+            or digest(onboarding) != prior["onboarding_sha256"]
+            or catalog["projects"][project]["revision"] != prior["project_revision"]
+            or set(end["criteria_status"]) != set(prior["criteria"])):
+        raise Blocked("Partial recovery project identity or frozen criteria changed")
+    read_frozen_requirements(catalog, project, prior["requirements"], ledger.state_boundary)
+    requirements = list(latest_requirements(catalog, project))
+    read_frozen_requirements(catalog, project, requirements, ledger.state_boundary)
+    protected = sorted(set(prior.get("protected_edit_paths", ())) |
+                       {ref["path"] for ref in requirements if ref.get("storage") != "local"})
+    image = snapshot(source)
+    if not prior.get("project_edit"):
+        protected += sorted(set(image["files"]) - set(prior["files"]))
+    staged = ledger.local_directory("temp") / start["workspace"] / "tmp" / f"{cycle}-gui-build"
+    direct, paths, old, old_text, evidence = direct_git.partial_candidate(
+        source, ledger.local_directory("temp"), lambda: runner._check_diagnostic_fence(len(events), head),
+        events, start, end, cycle, image, staged,
+        validate_paths=lambda names: _editable_paths(names, protected, limit=4096))
+    diff = _project_review_diff(source, paths, old_text, old, image)
+    if not diff or len(diff) > MAX_DIFF:
+        raise Blocked("Partial candidate diff exceeds the review bound")
+    capture = {"source_sha256": digest(image), "visual_preview": {"reason": "PARTIAL_CANDIDATE_NO_APPROVED_PREVIEW"}}
+    resume = {"mode": "partial-candidate", "cycle": cycle, "criterion": key, "parent_run_id": start["run_id"],
+              "request_id": intent["request_id"], "role_call": intent["role_call"], "changed": paths,
+              "changed_total": sorted(set(end["changed"]) | set(paths)), "criteria_status": end["criteria_status"],
+              "parent_reported_tokens": end["known_reported_tokens"], "pending_visual": {"receipt": capture, "frames": []},
+              "staging_evidence": evidence, "diff_sha256": digest(diff)}
+    return ({**prior, "resume": resume, "requirements": requirements, "direct_git": direct,
+             "replica_head": direct["head"], "replica_sha256": digest(image), "ledger_head": head,
+             "expires": expires, "seconds": seconds}, diff)
+
+
 def _resume_contract(runner, events, head, project, expires, seconds, tokens, renew=False, *,
                      require_proof=True, graceful=False):
     now = time()
@@ -2601,6 +2668,8 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
             raise Blocked("구독 잔여량 모드의 재개 시간 계약을 확인하세요.")
         if outcome == "SIGNOFF_PENDING":
             return _resume_signoff_contract(runner, events, head, rows, expires, seconds, tokens, graceful)
+        if outcome == "REQUEST_UNKNOWN" and rows[0]["scope"].get("direct_git"):
+            return _resume_partial_direct(runner, events, head, rows, expires, seconds, tokens)
         if can_review_postprocess(rows[-1]):
             return _resume_postprocess_contract(runner, events, head, rows, expires, seconds, tokens, now, renew)
         if outcome == MANUAL_CHECKPOINT or (len(rows) >= 3 and retained_manual_checkpoint(rows[0], rows[-2], rows[-1])):
@@ -3533,13 +3602,18 @@ def _resume_remaining(session, diff):
     status = resume["criteria_status"]
     session.progress = status
     session.cycles_checked = count - 1
-    postprocess = resume.get("mode") == "postprocess"
+    postprocess = resume.get("mode") in {"postprocess", "partial-candidate"}
     session.changes = resume.get("changed_total", session.scope["files"])
     session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
                              "changed": resume["changed"], "diff": diff,
                              "documentation": bool(resume.get("documentation"))}
     if resume.get("pending_visual"):
         session.signoff_state["pending_visual"] = resume["pending_visual"]
+    if resume.get("mode") == "partial-candidate":
+        session.record("native_inspection_partial_candidate_adopted", cycle=count, target=key,
+                       parent_run_id=resume["parent_run_id"], old_request_id=resume["request_id"],
+                       old_role_call=resume["role_call"], old_usage="UNKNOWN",
+                       source_sha256=session.source(), changed=resume["changed"])
     if resume.get("visual_unavailable"):
         session.signoff_state["visual_unavailable"] = resume["visual_unavailable"]
     if resume.get("unavailable_visual_response"):

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from devorchestra import direct_git
 from devorchestra.lease import Blocked
+from devorchestra.ledger import digest
 from devorchestra.replica_evidence import snapshot
 
 
@@ -19,15 +20,15 @@ class DirectGitTests(unittest.TestCase):
             work.mkdir()
             remote.mkdir()
 
-            def git(root, scratch, check, *args, codes=(0,)):
+            def git(root, scratch, check, *args, codes=(0,), raw=False):
                 check()
                 if args[0] == "push" and fail_push:
                     raise Blocked("test transport unavailable")
                 result = subprocess.run(["git", "-c", "core.autocrlf=false", *args], cwd=root,
-                                        capture_output=True, text=True, timeout=10)
+                                        capture_output=True, timeout=10)
                 if result.returncode not in codes:
                     raise Blocked(f"fixture git {args[0]}: {result.returncode}")
-                return result.stdout
+                return result.stdout if raw else result.stdout.decode("utf-8")
 
             fail_push = False
             git(remote, base, lambda: None, "init", "--bare")
@@ -64,13 +65,32 @@ class DirectGitTests(unittest.TestCase):
                 commit2 = direct_git.publish(work, base, check, approved, snapshot(work), ["game.txt"],
                                              "USER_TEST_REQUIRED", record)
                 self.assertEqual(commit2, git(remote, base, check, "rev-parse", "main").strip())
+                clean = snapshot(work)
                 start = {"kind": "native_inspection_intent", "run_id": "run", "approval_sha256": "approved",
                          "scope": {"project_id": "fixture", "direct_git": approved.copy()}}
-                end = {"kind": "native_inspection_result"}
+                end = {"kind": "native_inspection_result", "replica_sha256": digest(clean)}
                 receipts = [{"kind": kind, **row, "project_id": "fixture", "run_id": "run",
                              "approval_sha256": "approved", "cycle": 2} for kind, row in facts[-3:]]
                 events = [start, *receipts, end]
                 source.write_text("third draft", encoding="ascii")
+                staging = base / "owned" / "build" / "candidate"
+                staging.mkdir(parents=True)
+                (staging / "game.txt").write_bytes(source.read_bytes())
+
+                def partial():
+                    return direct_git.partial_candidate(work, base, check, events, start, end, 3, snapshot(work),
+                                                        base / "owned", validate_paths=lambda paths: None)
+
+                head, paths, files, _, evidence = partial()
+                self.assertEqual((commit2, ["game.txt"], clean["files"], "build/candidate"),
+                                 (head["head"], paths, files, evidence))
+                source.write_text("third draft with outside edit", encoding="ascii")
+                with self.assertRaisesRegex(Blocked, "owned staging tree"):
+                    partial()
+                source.write_text("third draft", encoding="ascii")
+                with patch.dict(end, replica_sha256="invalid"):
+                    with self.assertRaisesRegex(Blocked, "frozen dispatch"):
+                        partial()
                 self.assertEqual(commit2, direct_git.resume_candidate(
                     work, base, check, events, start, end, 3, ["game.txt"])["head"])
                 with self.assertRaisesRegex(Blocked, "checkpoint publication history"):

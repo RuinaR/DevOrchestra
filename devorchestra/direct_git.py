@@ -23,7 +23,7 @@ SECRET = re.compile(
 )
 
 
-def _command(root, scratch, check, *args, codes=(0,)):
+def _command(root, scratch, check, *args, codes=(0,), raw=False):
     check()
     git, _ = _git_tools()
     # Git may use the owner's existing credential helper. Never echo command output on failure.
@@ -38,10 +38,11 @@ def _command(root, scratch, check, *args, codes=(0,)):
                                "-c", "http.followRedirects=false",
                                *args], root, Path(logs), env, seconds=60, check=check,
                           memory=512 * 1024**2, output_limit=1024**2, encoding="utf-8")
+        data = (Path(logs) / "probe.stdout").read_bytes() if raw else None
     check()
     if result["job_active"] or result["exitCode"] not in codes:
         raise Blocked(f"Git {args[0]} failed (exit {result['exitCode']})")
-    return result["stdout"]
+    return data if raw else result["stdout"]
 
 
 def _head(git):
@@ -146,6 +147,46 @@ def resume_candidate(root, scratch, check, events, start, end, cycle, paths):
         raise Blocked("Direct Git HEAD or origin differs from the checkpoint publication history")
     _check_worktree(git, paths)
     return current
+
+
+def partial_candidate(root, scratch, check, events, start, end, cycle, image, staged, *, validate_paths):
+    """Reconstruct the clean dispatch image and corroborate each edit with owned staging."""
+    git = lambda *args, **kw: _command(root, scratch, check, *args, **kw)
+    status = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+    entries = status.rstrip("\0").split("\0")
+    if any(not entry.startswith(" M ") for entry in entries):
+        raise Blocked("Partial recovery requires unstaged edits to existing files")
+    paths = sorted(entry[3:] for entry in entries)
+    validate_paths(paths)
+    current = resume_candidate(root, scratch, check, events, start, end, cycle, paths)
+    before = {**image, "files": dict(image["files"])}
+    old_text = {}
+    for name in paths:
+        _safe_file(root, name, image["files"][name])
+        data = git("show", f"HEAD:{name}", raw=True)
+        before["files"][name] = {"sha256": sha256(data).hexdigest(), "bytes": len(data)}
+        old_text[name] = data.decode("utf-8")
+    if digest(before) != end["replica_sha256"]:
+        raise Blocked("Clean Git baseline does not match the frozen dispatch snapshot")
+    check_path(staged)
+    if not staged.is_dir():
+        raise Blocked("Partial candidate has no retained owned staging evidence")
+    folders = [staged]
+    for folder in folders:
+        check_path(folder)
+        if all((folder / name).is_file() and fingerprint(folder / name, long_local=True) == image["files"][name]
+               for name in paths):
+            if snapshot(root) != image:
+                raise Blocked("Partial candidate changed during review")
+            return current, paths, before["files"], old_text, folder.relative_to(staged).as_posix()
+        if len(folder.relative_to(staged).parts) < 2:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        if len(folders) >= 128:
+                            raise Blocked("Partial candidate staging exceeds the search bound")
+                        folders.append(Path(entry.path))
+    raise Blocked("Edited files do not match a single retained owned staging tree")
 
 
 def _migration_plan(runner, events, fence, project, branch, excluded, redact):

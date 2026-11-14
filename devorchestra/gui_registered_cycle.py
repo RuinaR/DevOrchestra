@@ -636,6 +636,22 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                         role, ROLE_LABELS.get(role, role)) for role in updated_roles)
                                     if updated_roles else "")
                 instruction_note += _play_approval(result)
+                if checkpoint.get("mode") == "partial-candidate":
+                    git = result["direct_git"]
+                    summary = (f"{project}\n{checkpoint['cycle']}사이클 미확정 부분 후보\n"
+                               f"원본 {result['original']}\n{git['url']} · {git['ref']} · {git['head']}\n"
+                               f"요청 {checkpoint['request_id']} · 호출 {checkpoint['role_call']}\n"
+                               f"후보 SHA-256 {result['replica_sha256']}\n"
+                               f"변경 파일: {', '.join(checkpoint['changed'])}\n"
+                               f"요구사항 {len(result['requirements'])}건 · 남은 시간 {result['seconds']:,}초\n"
+                               "기존 Developer 응답·사용량은 미확정으로 보존합니다. "
+                               "새 코드 Reviewer로 시작하고 독립 검증·최종 판정 뒤 Controller가 게시합니다. "
+                               "검증이 남으면 그 상태를 기록하고, 기존 권한과 구독 기준으로 다음 개발을 진행합니다.")
+                    if center.confirm("미확정 부분 후보 인수 승인", summary + instruction_note, parent=panel):
+                        launch(result)
+                    else:
+                        state.set("부분 후보 인수 취소됨")
+                    return
                 if checkpoint.get("mode") == "postprocess":
                     role = ROLE_LABELS[checkpoint["saved_response"]["phase"]]
                     action = (f"저장된 {role} 응답의 판정을 확정할 수 없어 같은 후보로 {role}만 다시 호출합니다. "
