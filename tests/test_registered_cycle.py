@@ -567,6 +567,28 @@ class RegisteredTrustTests(unittest.TestCase):
         pause.change("cancel")
         self.assertEqual(pause.state, "SAVING")
 
+    def test_recovered_cycle_can_reserve_shutdown_in_command_center(self):
+        from devorchestra.gui import CommandCenter
+
+        for mode in ("partial-candidate", "postprocess"):
+            with self.subTest(mode=mode):
+                pause = registered_cycle.PauseControl()
+                center = Mock()
+                center.view = {"project_id": "fixture"}
+                center.registered_job = {"future": Mock(), "cancelled": Event(), "pause": pause,
+                                         "scope": {"project_id": "fixture", "resume": {"mode": mode}}}
+                center.registered_job["future"].done.return_value = False
+                center.shutdown_buttons = {key: Mock() for key in ("request", "cancel", "finalize", "resume")}
+                CommandCenter.render_shutdown(center)
+                center.operations_pause.configure.assert_called_with(
+                    state="normal", text="종료 예약", command=unittest.mock.ANY)
+                center.operations_pause.configure.call_args.kwargs["command"]()
+                center.shutdown_command.assert_called_once_with("request")
+                pause.change("request")
+                CommandCenter.render_shutdown(center)
+                center.operations_pause.configure.assert_called_with(
+                    state="normal", text="예약 취소", command=unittest.mock.ANY)
+
     def test_feedback_is_linked_and_credential_like_findings_are_omitted(self):
         session = Mock()
         session.source.return_value = "source"

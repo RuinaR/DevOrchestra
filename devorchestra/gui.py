@@ -1730,7 +1730,8 @@ class CommandCenter:
             available = (active and not job["cancelled"].is_set()
                          and (not job["scope"].get("resume")
                               or job["scope"]["resume"].get("mode") in {
-                                  "next-cycle", "after-manager-planning", "after-registered-planning"}))
+                                  "next-cycle", "after-manager-planning", "after-registered-planning",
+                                  "partial-candidate", "postprocess"}))
             end = (progress or {}).get("end") or {}
             resumable = not active and self.can_resume_registered(progress)
             allowed = {"request": available and pause == "NONE", "cancel": available and pause == "SCHEDULED",
