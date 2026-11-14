@@ -638,11 +638,22 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 instruction_note += _play_approval(result)
                 if checkpoint.get("mode") == "partial-candidate":
                     git = result["direct_git"]
+                    evidence = checkpoint["staging_evidence"]
+                    reconstruction = ""
+                    if isinstance(evidence, dict):
+                        edits = ", ".join(f"{edit['item']} · {edit['path']}" for edit in evidence["edits"])
+                        reconstruction = (f"보존 파일 목록 SHA-256 {evidence['retained_files_sha256']}\n"
+                                          f"성공 작업 {edits}\n"
+                                          "출처 불일치 없음 · 전체 변경 바이트 일치\n")
+                    memory = result.get("developer_memory")
+                    memory_note = (f"후속 Developer Job 한도 {memory // 1024**2:,} MiB · 커밋 여유 확인 후 실행\n"
+                                   if memory else "")
                     summary = (f"{project}\n{checkpoint['cycle']}사이클 미확정 부분 후보\n"
                                f"원본 {result['original']}\n{git['url']} · {git['ref']} · {git['head']}\n"
                                f"요청 {checkpoint['request_id']} · 호출 {checkpoint['role_call']}\n"
                                f"후보 SHA-256 {result['replica_sha256']}\n"
                                f"변경 파일: {', '.join(checkpoint['changed'])}\n"
+                               f"{reconstruction}{memory_note}"
                                f"요구사항 {len(result['requirements'])}건 · 남은 시간 {result['seconds']:,}초\n"
                                "기존 Developer 응답·사용량은 미확정으로 보존합니다. "
                                "새 코드 Reviewer로 시작하고 독립 검증·최종 판정 뒤 Controller가 게시합니다. "

@@ -89,6 +89,17 @@ def system_commit():
             for key in ("commit_total", "commit_limit", "commit_peak", "physical_available")}
 
 
+LARGE_CODEX_JOB_LIMIT = 2048 * 1024**2
+CODEX_COMMIT_RESERVE = 2048 * 1024**2
+
+
+def admits_large_codex_job(sample):
+    if sample is None:
+        return False
+    total, limit = sample["commit_total"], sample["commit_limit"]
+    return 0 < total < limit and limit - total >= LARGE_CODEX_JOB_LIMIT + CODEX_COMMIT_RESERVE
+
+
 def job_commit(api, job):
     info = ExtendedLimits()
     if not api.QueryInformationJobObject(job, 9, c.byref(info), c.sizeof(info), None):

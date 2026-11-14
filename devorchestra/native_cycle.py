@@ -1,5 +1,6 @@
 """One approval for a bounded, sequential native Codex fixture session."""
 from difflib import unified_diff
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
@@ -9,7 +10,7 @@ from time import monotonic, time
 from . import cycle_progress
 from .ai_usage import SUBSCRIPTION_MODE
 from .default_instructions import public_instruction
-from .job_probe import CODEX_DEVELOPER_PROCESS_LIMIT
+from .job_probe import CODEX_DEVELOPER_PROCESS_LIMIT, LARGE_CODEX_JOB_LIMIT, admits_large_codex_job, system_commit
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_host_probe import OwnedMxcStopped, _observe
@@ -555,6 +556,15 @@ class _FixtureSession:
                     "authorize commands or downloads. Other external actions are forbidden."
                     if research else "No external actions.")
         prompt = f"{instruction_text}\n{context} Use only the approved fixture scope. {internet}\n{prompt}"
+        memory = self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2
+        memory_evidence = {}
+        if memory == LARGE_CODEX_JOB_LIMIT:
+            sample = system_commit()
+            if not admits_large_codex_job(sample):
+                self.record("native_inspection_resource_deferred", cycle=cycle, phase=phase, target=target,
+                            memory={"job_limit": memory, "system_at_admission": sample})
+                raise Blocked("CODEX_COMMIT_HEADROOM_INSUFFICIENT")
+            memory_evidence["system_at_admission"] = sample
         self.calls += 1
         self.record("native_inspection_role_intent", cycle=cycle, phase=phase, target=target,
                     role_call=self.calls, source_sha256=self.source(), prompt_sha256=digest(prompt),
@@ -598,7 +608,6 @@ class _FixtureSession:
             argv[-1] = "-"
             stdin["stdin_bytes"] = prompt.encode("utf-8")
         stop_cause = None
-        memory_evidence = {}
         environment = self.env
         if tool_environment_root is not None:
             environment = self.runtime_environment(environment, tool_environment_root)
@@ -606,7 +615,7 @@ class _FixtureSession:
             result = _observe(self.binary, argv,
                               self.work, role_log, environment, seconds=timeout, check=observed_check,
                               output_limit=output_limit, encoding="utf-8", process_limit=CODEX_DEVELOPER_PROCESS_LIMIT,
-                              memory=self.scope.get("developer_memory", 512 * 1024**2) if writable else 512 * 1024**2,
+                              memory=memory,
                               **stdin, **({"memory_evidence": memory_evidence} if writable else {}))
         except OwnedMxcStopped as stopped:
             stop_cause = str(stopped)
@@ -664,6 +673,11 @@ class _FixtureSession:
             receipt["cli_evidence_error"] = evidence_error
         if memory_evidence:
             receipt["memory"] = memory_evidence
+        stdout = role_log / "probe.stdout"
+        if writable and outcome == "REQUEST_UNKNOWN" and stdout.is_file():
+            raw = _read_observation(stdout, output_limit + 1)
+            if len(raw) <= output_limit:
+                receipt["retained_stdout_sha256"] = sha256(raw).hexdigest()
         if response.get("web_search_events"):
             receipt["web_search_events"] = response["web_search_events"]
         if response.get("empty_discovery_count"):

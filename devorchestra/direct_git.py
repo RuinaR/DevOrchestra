@@ -149,7 +149,8 @@ def resume_candidate(root, scratch, check, events, start, end, cycle, paths):
     return current
 
 
-def partial_candidate(root, scratch, check, events, start, end, cycle, image, staged, *, validate_paths):
+def partial_candidate(root, scratch, check, events, start, end, cycle, image, staged, *,
+                      validate_paths, tool_log=None, log_limit=0, transcript_sha=None):
     """Reconstruct the clean dispatch image and corroborate each edit with owned staging."""
     git = lambda *args, **kw: _command(root, scratch, check, *args, **kw)
     status = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
@@ -186,6 +187,18 @@ def partial_candidate(root, scratch, check, events, start, end, cycle, image, st
                         if len(folders) >= 128:
                             raise Blocked("Partial candidate staging exceeds the search bound")
                         folders.append(Path(entry.path))
+    if tool_log is not None and tool_log.is_file():
+        from .recovery_evidence import read_commands, reconstruct
+
+        records = read_commands(tool_log, log_limit, transcript_sha)
+        for folder in folders:
+            evidence = reconstruct(folder, root, paths, image["files"], records)
+            if evidence is not None:
+                check()
+                if snapshot(root) != image:
+                    raise Blocked("Partial candidate changed during review")
+                return current, paths, before["files"], old_text, {
+                    "folder": folder.relative_to(staged).as_posix(), **evidence}
     raise Blocked("Edited files do not match a single retained owned staging tree")
 
 

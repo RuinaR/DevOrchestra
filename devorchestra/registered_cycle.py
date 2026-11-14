@@ -16,6 +16,7 @@ from . import adaptive_play, codex_setup, cycle_progress, game_pilot, project_to
 from .ai_usage import QUOTA_FRESH_SECONDS, QUOTA_STOP_PERCENT, SUBSCRIPTION_MODE
 from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .default_instructions import public_instruction
+from .job_probe import LARGE_CODEX_JOB_LIMIT
 from .lease import Blocked, execution_slot
 from .ledger import check_path, digest
 from .mxc_host_probe import OwnedMxcStopped, _args, _observe
@@ -622,7 +623,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "role_seconds": 120, "role_tokens": role_tokens,
             "model_calls_max": cycles * (4 + (play_policy["steps"] if play_policy else 0)) if cycles else tokens,
             **({"token_mode": SUBSCRIPTION_MODE, "quota_stop_percent": QUOTA_STOP_PERCENT} if subscription else {}),
-            **({"developer_memory": 1536 * 1024**2} if game or (project_edit and (is_godot or install)) else {}),
+            **({"developer_memory": LARGE_CODEX_JOB_LIMIT} if game or (project_edit and (is_godot or install)) else {}),
             **({"developer_seconds": 300} if game and game_limits is None else {}),
             **({"role_deadlines": dict(game_limits["role_seconds"]), "model_output_bytes": MAX_MODEL_OUTPUT_BYTES,
                 "graceful_stop": game_pilot.graceful_policy()}
@@ -2641,7 +2642,10 @@ def _resume_partial_direct(runner, events, head, rows, expires, seconds, tokens)
     direct, paths, old, old_text, evidence = direct_git.partial_candidate(
         source, ledger.local_directory("temp"), lambda: runner._check_diagnostic_fence(len(events), head),
         events, start, end, cycle, image, staged,
-        validate_paths=lambda names: _editable_paths(names, protected, limit=4096))
+        validate_paths=lambda names: _editable_paths(names, protected, limit=4096),
+        tool_log=staged.parent / f"{cycle}-developer" / "probe.stdout",
+        log_limit=min(prior.get("model_output_bytes", 262144), MAX_MODEL_OUTPUT_BYTES),
+        transcript_sha=result.get("retained_stdout_sha256"))
     diff = _project_review_diff(source, paths, old_text, old, image)
     if not diff or len(diff) > MAX_DIFF:
         raise Blocked("Partial candidate diff exceeds the review bound")
@@ -2652,6 +2656,7 @@ def _resume_partial_direct(runner, events, head, rows, expires, seconds, tokens)
               "parent_reported_tokens": end["known_reported_tokens"], "pending_visual": {"receipt": capture, "frames": []},
               "staging_evidence": evidence, "diff_sha256": digest(diff)}
     return ({**prior, "resume": resume, "requirements": requirements, "direct_git": direct,
+             **({"developer_memory": LARGE_CODEX_JOB_LIMIT} if "developer_memory" in prior else {}),
              "replica_head": direct["head"], "replica_sha256": digest(image), "ledger_head": head,
              "expires": expires, "seconds": seconds}, diff)
 
