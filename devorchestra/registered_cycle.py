@@ -945,7 +945,7 @@ class RegisteredSession(_FixtureSession):
         elif "executable" in tool and fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
             raise Blocked("Approved executable identity changed")
 
-    def publish_cycle(self, cycle, criterion, verdict, comparison):
+    def publish_cycle(self, cycle, criterion, verdict, comparison, *, recovered_paths=None):
         if not self.direct_binding:
             return
         from . import direct_git
@@ -954,8 +954,9 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("Git publication requires settled usage and owned Jobs")
         self.check_image()
         current = self.image["files"]
-        paths = sorted(name for name in self.direct_files.keys() | current.keys()
-                       if self.direct_files.get(name) != current.get(name))
+        paths = (recovered_paths if recovered_paths is not None else
+                 sorted(name for name in self.direct_files.keys() | current.keys()
+                        if self.direct_files.get(name) != current.get(name)))
         if paths:
             _editable_paths(paths, self.scope.get("protected_edit_paths", ()), limit=4096)
         verified = sum(value == "VERIFIED" for value in comparison["criteria"].values())
@@ -3224,15 +3225,19 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
         raise Blocked("남은 승인 예산과 재개 요청이 일치하지 않습니다.")
     ledger = runner.ledger
     source, replica, frozen, onboarding = baseline(ledger, prior["project_id"])
+    direct = prior.get("direct_git")
+    if direct:
+        replica = source
     image = snapshot(replica)
     if (str(source) != prior["original"] or str(replica) != prior["replica"]
             or digest(onboarding) != prior["onboarding_sha256"]
             or Catalog(ledger).read()["projects"][prior["project_id"]]["revision"] != prior["project_revision"]
-            or not original_matches(source, frozen) or digest(image) != end["replica_sha256"]):
+            or (not direct and not original_matches(source, frozen)) or digest(image) != end["replica_sha256"]):
         raise Blocked("원본, 프로젝트 승인 또는 작업 복제본이 변경됐습니다.")
-    with _git(ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
+    if not direct:
+        with _git(ledger, source) as (git, _):
+            if _scan(source, git, frozen["local_examples"]) != frozen:
+                raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
     intents = [row for row in rows if row["kind"] == "native_inspection_role_intent" and "role_call" in row]
     results = [row for row in rows if row["kind"] == "native_inspection_role_result" and "provider_usage" in row]
     if (not intents or len(intents) != len(results) or len(results) != end["model_turns_dispatched"]
@@ -3269,7 +3274,19 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
                                for row in rows)):
                 raise Blocked("최종 Manager에 전달된 독립 검증 근거를 확인할 수 없습니다.")
     else:
+        if direct:
+            raise Blocked("Direct Git recovery requires a frozen postprocess checkpoint")
         checkpoint, diff = _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, ref)
+    if direct:
+        from . import direct_git
+
+        paths = checkpoint["changed"]
+        _editable_paths(paths, prior.get("protected_edit_paths", ()), limit=4096)
+        if not prior.get("project_edit") and not set(paths) <= set(prior["files"]):
+            raise Blocked("Checkpoint contains changes outside the approved file scope")
+        direct = direct_git.resume_candidate(source, ledger.local_directory("temp", create=True),
+                                             lambda: runner._check_diagnostic_fence(len(events), head),
+                                             events, start, end, checkpoint["cycle"], paths)
     if ref["images"]:
         if checkpoint.get("pending_visual", {}).get("frames") != ref["images"]:
             raise Blocked("시각 검토 화면이 응답과 일치하지 않습니다.")
@@ -3302,6 +3319,8 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
                   parent_reported_tokens=end["known_reported_tokens"], changed_total=end["changed"])
     if rerun:
         resume["rerun_phase"] = role["phase"]
+        if direct:
+            resume["rejected_role_call"] = intent["role_call"]
     cycles = prior["cycles"]
     if renew:
         resume["renewed_budget"] = True
@@ -3310,6 +3329,7 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
         if rerun:
             calls += 1
     return ({**prior, "resume": resume, "replica_sha256": digest(image), "ledger_head": head,
+             **({"direct_git": direct, "replica_head": direct["head"]} if direct else {}),
              "expires": expires, "seconds": seconds, "tokens": tokens, "cycles": cycles, "model_calls_max": calls}, diff)
 
 
@@ -3493,6 +3513,10 @@ def _resume_remaining(session, diff):
         session.signoff_state["review_feedback"] = resume["review_feedback"]
     if resume.get("play_report"):
         session.signoff_state["play_report"] = resume["play_report"]
+    if resume.get("rejected_role_call"):
+        session.record("native_inspection_postprocess_retry", cycle=count, phase=resume["rerun_phase"],
+                       parent_run_id=resume["parent_run_id"], rejected_role_call=resume["rejected_role_call"],
+                       reason="Saved response failed the approved verdict contract")
     if resume.get("visual"):
         attachment = session.signoff_state["visual"] = resume["visual"]
         if any(frame["source_sha256"] != session.source() for frame in attachment["frames"]):
@@ -3529,13 +3553,21 @@ def _resume_remaining(session, diff):
                               documentation=bool(resume.get("documentation")))
     expected = _expected_final(session.scope, key, comparison, review)
     final = _decide(session, count, key, review, comparison, expected)
+    direct = session.scope.get("direct_git")
+    if direct:
+        session.publish_cycle(count, key, final, comparison, recovered_paths=resume["changed"])
     feedback = {"target": key, "next": final, "change_hash": digest(diff),
                 "review": session.signoff_state.get("review_feedback", review),
                 "verifier": checked.get("observations", [])}
     if "delivery" in comparison:
         feedback["verification"] = comparison["delivery"]
-    if postprocess and final in {"CONTINUE", "REWORK"} and not session.stop_reason:
+    if postprocess and not session.stop_reason:
         deferred = dict(saved.get("deferred_criteria", {}))
+        if direct and final == "USER_TEST_REQUIRED" and session.scope["criteria"].keys() - deferred.keys() - {key}:
+            deferred[key] = {"kind": "USER_VERIFICATION",
+                             "reason": "This criterion is awaiting independent user verification."}
+        elif final not in {"CONTINUE", "REWORK"}:
+            return final
         if stagnant >= 2:
             deferred[key] = {"kind": "REPEATED_NO_PROGRESS", "reason": _safe_feedback(feedback["review"][:800])}
             stagnant = 0

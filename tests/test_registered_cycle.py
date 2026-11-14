@@ -21,6 +21,34 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_direct_postprocess_publishes_saved_paths_before_next_cycle(self):
+        rc = registered_cycle
+        comparison = {"criteria": {"first": "USER_TEST_REQUIRED", "second": "NOT_STARTED"}}
+        session = Mock()
+        session.stop_reason = None
+        session.image = {"files": {}}
+        session.scope = {"direct_git": {"head": "approved"}, "criteria": comparison["criteria"], "files": [],
+                         "resume": {"cycle": 3, "criterion": "first", "mode": "postprocess",
+                                    "criteria_status": comparison["criteria"], "changed": ["game.txt"],
+                                    "changed_total": ["game.txt"]}}
+        with (patch.object(rc, "_review_and_verify", return_value=(None, "ACCEPT", None, {}, comparison)),
+              patch.object(rc, "_cycle_stagnation", return_value=0),
+              patch.object(rc, "_expected_final", return_value="USER_TEST_REQUIRED"),
+              patch.object(rc, "_decide", return_value="USER_TEST_REQUIRED"),
+              patch.object(rc, "_cycles", return_value="next") as cycles):
+            def continue_after_publish(_, *, continuation):
+                session.publish_cycle.assert_called_once_with(
+                    3, "first", "USER_TEST_REQUIRED", comparison, recovered_paths=["game.txt"])
+                self.assertEqual("USER_VERIFICATION", continuation["deferred_criteria"]["first"]["kind"])
+                return "next"
+
+            cycles.side_effect = continue_after_publish
+            self.assertEqual("next", rc._resume_remaining(session, "saved diff"))
+            session.publish_cycle.side_effect = Blocked("remote conflict")
+            with self.assertRaisesRegex(Blocked, "remote conflict"):
+                rc._resume_remaining(session, "saved diff")
+            cycles.assert_called_once()
+
     @unittest.skipUnless(os.name == "nt", "Windows extended paths")
     def test_preview_inventory_reads_deep_paths_and_rejects_missing_files(self):
         from tempfile import TemporaryDirectory

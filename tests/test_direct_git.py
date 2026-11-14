@@ -64,8 +64,26 @@ class DirectGitTests(unittest.TestCase):
                 commit2 = direct_git.publish(work, base, check, approved, snapshot(work), ["game.txt"],
                                              "USER_TEST_REQUIRED", record)
                 self.assertEqual(commit2, git(remote, base, check, "rev-parse", "main").strip())
-                git(remote, base, check, "update-ref", "refs/heads/main", commit, commit2)
+                start = {"kind": "native_inspection_intent", "run_id": "run", "approval_sha256": "approved",
+                         "scope": {"project_id": "fixture", "direct_git": approved.copy()}}
+                end = {"kind": "native_inspection_result"}
+                receipts = [{"kind": kind, **row, "project_id": "fixture", "run_id": "run",
+                             "approval_sha256": "approved", "cycle": 2} for kind, row in facts[-3:]]
+                events = [start, *receipts, end]
                 source.write_text("third draft", encoding="ascii")
+                self.assertEqual(commit2, direct_git.resume_candidate(
+                    work, base, check, events, start, end, 3, ["game.txt"])["head"])
+                with self.assertRaisesRegex(Blocked, "checkpoint publication history"):
+                    direct_git.resume_candidate(work, base, check, [start, end], start, end, 3, ["game.txt"])
+                with self.assertRaisesRegex(Blocked, "pending"):
+                    direct_git.resume_candidate(work, base, check, events[:-2] + [end], start, end, 3, ["game.txt"])
+                (work / "foreign.txt").write_text("outside the approved candidate", encoding="ascii")
+                with self.assertRaisesRegex(Blocked, "publication paths"):
+                    direct_git.resume_candidate(work, base, check, events, start, end, 3, ["game.txt"])
+                (work / "foreign.txt").unlink()
+                git(remote, base, check, "update-ref", "refs/heads/main", commit, commit2)
+                with self.assertRaisesRegex(Blocked, "checkpoint publication history"):
+                    direct_git.resume_candidate(work, base, check, events, start, end, 3, ["game.txt"])
                 approved["head"] = commit2
                 with self.assertRaisesRegex(Blocked, "Remote Git HEAD"):
                     direct_git.publish(work, base, check, approved, snapshot(work), ["game.txt"], "third", record)

@@ -95,6 +95,59 @@ def admit(root, scratch, check, branch):
     return approved
 
 
+def _check_worktree(git, paths):
+    if git("diff", "--cached", "--name-only", "-z"):
+        raise Blocked("Existing staged changes prevent automatic commit")
+    status = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+    dirty = {entry[3:] for entry in status.split("\0") if entry}
+    if dirty != set(paths):
+        raise Blocked("Working tree changes differ from the approved publication paths")
+    return dirty
+
+
+def resume_candidate(root, scratch, check, events, start, end, cycle, paths):
+    """Reconcile the frozen start HEAD with completed publications of earlier cycles."""
+    scope = start["scope"]
+    approved = scope["direct_git"]
+    ref, url, expected = (approved[key] for key in ("ref", "url", "head"))
+    project = scope["project_id"]
+    if pending(events, project):
+        raise Blocked("Resolve the pending direct Git publication before resuming")
+    git = lambda *args, **kw: _command(root, scratch, check, *args, **kw)
+    receipts = []
+    previous_cycle = 0
+    for row in events[events.index(start) + 1:events.index(end)]:
+        if (row.get("run_id") != start["run_id"] or row.get("project_id") != project
+                or row["kind"] not in {"direct_git_intent", "direct_git_commit", "direct_git_pushed"}):
+            continue
+        receipts.append(row)
+        if row["kind"] != "direct_git_pushed":
+            continue
+        if len(receipts) != 3:
+            raise Blocked("Incomplete direct Git publication receipts")
+        intent, commit, pushed = receipts
+        number, sha = commit.get("cycle"), commit.get("commit")
+        if (intent["kind"] != "direct_git_intent" or commit["kind"] != "direct_git_commit"
+                or type(number) is not int or not previous_cycle < number < cycle
+                or not isinstance(sha, str) or not re.fullmatch(OID, sha)
+                or any(item.get("approval_sha256") != start["approval_sha256"]
+                       or item.get("origin") != url or item.get("before") != expected
+                       for item in (intent, commit))
+                or intent.get("cycle") != number or any(item.get("branch") != ref for item in receipts)
+                or (pushed.get("approval_sha256", start["approval_sha256"]) != start["approval_sha256"])
+                or pushed.get("cycle", number) != number
+                or pushed.get("commit") != sha or pushed.get("remote_head") != sha
+                or git("rev-list", "--parents", "-n", "1", sha).split() != [sha, *([expected] if expected else [])]):
+            raise Blocked("Direct Git publication receipts do not match the approved history")
+        expected, previous_cycle = sha, number
+        receipts.clear()
+    current = {**approved, "head": expected}
+    if receipts or binding(root, scratch, check) != current or _remote_head(git, url, ref) != expected:
+        raise Blocked("Direct Git HEAD or origin differs from the checkpoint publication history")
+    _check_worktree(git, paths)
+    return current
+
+
 def _migration_plan(runner, events, fence, project, branch, excluded, redact):
     from .replica_readiness import baseline, original_matches
     from .registered_cycle import history
@@ -234,12 +287,7 @@ def publish(root, scratch, check, approved, image, paths, message, record):
     remote = _remote_head(git, url, ref)
     if remote != head:
         raise Blocked("Remote Git HEAD differs from the approved local HEAD")
-    if git("diff", "--cached", "--name-only", "-z"):
-        raise Blocked("Existing staged changes prevent automatic commit")
-    status = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
-    dirty = {entry[3:] for entry in status.split("\0") if entry}
-    if dirty != set(paths):
-        raise Blocked("Working tree changes differ from the approved publication paths")
+    dirty = _check_worktree(git, paths)
     if not dirty:
         return head
     if any(Path(name).name.casefold() in {".gitattributes", ".gitmodules"} for name in image["files"]):
