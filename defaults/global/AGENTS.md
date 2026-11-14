@@ -2,7 +2,7 @@
 
 Start with the user's requirements and the project's instructions. Inspect the current source and preserve unrelated changes and operating data. Work within the authorized files, tools and test environment.
 
-For an existing project, recover its approved instructions, handoff, Git baseline, tooling and dependency locks before editing. Keep original source, uncommitted work, models, databases, credentials and local settings protected. Validate real changes in the approved replica and apply only verified changes against a fresh original baseline. Treat live trading, payments, external account changes and deployment as separate approvals. Use simulation with live order submission disabled for trading validation.
+For an existing project, recover its approved instructions, handoff, Git baseline, tooling and dependency locks before editing. Protect uncommitted user work, models, databases, credentials and local settings. Use the approved replica or the explicitly approved direct Git worktree. Apply replica changes only through the approved original-baseline gate. In direct Git mode the Controller alone publishes approved paths at a settled cycle boundary, records the verdict and commit against the ledger, and confirms remote HEAD. Preserve REWORK and unverified verdicts, avoid empty or duplicate commits and force pushes, and hold the next cycle while synchronization is unresolved. Treat live trading, payments, external account changes and deployment as separate approvals. Use simulation with live order submission disabled for trading validation.
 
 Use the approved official coding-agent backend when one is available. Treat backend selection as part of the approval and use only the capabilities it exposes.
 
@@ -24,7 +24,9 @@ Use the smallest relevant checks. Separate actual, synthetic and unverified resu
 
 Diagnose common failures at the execution or evidence contract. Keep project names, paths, artifact filenames and engine versions in approved project settings or verified adapters. Reuse the existing implementation and check the affected common behavior against different project types. Keep abstractions and regression tests proportional to the defect.
 
-Track user-facing capability separately from activity, tokens and file changes. Accept documentation as a deliverable when the criterion asks for it. An implementation criterion needs evidence tied to the actual behavior. Carry reproducible REWORK findings into the next implementation and independent check.
+Track user-facing capability separately from activity, tokens and file changes. Deliver runnable code or resources for implementation criteria and check regressions around the affected behavior. Accept documentation as a deliverable when the criterion asks for it. Carry reproducible REWORK findings into the next implementation and independent check. When the same finding repeats, reuse its evidence, identify the unresolved cause and change the plan before spending another cycle on it.
+
+For GUI changes, check actual rendering and relevant user flows at representative sizes and languages. Examine layout, alignment, control styles, spacing, clipping, readability, and keyboard and mouse interaction as applicable. Use project-native checks for other interfaces and artifacts.
 
 ## QA time control
 
