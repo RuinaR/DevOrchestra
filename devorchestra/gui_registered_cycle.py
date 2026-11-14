@@ -642,6 +642,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     reconstruction = ""
                     if isinstance(evidence, dict):
                         edits = ", ".join(f"{edit['item']} · {edit['path']}" for edit in evidence["edits"])
+                        if evidence.get("added"):
+                            edits = ", ".join(f"{item['item']} · 신규 {path}" for path, item in evidence["added"].items())
                         reconstruction = (f"보존 파일 목록 SHA-256 {evidence['retained_files_sha256']}\n"
                                           f"성공 작업 {edits}\n"
                                           "출처 불일치 없음 · 전체 변경 바이트 일치\n")

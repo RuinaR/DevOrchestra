@@ -155,20 +155,34 @@ def partial_candidate(root, scratch, check, events, start, end, cycle, image, st
     git = lambda *args, **kw: _command(root, scratch, check, *args, **kw)
     status = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
     entries = status.rstrip("\0").split("\0")
-    if any(not entry.startswith(" M ") for entry in entries):
-        raise Blocked("Partial recovery requires unstaged edits to existing files")
+    if any(not entry.startswith((" M ", "?? ")) for entry in entries):
+        raise Blocked("Partial recovery requires unstaged modifications or attested new files")
     paths = sorted(entry[3:] for entry in entries)
+    added = {entry[3:] for entry in entries if entry.startswith("?? ")}
     validate_paths(paths)
     current = resume_candidate(root, scratch, check, events, start, end, cycle, paths)
     before = {**image, "files": dict(image["files"])}
     old_text = {}
     for name in paths:
         _safe_file(root, name, image["files"][name])
+        if name in added:
+            del before["files"][name]
+            continue
         data = git("show", f"HEAD:{name}", raw=True)
         before["files"][name] = {"sha256": sha256(data).hexdigest(), "bytes": len(data)}
         old_text[name] = data.decode("utf-8")
     if digest(before) != end["replica_sha256"]:
         raise Blocked("Clean Git baseline does not match the frozen dispatch snapshot")
+    new_evidence = None
+    if added:
+        from .recovery_evidence import attest_new_files, read_commands
+
+        if not transcript_sha or tool_log is None or not tool_log.is_file():
+            raise Blocked("New files require a transcript sealed in the Developer role receipt")
+        baseline_names = {name.casefold() for name in before["files"]}
+        if any(name.casefold() in baseline_names for name in added):
+            raise Blocked("New file collides with a baseline path")
+        new_evidence = attest_new_files(root, added, read_commands(tool_log, log_limit, transcript_sha))
     check_path(staged)
     if not staged.is_dir():
         raise Blocked("Partial candidate has no retained owned staging evidence")
@@ -177,9 +191,20 @@ def partial_candidate(root, scratch, check, events, start, end, cycle, image, st
         check_path(folder)
         if all((folder / name).is_file() and fingerprint(folder / name, long_local=True) == image["files"][name]
                for name in paths):
+            for name in added:
+                staged_path = Path("\\\\?\\" + str(folder / name))
+                with staged_path.open("rb") as stream:
+                    retained = stream.read(image["files"][name]["bytes"] + 1)
+                if retained != (root / name).read_bytes():
+                    raise Blocked("Retained new file bytes changed during review")
             if snapshot(root) != image:
                 raise Blocked("Partial candidate changed during review")
-            return current, paths, before["files"], old_text, folder.relative_to(staged).as_posix()
+            location = folder.relative_to(staged).as_posix()
+            if new_evidence is not None:
+                return current, paths, before["files"], old_text, {
+                    "folder": location, **new_evidence, "modified": sorted(set(paths) - added),
+                    "retained_files_sha256": digest({name: image["files"][name] for name in paths}), "edits": []}
+            return current, paths, before["files"], old_text, location
         if len(folder.relative_to(staged).parts) < 2:
             with os.scandir(folder) as entries:
                 for entry in entries:
@@ -187,7 +212,7 @@ def partial_candidate(root, scratch, check, events, start, end, cycle, image, st
                         if len(folders) >= 128:
                             raise Blocked("Partial candidate staging exceeds the search bound")
                         folders.append(Path(entry.path))
-    if tool_log is not None and tool_log.is_file():
+    if not added and tool_log is not None and tool_log.is_file():
         from .recovery_evidence import read_commands, reconstruct
 
         records = read_commands(tool_log, log_limit, transcript_sha)

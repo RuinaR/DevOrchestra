@@ -1,11 +1,12 @@
 from pathlib import Path
 import json
+from hashlib import sha256
 import shlex
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from devorchestra import direct_git
 from devorchestra.lease import Blocked
@@ -115,7 +116,7 @@ class DirectGitTests(unittest.TestCase):
                 source.write_text("fourth candidate", encoding="ascii")
 
                 def reconstructed(rows, **kwargs):
-                    log.write_text("\n".join(map(json.dumps, rows)), encoding="utf-8")
+                    log.write_bytes("\n".join(map(json.dumps, rows)).encode("utf-8"))
                     return direct_git.partial_candidate(
                         work, base, check, events, start, end, 3, snapshot(work), base / "owned",
                         validate_paths=lambda paths: None, tool_log=log, log_limit=8192, **kwargs)
@@ -136,6 +137,35 @@ class DirectGitTests(unittest.TestCase):
                 with self.assertRaisesRegex(Blocked, "owned staging tree"):
                     reconstructed(complete)
                 source.write_text("third draft", encoding="ascii")
+                added = work / "new.txt"
+                added.write_bytes(b"new content")
+                (staging / added.name).write_bytes(b"new content")
+                literal = command_rows("write", "[IO.File]::WriteAllText((Join-Path (Get-Location) 'new.txt'), "
+                                       "'new content', [Text.UTF8Encoding]::new($false))")
+                payload = "\n".join(map(json.dumps, literal)).encode("utf-8")
+                sealed = sha256(payload).hexdigest()
+                with self.assertRaisesRegex(Blocked, "sealed"):
+                    reconstructed(literal)
+                self.assertEqual(["game.txt", "new.txt"], reconstructed(literal, transcript_sha=sealed)[1])
+                self.assertEqual("write", reconstructed(literal, transcript_sha=sealed)[4]["added"]["new.txt"]["item"])
+                with self.assertRaisesRegex(Blocked, "outside scope"):
+                    direct_git.partial_candidate(
+                        work, base, check, events, start, end, 3, snapshot(work), base / "owned",
+                        validate_paths=Mock(side_effect=Blocked("outside scope")), tool_log=log,
+                        log_limit=8192, transcript_sha=sealed)
+                added.write_bytes(b"unattested content")
+                with self.assertRaisesRegex(Blocked, "settled literal"):
+                    reconstructed(literal, transcript_sha=sealed)
+                added.write_bytes(b"new content")
+                unsettled = literal[:1]
+                unsettled_sha = sha256(json.dumps(unsettled[0]).encode("utf-8")).hexdigest()
+                with self.assertRaisesRegex(Blocked, "lack a supported"):
+                    reconstructed(unsettled, transcript_sha=unsettled_sha)
+                (staging / added.name).write_bytes(b"different retained bytes")
+                with self.assertRaisesRegex(Blocked, "owned staging tree"):
+                    reconstructed(literal, transcript_sha=sealed)
+                added.unlink()
+                (staging / added.name).unlink()
                 with patch.dict(end, replica_sha256="invalid"):
                     with self.assertRaisesRegex(Blocked, "frozen dispatch"):
                         partial()

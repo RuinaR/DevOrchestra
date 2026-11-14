@@ -21,6 +21,10 @@ _REPLACE = re.compile(
     + r" -Pattern " + _LITERAL + r" \| ForEach-Object \{\$_\.Line\})?"
 )
 _MAX_BYTES = 8 * 1024**2
+_CREATE = re.compile(
+    r"\[IO\.File\]::WriteAllText\(\(Join-Path \(Get-Location\) " + _LITERAL
+    + r"\), " + _LITERAL + r", \[Text\.UTF8Encoding\]::new\(\$false\)\)"
+)
 
 
 class _Pairs(list):
@@ -73,6 +77,26 @@ def _powershell(command):
             and argv[1].casefold() == "-command"):
         return argv[2].replace("\r\n", "\n").strip()
     return ""
+
+
+def attest_new_files(root, added, records):
+    """Accept only settled, literal UTF-8 writes reproduced as data."""
+    _, completed, transcript_sha = records
+    receipts = {}
+    for item, command, _, _ in completed:
+        match = _CREATE.fullmatch(_powershell(command))
+        if match is None:
+            continue
+        name, content = match.groups()
+        if name not in added:
+            continue
+        data = content.encode("utf-8")
+        if name in receipts or (root / name).read_bytes() != data:
+            raise Blocked("New file differs from its unique settled literal write")
+        receipts[name] = {"item": item, "command_sha256": digest(command), "sha256": sha256(data).hexdigest()}
+    if receipts.keys() != added:
+        raise Blocked("New files lack a supported settled literal write receipt")
+    return {"added": receipts, "transcript_sha256": transcript_sha}
 
 
 def _read_only(script):
