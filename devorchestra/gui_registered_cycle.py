@@ -632,7 +632,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 quota_mode = result.get("token_mode") == SUBSCRIPTION_MODE
                 updated_roles = checkpoint.get("updated_role_instructions", ())
                 instruction_note = ("\n새 승인부터 최신 개발 지침을 적용합니다 · "
-                                    + ", ".join("전역" if role == "global" else ROLE_LABELS[role] for role in updated_roles)
+                                    + ", ".join({"global": "전역", "verifier": "독립 Verifier"}.get(
+                                        role, ROLE_LABELS.get(role, role)) for role in updated_roles)
                                     if updated_roles else "")
                 instruction_note += _play_approval(result)
                 if checkpoint.get("mode") == "postprocess":
