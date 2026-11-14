@@ -640,6 +640,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     role = ROLE_LABELS[checkpoint["saved_response"]["phase"]]
                     action = (f"저장된 {role} 응답의 판정을 확정할 수 없어 같은 후보로 {role}만 다시 호출합니다. "
                               if checkpoint.get("rerun_phase") else f"저장된 {role} 응답과 현재 후보를 사용합니다. ")
+                    if checkpoint.get("unavailable_visual_response"):
+                        action = ("저장된 시각 검토는 미검증으로 보존합니다. 같은 이미지를 다시 전송하지 않고 "
+                                  "Reviewer가 코드를 별도로 검토합니다. ")
                     summary = (f"{project}\n복제본 {result['replica']}\n"
                                f"{action}"
                                f"{checkpoint['cycle']}사이클의 남은 판정부터 이어갑니다.\n"

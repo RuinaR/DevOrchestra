@@ -210,17 +210,18 @@ def parse(message, frame_ids, changed_files=()):
     except (ValueError, TypeError, RecursionError, Blocked):
         raise Blocked("Visual Reviewer did not return a unique JSON object") from None
     try:
-        if type(result) is dict and result.get("verdict") == "UNAVAILABLE":
-            raise Blocked("Visual Reviewer reported unavailable images")
         if (type(result) is not dict or set(result) != {"verdict", "observations", "findings", "not_verified", "code_finding"}
                 or result["verdict"] not in ("ACCEPT", "REWORK", "UNAVAILABLE")
                 or type(result["observations"]) is not list
-                or not len(frame_ids) <= len(result["observations"]) <= len(frame_ids) * MAX_OBSERVATIONS_PER_FRAME
+                or len(result["observations"]) > len(frame_ids) * MAX_OBSERVATIONS_PER_FRAME
                 or type(result["findings"]) is not list or len(result["findings"]) > MAX_FINDINGS
                 or type(result["not_verified"]) is not list or len(result["not_verified"]) > MAX_NOT_VERIFIED
                 or not all(_description(item) for item in result["not_verified"])):
             raise ValueError
         code = result["code_finding"]
+        unavailable = result["verdict"] == "UNAVAILABLE"
+        if unavailable and (code is not None or result["findings"] or not result["not_verified"]):
+            raise ValueError
         if code is not None and (type(code) is not dict or set(code) != {"file", "observed"}
                                  or code["file"] not in changed_files or not _description(code["observed"])):
             raise ValueError
@@ -236,7 +237,7 @@ def parse(message, frame_ids, changed_files=()):
             if len(group) == MAX_OBSERVATIONS_PER_FRAME:
                 raise ValueError
             group.append(observation["visible"])
-        if list(by_frame) != list(frame_ids):
+        if list(by_frame) != [frame for frame in frame_ids if not unavailable or frame in by_frame]:
             raise ValueError
         fields = {"id", "kind", "severity", "frame", "observed", "expected", "reproduce", "fix",
                   "basis", "uncertainty"}

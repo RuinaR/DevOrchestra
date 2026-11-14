@@ -12,6 +12,18 @@ from devorchestra.native_developer_trial import _exec_argv
 
 
 class VisualReviewTests(unittest.TestCase):
+    def test_unavailable_preserves_partial_observations_without_approval(self):
+        report = {"verdict": "UNAVAILABLE", "observations": [{"frame": "F2", "visible": "Startup logo"}],
+                  "not_verified": ["Menu layout"], "code_finding": None, "findings": []}
+        parsed, blockers = visual_review.parse(dumps(report), ["F1", "F2"])
+        self.assertEqual("UNAVAILABLE", parsed["verdict"])
+        self.assertEqual(report["observations"], parsed["observations"])
+        self.assertEqual([], blockers)
+        for invalid in ({"verdict": "ACCEPT"}, {"not_verified": []},
+                        {"code_finding": {"file": "game.txt", "observed": "Defect"}}):
+            with self.subTest(invalid=invalid), self.assertRaises(Blocked):
+                visual_review.parse(dumps({**report, **invalid}), ["F1", "F2"], ["game.txt"])
+
     def test_image_dispatch_keeps_settled_response_after_owned_job_recovery(self):
         from devorchestra.mxc_host_probe import OwnedMxcStopped
 

@@ -505,7 +505,7 @@ class _FixtureSession:
                  decision_parser=None, raw_decision=False,
                  context="This is an isolated arithmetic fixture.", extra_read_roots=(), scratch_root=None,
                  images=(), image_evidence=(), response_schema=None, play_step=None, operation_check=None,
-                 tool_environment_root=None):
+                 tool_environment_root=None, code_review_only=False):
         self.check()
         self.check_image()
         research = self.scope.get("research") == "CODEX_LIVE" and phase in {"manager-planning", "developer"}
@@ -518,6 +518,8 @@ class _FixtureSession:
                                       or response_schema is None or operation_check is None):
             raise Blocked("Play action selection requires an approved owned-window observation")
         label = f"{cycle}-{phase}" + (f"-play-{play_step}" if play_step is not None else "")
+        if code_review_only:
+            label += "-code-only"
         limit = self.scope["role_tokens"][phase]
         graceful = "graceful_stop" in self.scope
         if _FixtureSession.model_calls_exhausted(self):
@@ -557,6 +559,7 @@ class _FixtureSession:
         self.record("native_inspection_role_intent", cycle=cycle, phase=phase, target=target,
                     role_call=self.calls, source_sha256=self.source(), prompt_sha256=digest(prompt),
                     **({"play_step": play_step} if play_step is not None else {}),
+                    **({"code_review_only": True} if code_review_only else {}),
                     **({"image_evidence": list(image_evidence)} if images else {}))
         role_log = self.logs(label)
         self.check()

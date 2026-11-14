@@ -1058,7 +1058,7 @@ class RegisteredSession(_FixtureSession):
                     raise Blocked("복제본의 프로젝트 도구 폴더가 정리되지 않았습니다. 소유권 확인이 필요합니다.")
 
     def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=(), allowed_paths=None,
-             response_schema=None, selected_tools=None):
+             response_schema=None, selected_tools=None, code_review_only=False):
         saved = getattr(self, "saved_response", None)
         if saved:
             if ((cycle, phase, key) != (saved["cycle"], saved["phase"], saved["target"])
@@ -1157,6 +1157,7 @@ class RegisteredSession(_FixtureSession):
                                                     tool_environment_root=runtime_root,
                                                     shell_tools=phase in self.scope["shell_roles"] and not images,
                                                     images=images, image_evidence=image_evidence,
+                                                    code_review_only=code_review_only,
                                                     response_schema=response_schema,
                                                     decision_parser=(_final_decision if phase == "manager-final" else None),
                                                     raw_decision=True,
@@ -1536,6 +1537,19 @@ def _review_and_verify(session, count, key, diff, status):
                            source_sha256=session.source(), status="ANALYSIS_FAILED", reason=str(error),
                            **provenance)
             raise VerdictError("Reviewer image response failed the strict visual contract") from error
+        if report["verdict"] == "UNAVAILABLE":
+            session.signoff_state["visual_unavailable"] = report["response_sha256"]
+            session.signoff_state["pending_visual"] = {"receipt": capture, "frames": []}
+            session.record("native_inspection_visual_review", cycle=count, target=key, verdict="UNAVAILABLE",
+                           findings=[], frames=evidence, response_sha256=report["response_sha256"],
+                           observations=visual.safe_findings(report["observations"]),
+                           not_verified=visual.safe_unverified(report["not_verified"]),
+                           source_sha256=session.source(), status="NOT_VERIFIED", reason="IMAGE_EVIDENCE_INSUFFICIENT",
+                           **provenance)
+            session.phases.append({"cycle": count, "phase": "visual-review", "outcome": "NOT_VERIFIED",
+                                   "reason": "IMAGE_EVIDENCE_INSUFFICIENT"})
+            evidence = []
+    if evidence:
         review = report["verdict"]
         findings = visual.safe_findings(report["findings"])
         code = visual.safe_findings([report["code_finding"]])[0] if report["code_finding"] else None
@@ -1555,7 +1569,9 @@ def _review_and_verify(session, count, key, diff, status):
         session.phases.append({"cycle": count, "phase": "visual-review", "outcome": "MODEL_ANALYSIS_REPORTED",
                                "verdict": review, "finding_count": len(findings)})
     else:
-        if capture is not None:
+        if session.signoff_state.get("visual_unavailable"):
+            prompt += "\nThe visual review found insufficient image evidence. Review the code only. Visual quality is NOT_VERIFIED."
+        elif capture is not None:
             reason = ("NO_VISIBLE_CLIENT" if play_report.get("outcome") == "NO_VISIBLE_CLIENT" else
                       capture.get("visual_preview", {}).get("reason", "NO_OWNED_GUI_CAPTURE"))
             session.record("native_inspection_visual_review", cycle=count, target=key, verdict="UNAVAILABLE",
@@ -1565,7 +1581,8 @@ def _review_and_verify(session, count, key, diff, status):
                                    "reason": reason})
             prompt += "\nNo owned GUI image is available. Review the code only. Visual quality is NOT_VERIFIED."
         raw = session.call(count, "reviewer", key, prompt +
-                           "\nReturn JSON with verdict (ACCEPT or REWORK) and a reason string with concrete evidence.")
+                           "\nReturn JSON with verdict (ACCEPT or REWORK) and a reason string with concrete evidence.",
+                           **({"code_review_only": True} if session.signoff_state.get("visual_unavailable") else {}))
         review, finding, truncated = _parse_verdict(raw, REVIEW_VERDICTS)
         decision = f"{review} · {_safe_feedback(finding)}" if finding else review
     _record_feedback(session, count, key, "reviewer", review, raw, finding,
@@ -1634,6 +1651,12 @@ def _verify_signoff(session, count, key, status):
     for item, value in comparison["criteria"].items():
         if item != key and status[item] == "NOT_STARTED" and value == "BLOCKED":
             comparison["criteria"][item] = "NOT_STARTED"
+    if unavailable := session.signoff_state.get("visual_unavailable"):
+        comparison["visual_unavailable_sha256"] = unavailable
+        if comparison["criteria"][key] == "VERIFIED":
+            comparison["criteria"][key] = "USER_TEST_REQUIRED"
+            if key in comparison["newly_verified"]:
+                comparison["newly_verified"].remove(key)
     session.progress = comparison["criteria"]
     session.cycles_checked = count
     session.signoff_state["comparison"] = comparison
@@ -1737,6 +1760,8 @@ def _decide(session, count, key, review, comparison, expected):
     if expected == "USER_TEST_REQUIRED":
         manual = ("The independent checks recorded their observations. Reply USER_TEST_REQUIRED and explain "
                   "which functional evidence is still missing. ")
+        if comparison.get("visual_unavailable_sha256"):
+            manual += "The visual Reviewer saw insufficient evidence. Visual quality remains unverified. "
     waiting_for_preview = (session.scope.get("visual_preview") and expected == "CONTINUE"
                            and not comparison.get("visual_review_sha256"))
     if waiting_for_preview:
@@ -1906,6 +1931,8 @@ def _expected_final(scope, key, comparison, review):
         return "REWORK"
     if status[key] not in {"VERIFIED", "USER_TEST_REQUIRED"}:
         return "REWORK"
+    if comparison.get("visual_unavailable_sha256"):
+        return "USER_TEST_REQUIRED"
     if all(value == "VERIFIED" for value in status.values()):
         if (scope.get("adaptive_play") and not scope.get("project_evidence_contract")
                 and comparison.get("adaptive_play_actions", 0) < adaptive_play.STEPS):
@@ -2928,7 +2955,8 @@ def _response_ref(start, intent, role):
     return {"workspace": start["workspace"], "cycle": role["cycle"], "phase": role["phase"],
             "target": role["target"], "message_sha256": role["message_sha256"],
             "provider_usage": role["provider_usage"], "source_sha256": intent["source_sha256"],
-            "images": intent.get("image_evidence", []), "commands_sha256": digest(role.get("command_events", []))}
+            "images": intent.get("image_evidence", []), "commands_sha256": digest(role.get("command_events", [])),
+            **({"code_review_only": True} if intent.get("code_review_only") else {})}
 
 
 def _read_cli_role_evidence(ledger, ref, scope):
@@ -2938,7 +2966,8 @@ def _read_cli_role_evidence(ledger, ref, scope):
             or type(ref["cycle"]) is not int or ref["cycle"] < 1):
         raise Blocked("보존된 역할 응답 경로를 확인할 수 없습니다.")
     limit = scope.get("model_output_bytes", 262144)
-    path = ledger.local_directory("temp") / ref["workspace"] / "tmp" / f"{ref['cycle']}-{phase}" / "probe.stdout"
+    label = f"{ref['cycle']}-{phase}" + ("-code-only" if ref.get("code_review_only") else "")
+    path = ledger.local_directory("temp") / ref["workspace"] / "tmp" / label / "probe.stdout"
     try:
         raw = _read_observation(path, limit + 1)
         if len(raw) > limit:
@@ -3292,9 +3321,11 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
             raise Blocked("시각 검토 화면이 응답과 일치하지 않습니다.")
         visual.read_frames(ledger, ref["images"])
     rerun = False
+    unavailable_visual_response = False
     try:
         if ref["images"]:
-            visual.parse(message, [frame["id"] for frame in ref["images"]], checkpoint["changed"])
+            report, _ = visual.parse(message, [frame["id"] for frame in ref["images"]], checkpoint["changed"])
+            unavailable_visual_response = report["verdict"] == "UNAVAILABLE"
         else:
             verdict, reason, _ = _parse_verdict(message, REVIEW_VERDICTS if role["phase"] == "reviewer" else FINAL_VERDICTS)
             if role["phase"] == "manager-final":
@@ -3313,10 +3344,12 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
             raise Blocked("판정이 유효하지 않습니다. 같은 후보에서 이 검토 역할을 다시 실행하려면 새 예산이 필요합니다.")
     resume = {key: checkpoint[key] for key in ("cycle", "criterion", "criteria_status", "changed", "continuation",
                                                "review", "review_feedback", "play_report", "comparison", "verification", "documentation",
-                                               "visual", "pending_visual")
+                                               "visual", "pending_visual", "visual_unavailable")
               if key in checkpoint}
     resume.update(mode="postprocess", parent_run_id=start["run_id"], saved_response=ref,
                   parent_reported_tokens=end["known_reported_tokens"], changed_total=end["changed"])
+    if unavailable_visual_response:
+        resume["unavailable_visual_response"] = True
     if rerun:
         resume["rerun_phase"] = role["phase"]
         if direct:
@@ -3507,6 +3540,13 @@ def _resume_remaining(session, diff):
                              "documentation": bool(resume.get("documentation"))}
     if resume.get("pending_visual"):
         session.signoff_state["pending_visual"] = resume["pending_visual"]
+    if resume.get("visual_unavailable"):
+        session.signoff_state["visual_unavailable"] = resume["visual_unavailable"]
+    if resume.get("unavailable_visual_response"):
+        session.record("native_inspection_visual_code_review_required", cycle=count, target=key,
+                       parent_run_id=resume["parent_run_id"],
+                       response_sha256=resume["saved_response"]["message_sha256"],
+                       reason="IMAGE_EVIDENCE_INSUFFICIENT")
     if resume.get("continuation"):
         session.signoff_state["continuation"] = resume["continuation"]
     if resume.get("review_feedback"):
