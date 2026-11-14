@@ -2357,17 +2357,33 @@ def _interrupted_play(rows):
     if len(rows) < 6:
         return False
     intent, role, play, end = rows[-4:]
+    step = intent.get("play_step")
+    if type(step) is not int or step < 1:
+        return False
+    action_kinds = {"native_inspection_play_action_intent", "native_inspection_play_action_result"}
+    actions = [row for row in rows[:-4] if row["kind"] in action_kinds and row.get("cycle") == intent.get("cycle")]
+    if len(actions) != 2 * (step - 1):
+        return False
+    for expected_step, (proposed, result) in enumerate(zip(actions[::2], actions[1::2]), 1):
+        action = proposed.get("action", {})
+        if (proposed["kind"] != "native_inspection_play_action_intent"
+                or result["kind"] != "native_inspection_play_action_result"
+                or proposed.get("step") != expected_step or result.get("step") != expected_step
+                or proposed.get("target") != intent.get("target") or result.get("target") != intent.get("target")
+                or action.get("action") not in {"wait", "observe"} or action != result.get("action")
+                or result.get("result") not in {"SCREEN_CHANGED", "SCREEN_UNCHANGED"}):
+            return False
     return (intent["kind"] == "native_inspection_role_intent"
             and role["kind"] == "native_inspection_role_result"
             and intent.get("phase") == role.get("phase") == "reviewer"
-            and intent.get("play_step") == role.get("play_step") == 1
+            and role.get("play_step") == step
             and role.get("outcome") == end.get("outcome") == "REQUEST_UNKNOWN"
             and role.get("provider_usage") == "UNKNOWN" and end.get("usage_complete") is False
             and role.get("process_result") == "TERMINATED_AND_DRAINED"
             and role.get("process_stop_reason") == "Owned game became the foreground window"
             and role.get("owned_tree") == play.get("owned_tree") == end.get("owned_tree") == "DRAINED"
             and play["kind"] == "native_inspection_play_finished" and play.get("outcome") == "PLAY_INTERRUPTED"
-            and play.get("inputs") == play.get("actions") == 0
+            and play.get("inputs") == 0 and play.get("actions") == step - 1
             and end["kind"] == "native_inspection_result"
             and end.get("staging_cleanup") == {"status": "RETAINED_FOR_RECOVERY",
                                                "workspace": rows[0].get("workspace")}
@@ -2383,8 +2399,10 @@ def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
     interrupted_play = _interrupted_play(rows)
     finished = rows[:-4] if interrupted_play else rows
     cycle = rows[-2]["cycle"] if interrupted_play else rows[-3]["cycle"]
-    role = next((row for row in reversed(finished) if row["kind"] == "native_inspection_role_result"), {})
-    intent = next((row for row in reversed(finished) if row["kind"] == "native_inspection_role_intent"), {})
+    role = next((row for row in reversed(finished)
+                 if row["kind"] == "native_inspection_role_result" and "play_step" not in row), {})
+    intent = next((row for row in reversed(finished)
+                   if row["kind"] == "native_inspection_role_intent" and "play_step" not in row), {})
     candidate = next((row for row in reversed(finished)
                       if row["kind"] == "native_inspection_developer_diff" and row.get("cycle") == cycle), {})
     target = role.get("target")
@@ -2396,7 +2414,7 @@ def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
             or len(dispatched) != len(settled) or len(settled) + unsettled_count != end.get("model_turns_dispatched")
             or (interrupted_play and rows[-4].get("role_call") != end.get("model_turns_dispatched"))
             or any(not isinstance(row.get("provider_usage"), dict)
-                   or any(row.get(field) != call.get(field) for field in ("cycle", "phase", "target"))
+                   or any(row.get(field) != call.get(field) for field in ("cycle", "phase", "target", "play_step"))
                    for row, call in zip(settled, dispatched))
             or sum(row["provider_usage"]["input_tokens"] + row["provider_usage"]["output_tokens"]
                    for row in settled) != end.get("known_reported_tokens")

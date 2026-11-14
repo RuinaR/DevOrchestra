@@ -375,15 +375,12 @@ def run(session, cycle, key, verification, context):
                     prompt += (" For text, x,y must point to an approved standard Windows edit control, "
                                "ms=0, and text is a non-sensitive test string of at most 120 printable characters. "
                                "Use an empty text field for other actions.")
-                def check_play():
-                    window.check()
-                    if window.is_foreground():
-                        raise Blocked("Owned game became the foreground window")
-
                 try:
+                    # A focus change cannot send input during a read-only decision.
+                    # Keep the call alive and check focus again before applying it.
                     response, _ = session.dispatch(cycle, "reviewer", key, prompt, shell_tools=False, images=paths,
                                                    image_evidence=[frame], response_schema=schema(policy["actions"]), play_step=step,
-                                                   operation_check=check_play)
+                                                   operation_check=window.check)
                 except Blocked as error:
                     if str(error) != "PLAY_QUOTA_REFRESH":
                         raise
@@ -418,6 +415,11 @@ def run(session, cycle, key, verification, context):
                     outcome = "REVIEWER_STOP"
                     session.record("native_inspection_play_action_result", cycle=cycle, target=key, step=step,
                                    action=action, result="NO_INPUT")
+                    return
+                if window.is_foreground():
+                    outcome = "FOREGROUND_UNSAFE"
+                    session.record("native_inspection_play_action_result", cycle=cycle, target=key, step=step,
+                                   action=action, result="FOREGROUND_BEFORE_INPUT")
                     return
                 try:
                     apply(window, proposed, client)
