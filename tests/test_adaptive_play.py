@@ -20,6 +20,18 @@ def proposal(action="keys", keys=("ENTER",), ms=45, x=0, y=0):
 
 
 class PlayTests(unittest.TestCase):
+    def test_fast_capture_is_opt_in_and_preserves_legacy_approval(self):
+        legacy = adaptive_play.approval(godot=True)
+        self.assertNotIn("capture_fps", legacy)
+        for rate in (30, 60):
+            policy = adaptive_play.approval(godot=True, capture_fps=rate)
+            self.assertEqual(policy, {**legacy, "capture_fps": rate})
+            self.assertNotEqual(digest(legacy), digest(policy))
+            adaptive_play.validate_policy(policy)
+        for rate in (True, 0, 120, "30"):
+            with self.subTest(rate=rate), self.assertRaises(Blocked):
+                adaptive_play.validate_policy({**legacy, "capture_fps": rate})
+
     def test_text_requires_current_control_contract(self):
         client = (0, 0, 500, 300)
         action = {**proposal("text", (), 0, 55, 30), "text": "QA sample"}

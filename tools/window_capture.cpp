@@ -27,7 +27,14 @@ bool same_window(HWND window, DWORD pid, DWORD thread) {
     return GetWindowThreadProcessId(window, &actual_pid) == thread && actual_pid == pid;
 }
 
-HRESULT capture(HWND window, DWORD pid, DWORD thread, const RECT& bounds, unsigned char* pixels) {
+struct Burst {
+    int fps{};
+    unsigned frames{}, superseded{};
+    unsigned long long elapsed_ms{};
+    long long last_frame_100ns{};
+};
+
+HRESULT capture(HWND window, DWORD pid, DWORD thread, const RECT& bounds, unsigned char* pixels, Burst& burst) {
     if (!GraphicsCaptureSession::IsSupported()) return E_NOTIMPL;
     RECT visible{};
     check_hresult(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &visible, sizeof(visible)));
@@ -56,7 +63,7 @@ HRESULT capture(HWND window, DWORD pid, DWORD thread, const RECT& bounds, unsign
     com_ptr<::IInspectable> wrapped;
     check_hresult(CreateDirect3D11DeviceFromDXGIDevice(device.as<IDXGIDevice>().get(), wrapped.put()));
     auto pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-        wrapped.as<IDirect3DDevice>(), DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+        wrapped.as<IDirect3DDevice>(), DirectXPixelFormat::B8G8R8A8UIntNormalized, burst.fps ? 3 : 2, size);
     CloseOnExit<Direct3D11CaptureFramePool> close_pool{pool};
     auto session = pool.CreateCaptureSession(item);
     CloseOnExit<GraphicsCaptureSession> close_session{session};
@@ -70,6 +77,37 @@ HRESULT capture(HWND window, DWORD pid, DWORD thread, const RECT& bounds, unsign
         if (!same_window(window, pid, thread)) return E_HANDLE;
         if (GetTickCount64() >= deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
         Sleep(15);
+    }
+    if (burst.fps) {
+        const auto start = GetTickCount64();
+        burst.frames = 1;
+        auto next_sample = start + 1000 / burst.fps;
+        while (GetTickCount64() < start + 1000) {
+            RECT current{};
+            if (!same_window(window, pid, thread) || !GetWindowRect(window, &current) ||
+                !EqualRect(&bounds, &current)) return HRESULT_FROM_WIN32(ERROR_RETRY);
+            if (GetTickCount64() < next_sample) {
+                Sleep(1);
+                continue;
+            }
+            // Drain the bounded pool and keep only the most recent completed frame.
+            auto latest = pool.TryGetNextFrame();
+            if (latest) {
+                if (auto newer = pool.TryGetNextFrame()) {
+                    latest.Close();
+                    latest = std::move(newer);
+                    ++burst.superseded;
+                }
+                frame.Close();
+                frame = std::move(latest);
+                ++burst.frames;
+            }
+            // Increment from the start clock to avoid accumulating rounding error.
+            const auto samples = (GetTickCount64() - start) * burst.fps / 1000 + 1;
+            next_sample = start + (samples * 1000 + burst.fps - 1) / burst.fps;
+        }
+        burst.elapsed_ms = GetTickCount64() - start;
+        burst.last_frame_100ns = frame.SystemRelativeTime().count();
     }
     const auto content = frame.ContentSize();
     RECT current{};
@@ -92,10 +130,11 @@ HRESULT capture(HWND window, DWORD pid, DWORD thread, const RECT& bounds, unsign
     context->CopyResource(staging.get(), texture.get());
     D3D11_MAPPED_SUBRESOURCE mapped{};
     HRESULT result{};
+    const auto map_deadline = GetTickCount64() + 500;
     do {
         result = context->Map(staging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
         if (result != DXGI_ERROR_WAS_STILL_DRAWING) break;
-        if (GetTickCount64() >= deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        if (GetTickCount64() >= map_deadline) return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
         Sleep(5);
     } while (true);
     check_hresult(result);
@@ -114,7 +153,13 @@ HRESULT capture(HWND window, DWORD pid, DWORD thread, const RECT& bounds, unsign
 }
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 7) return 2;
+    if (argc != 7 && argc != 8) return 2;
+    Burst burst{};
+    if (argc == 8) {
+        if (wcscmp(argv[7], L"30") == 0) burst.fps = 30;
+        else if (wcscmp(argv[7], L"60") == 0) burst.fps = 60;
+        else return 2;
+    }
     auto window = reinterpret_cast<HWND>(_wcstoui64(argv[1], nullptr, 10));
     DWORD pid = wcstoul(argv[2], nullptr, 10), thread = wcstoul(argv[3], nullptr, 10);
     int width = _wtoi(argv[4]), height = _wtoi(argv[5]);
@@ -126,7 +171,7 @@ int wmain(int argc, wchar_t** argv) {
         // This short-lived worker owns the COM apartment until process exit.
         init_apartment(apartment_type::multi_threaded);
         std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 4);
-        const HRESULT status = capture(window, pid, thread, bounds, pixels.data());
+        const HRESULT status = capture(window, pid, thread, bounds, pixels.data(), burst);
         if (FAILED(status)) {
             printf("0x%08lX\n", static_cast<unsigned long>(status));
             return 4;
@@ -135,7 +180,16 @@ int wmain(int argc, wchar_t** argv) {
         if (_wfopen_s(&file, argv[6], L"wbx") || !file) return 5;
         const auto written = fwrite(pixels.data(), 1, pixels.size(), file);
         const auto closed = fclose(file);
-        return written == pixels.size() && !closed ? 0 : 5;
+        if (written != pixels.size() || closed) return 5;
+        if (burst.fps) {
+            LARGE_INTEGER now{}, frequency{};
+            if (!QueryPerformanceCounter(&now) || !QueryPerformanceFrequency(&frequency)) return 6;
+            const auto now_100ns = static_cast<long long>(now.QuadPart * 10000000.0 / frequency.QuadPart);
+            const auto age_us = (now_100ns - burst.last_frame_100ns) / 10;
+            printf("%u %u %llu %lld %lld\n", burst.frames, burst.superseded,
+                   burst.elapsed_ms, burst.last_frame_100ns, age_us);
+        }
+        return 0;
     } catch (...) {
         printf("0x%08lX\n", static_cast<unsigned long>(to_hresult()));
         return 4;

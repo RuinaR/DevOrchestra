@@ -55,6 +55,8 @@ def _scope_preferences(scope):
     if policy := scope.get("adaptive_play"):
         values.update((field, str(policy[key])) for field, key in PLAY_FIELDS.items() if key in policy)
         values["play_foreground"] = policy.get("foreground") is True
+        if "capture_fps" in policy:
+            values["capture_fps"] = str(policy["capture_fps"])
     if git := scope.get("direct_git"):
         values["direct_branch"] = git["ref"].removeprefix("refs/heads/")
     return values
@@ -160,6 +162,9 @@ def _play_approval(scope):
         extra = "창 내부 스크롤과 제한된 크기 변경을 허용합니다. " if "scroll" in play["actions"] else ""
         if "text" in play["actions"]:
             extra += "표준 Windows 편집 컨트롤에 시험 문자열 입력을 허용합니다. "
+        if "capture_fps" in play:
+            extra += (f"Windows Graphics Capture 최대 {play['capture_fps']}FPS로 관찰마다 1초 동안 수집하고 "
+                      "마지막 소유 창 프레임 하나만 사용합니다. ")
         foreground = ("전경 QA · 소유 HWND에 직접 클릭과 키 메시지를 보냅니다. "
                       "창이 전경에서 벗어나면 입력을 중단합니다. "
                       if play.get("foreground") else "")
@@ -300,6 +305,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     use_images = tk.BooleanVar(panel, value=draft.get("use_images") is True)
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
     play_foreground = tk.BooleanVar(panel, value=draft.get("play_foreground") is True)
+    capture_fps = tk.StringVar(panel, value=draft.get("capture_fps", ""))
     direct_branch = tk.StringVar(panel, value="" if local else draft.get("direct_branch", ""))
     reboot_request = tk.StringVar(panel)
     auto_apply = tk.BooleanVar(panel)
@@ -325,6 +331,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             entry.grid(row=row, column=1, sticky="w")
         ttk.Label(limits, text="빈 값은 기본값을 사용합니다. 저장된 세션은 기존 승인 한도를 유지합니다.").grid(
             row=2, column=0, columnspan=2, sticky="w")
+        ttk.Label(limits, text="소유 창 고속 캡처 상한 (FPS)").grid(row=3, column=0, sticky="w")
+        ttk.Combobox(limits, textvariable=capture_fps, values=("", "30", "60"),
+                     state="readonly", width=12).grid(row=3, column=1, sticky="w")
     ttk.Button(body, text="시각 검토 결과와 캡처 보기",
                command=lambda: _open_visual_report(center, runner, project)).pack(anchor="w")
     if is_godot and project == game_pilot.PROJECT and not resume_only:
@@ -440,7 +449,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         preferences.update((key, entries[key].get()) for key in (*BUDGET_FIELDS, "files"))
         preferences.update(whole_replica=whole.get(), token_mode=SUBSCRIPTION_MODE if subscription.get() else "fixed",
                            use_images=use_images.get(), use_play=use_play.get(),
-                           play_foreground=play_foreground.get(), direct_branch=direct_branch.get().strip())
+                           play_foreground=play_foreground.get(), direct_branch=direct_branch.get().strip(),
+                           capture_fps=capture_fps.get())
         preferences.update((field, entry.get().strip()) for field, entry in play_entries.items())
         if spec is not None:
             try:
@@ -958,7 +968,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     files, permissions, verifier, role_tokens["manager-planning"])
             play = use_play.get()
-            if play and (play_foreground.get() or any(entry.get().strip() for entry in play_entries.values())):
+            if play and (play_foreground.get() or capture_fps.get()
+                         or any(entry.get().strip() for entry in play_entries.values())):
                 from . import adaptive_play
                 default = adaptive_play.approval(godot=registered_cycle.godot_verifier_spec(verifier))
                 try:
@@ -966,7 +977,10 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                             for field, key in PLAY_FIELDS.items()}
                 except ValueError as error:
                     raise ValueError("AI 플레이 입력 횟수와 실행 시간은 정수로 입력하세요.") from error
-                adaptive_play.approval(limits=play, foreground=play_foreground.get())
+                rate = int(capture_fps.get()) if capture_fps.get() else None
+                adaptive_play.approval(limits=play, foreground=play_foreground.get(), capture_fps=rate)
+                if rate is not None:
+                    play["capture_fps"] = rate
                 if play_foreground.get():
                     play["foreground"] = True
         except (RuntimeError, ValueError) as error:

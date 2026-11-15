@@ -53,23 +53,32 @@ def _legacy_approval():
             "max_keys": MAX_KEYS, "max_hold_ms": MAX_HOLD_MS}
 
 
-def approval(*, godot=False, limits=None, window_actions=False, control_actions=False, foreground=False):
+def approval(*, godot=False, limits=None, window_actions=False, control_actions=False, foreground=False,
+             capture_fps=None):
+    if capture_fps is not None and (type(capture_fps) is not int or capture_fps not in (30, 60)):
+        raise Blocked("Owned window capture must use 30 or 60 FPS")
     actions = list(CONTROL_ACTIONS if control_actions else WINDOW_ACTIONS if window_actions else ACTIONS)
+    capture = {"capture_fps": capture_fps} if capture_fps is not None else {}
     if foreground:
         actions = ["keys", "click", "wait", "observe", "stop"]
     if limits is None:
         return {**_legacy_approval(), "steps": GODOT_DECISIONS if godot else 6,
                 "seconds": GODOT_SECONDS if godot else SECONDS, "input_steps": GODOT_INPUTS if godot else STEPS,
-                "actions": actions, **({"foreground": True} if foreground else {})}
+                "actions": actions, **({"foreground": True} if foreground else {}), **capture}
     if (type(limits) is not dict or limits.keys() != {"input_steps", "seconds"}
             or type(limits["input_steps"]) is not int or not 1 <= limits["input_steps"] <= MAX_INPUT_STEPS
             or type(limits["seconds"]) is not int or not 60 <= limits["seconds"] <= MAX_PLAY_SECONDS):
         raise Blocked("AI 플레이 입력은 1~64회, 실행 시간은 60~1,800초로 지정하세요.")
     return {**_legacy_approval(), **limits, "steps": limits["input_steps"] * 2, "actions": actions,
-            **({"foreground": True} if foreground else {})}
+            **({"foreground": True} if foreground else {}), **capture}
 
 
 def validate_policy(policy):
+    if isinstance(policy, dict) and "capture_fps" in policy:
+        fps = policy["capture_fps"]
+        if type(fps) is not int or fps not in (30, 60):
+            raise Blocked("Approved capture rate changed")
+        policy = {key: value for key, value in policy.items() if key != "capture_fps"}
     if isinstance(policy, dict) and policy.get("foreground") is True:
         limits = {key: policy.get(key) for key in ("input_steps", "seconds")}
         if (policy == approval(foreground=True) or policy == approval(godot=True, foreground=True)
@@ -485,7 +494,8 @@ def run(session, cycle, key, verification, context):
                         outcome = "INPUT_LIMIT"
                     return
 
-        inspect_owned_window(api, job, deadline, session.check, None, workers, play=play, executable=binary)
+        inspect_owned_window(api, job, deadline, session.check, None, workers, play=play, executable=binary,
+                             capture_fps=policy.get("capture_fps"))
 
     argv = [*trial_flags(session.work, writable=False, tool_root=directory, shell_tools=False, runtime_root=runtime_root),
             *_args(binary, *args, profile=PROFILE)]

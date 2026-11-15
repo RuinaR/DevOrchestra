@@ -151,18 +151,20 @@ def _client_uniform(data, width, height, client):
     return True
 
 
-def _graphics_capture(window, width, height, parent):
+def _graphics_capture(window, width, height, parent, *, fps=None):
     from .mxc_host_probe import OwnedMxcStopped, _observe
     import os
 
     helper = Path(__file__).with_name("window_capture.exe")
     if not helper.is_file():
-        return None, "NOT_INSTALLED"
+        return None, "NOT_INSTALLED", None
     with TemporaryDirectory(prefix="wgc-", dir=parent) as folder:
         scratch = Path(folder)
         pixels = scratch / "frame.bgra"
         window.check()
         argv = [str(value) for value in (window.owned("root"), window.pid, window.thread, width, height, pixels)]
+        if fps is not None:
+            argv.append(str(fps))
         try:
             result = _observe(helper, argv, scratch, scratch, {"SystemRoot": os.environ["SystemRoot"]},
                               seconds=4, check=window.check, process_limit=1, output_limit=128)
@@ -170,20 +172,33 @@ def _graphics_capture(window, width, height, parent):
             window.check()
             if str(error) != "MXC probe timeout":
                 raise
-            return None, "TIMEOUT"
+            return None, "TIMEOUT", None
         window.check()
         window.owned("root")
         if result["exitCode"]:
             status = result["stdout"].strip()
-            return None, status if re.fullmatch(r"0x[0-9A-F]{8}", status) else f"EXIT_{result['exitCode']}"
+            return None, (status if re.fullmatch(r"0x[0-9A-F]{8}", status)
+                          else f"EXIT_{result['exitCode']}"), None
         if not pixels.is_file():
-            return None, "MISSING_FRAME"
+            return None, "MISSING_FRAME", None
+        metrics = None
+        if fps is not None:
+            values = result["stdout"].split()
+            if len(values) != 5 or any(not value.isascii() or not value.isdecimal() for value in values):
+                return None, "INVALID_TELEMETRY", None
+            count, superseded, elapsed, timestamp, age = map(int, values)
+            if not (1 <= count <= fps + 1 and superseded <= count and 1000 <= elapsed <= 1500 and timestamp):
+                return None, "INVALID_TELEMETRY", None
+            if age > 500_000:
+                return None, "STALE_FRAME", None
+            metrics = {"requested_fps": fps, "frames": count, "superseded": superseded,
+                       "sample_ms": elapsed, "frame_qpc_100ns": timestamp, "frame_age_us": age}
         with pixels.open("rb") as stream:
             data = stream.read(width * height * 4 + 1)
-        return (data, "CAPTURED") if len(data) == width * height * 4 else (None, "INVALID_FRAME")
+        return (data, "CAPTURED", metrics) if len(data) == width * height * 4 else (None, "INVALID_FRAME", None)
 
 
-def _capture(window, path, workers):
+def _capture(window, path, workers, *, fps=None):
     from concurrent.futures import Future
 
     window.check()
@@ -195,17 +210,18 @@ def _capture(window, path, workers):
 
     def render():
         try:
-            try:
-                data = _render(window.owned("root"), width, height)
-            except OSError:
-                data = None
-            if data is not None and not _client_uniform(data, width, height, client):
-                future.set_result((data, "PRINT_WINDOW", False))
-                return
-            data, status = _graphics_capture(window, width, height, path.parent)
+            if fps is None:
+                try:
+                    data = _render(window.owned("root"), width, height)
+                except OSError:
+                    data = None
+                if data is not None and not _client_uniform(data, width, height, client):
+                    future.set_result((data, "PRINT_WINDOW", False, None))
+                    return
+            data, status, metrics = _graphics_capture(window, width, height, path.parent, fps=fps)
             if data is None:
                 raise Blocked(f"{NO_CLIENT_FRAME} (Windows Graphics Capture: {status})")
-            future.set_result((data, "WINDOWS_GRAPHICS_CAPTURE", _client_uniform(data, width, height, client)))
+            future.set_result((data, "WINDOWS_GRAPHICS_CAPTURE", _client_uniform(data, width, height, client), metrics))
         except Exception as error:
             future.set_exception(error)
 
@@ -215,7 +231,7 @@ def _capture(window, path, workers):
     while not future.done():
         window.check()
         worker.join(0.03)
-    data, backend, uniform = future.result()
+    data, backend, uniform, metrics = future.result()
     window.check()
     if window.dimensions() != (width, height) or window.client_in_image() != client:
         raise Blocked("Owned GUI window changed during capture")
@@ -247,11 +263,11 @@ def _capture(window, path, workers):
             client_digest.update(line[channel::4])
     return {**verified_image(path)[1], "capture_backend": backend, "uniform_client": uniform,
             "captured_at": datetime.now(timezone.utc).isoformat(), "client": list(client),
-            "client_sha256": client_digest.hexdigest()}
+            "client_sha256": client_digest.hexdigest(), **({"capture_metrics": metrics} if metrics else {})}
 
 
 def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None,
-                         play=None, executable=None):
+                         play=None, executable=None, capture_fps=None):
     process = _require(signature(api, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)(0x101000, False, pid))
     member = signature(api, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
     try:
@@ -277,7 +293,7 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
                                values[0].dwHighDateTime, values[0].dwLowDateTime])
 
             def capture(path):
-                return {**_capture(window, path, workers), "window_identity": identity}
+                return {**_capture(window, path, workers, fps=capture_fps), "window_identity": identity}
 
             if play is not None:
                 return play(window, capture)
@@ -315,7 +331,7 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
 
 
 def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None, input_probe=True,
-                         play=None, executable=None):
+                         play=None, executable=None, capture_fps=None):
     user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
     callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
     enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
@@ -347,7 +363,8 @@ def inspect_owned_window(api, job, deadline, check, image_path, workers, *, befo
             pid, hwnd = windows[0]
             sleep(0.4)
             return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=input_probe,
-                                        before_input=before_input, play=play, executable=executable)
+                                        before_input=before_input, play=play, executable=executable,
+                                        capture_fps=capture_fps)
         sleep(0.05)
 
 
