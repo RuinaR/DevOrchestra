@@ -669,11 +669,32 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     return scope
 
 
-def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None, direct_branch=None):
+def _reboot_review(runner, abandoned, project, reboot):
+    from .registered_recovery import reboot_scope, reboot_target, windows_boot_boundary
+
+    if abandoned:
+        raise Blocked("Abandoned slot requires independent ownership recovery")
+    events, head = runner.ledger.snapshot()
+    request, expires = reboot
+    target = reboot_target(events, project, request)
+    boot = windows_boot_boundary(request, target["workspace"])
+    boundary = reboot_scope(events, head, project, request, expires, boot, int(time()))
+    runner._check_idle_diagnostic(events, abandoned, reboot_boundary=boundary)
+    return events, head, boundary
+
+
+def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None, direct_branch=None,
+           reboot=None):
+    from .registered_recovery import bind_reboot
+
     with execution_slot() as abandoned:
-        events, head = runner._idle_diagnostic(abandoned)
-        return _contract(runner, events, head, *args, game_limits=soft_limits, visual_review=visual_review,
-                         play=play, tools=tools, direct_branch=direct_branch)
+        if reboot:
+            events, head, boundary = _reboot_review(runner, abandoned, args[0], reboot)
+        else:
+            events, head = runner._idle_diagnostic(abandoned)
+        scope = _contract(runner, events, head, *args, game_limits=soft_limits, visual_review=visual_review,
+                          play=play, tools=tools, direct_branch=direct_branch)
+        return bind_reboot(scope, boundary) if reboot else scope
 
 
 def _game_args(archive, expires, limits=None):
@@ -3856,10 +3877,10 @@ def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False,
 
 
 def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None,
-        pause=None, play=False, tools=None, direct_branch=None):
+        pause=None, play=False, tools=None, direct_branch=None, reboot=None):
     return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits,
                 visual_review=visual_review, activity=activity, pause=pause, play=play, tools=tools,
-                direct_branch=direct_branch)
+                direct_branch=direct_branch, reboot=reboot)
 
 
 def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False,
@@ -3871,15 +3892,21 @@ def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambd
 
 
 def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False,
-         visual_review=False, activity=None, pause=None, play=False, tools=None, direct_branch=None):
+         visual_review=False, activity=None, pause=None, play=False, tools=None, direct_branch=None, reboot=None):
+    from .registered_recovery import bind_reboot, reboot_admission, reboot_target, windows_boot_boundary
     from .runtime import require_admission
 
     with execution_slot() as abandoned:
-        events, head = runner._idle_diagnostic(abandoned)
+        if reboot:
+            events, head, boundary = _reboot_review(runner, abandoned, args[0], reboot)
+        else:
+            events, head = runner._idle_diagnostic(abandoned)
         scope, diff = (_approved_resume_contract(runner, events, head, args, graceful) if resume
                        else (_contract(runner, events, head, *args, game=game, game_limits=game_limits,
                                        visual_review=visual_review, play=play, tools=tools,
                                        direct_branch=direct_branch), None))
+        if reboot:
+            scope = bind_reboot(scope, boundary)
         if cancelled() or digest(scope) != approval:
             raise Blocked("Registered development approval changed")
         if any(event.get("approval_sha256") == approval for event in events):
@@ -3909,7 +3936,9 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             check_path(path)
             if path.exists():
                 raise Blocked("Unexpected instructions in the dedicated Codex home")
-        identifier = uuid4().hex
+        identifier = digest(boundary)[:32] if reboot else uuid4().hex
+        if reboot and any(identifier in (event.get("run_id"), event.get("request_id")) for event in events):
+            raise Blocked("The reboot execution identity was already used")
         fields = {"state": "DIAGNOSTIC", "request_id": identifier, "run_id": identifier,
                   "project_id": scope["project_id"], "probe_kind": KIND, "approval_sha256": approval}
         with _staging(ledger) as (lab, cleanup):
@@ -3920,9 +3949,19 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                     and not scope["resume"].get("rerun_phase")):
                 ref = scope["resume"]["saved_response"]
                 session.saved_response = {**ref, "message": _read_settled_response(ledger, ref, scope)}
+            if reboot:
+                from . import direct_git
+
+                target = reboot_target(events, scope["project_id"], boundary["old_request_id"])
+                root = Path(scope["replica"])
+                checkout = direct_git.admit(root, session.scratch, session.check, direct_branch)
+                if (cancelled() or windows_boot_boundary(boundary["old_request_id"], target["workspace"])
+                        != boundary["boot"] or digest(snapshot(root)) != boundary["image_sha256"]
+                        or checkout != boundary["direct_git"]):
+                    raise Blocked("Boot evidence or preserved checkout changed before admission")
             session.count, session.fence = ledger.append(
                 len(events), head, {**fields, "kind": "native_inspection_intent", "scope": scope, "started_at": int(time()),
-                                    "workspace": lab.name}, admission=require_admission)
+                                    "workspace": lab.name}, admission=reboot_admission(scope) if reboot else require_admission)
             cleanup["preserve"] = True
             reason = None
             session.signoff_state = {}

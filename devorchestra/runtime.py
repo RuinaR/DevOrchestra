@@ -107,8 +107,8 @@ def last_run(events):
     return []
 
 
-def native_unresolved(events):
-    from .registered_recovery import RECOVERED, verifies
+def _native_pending(events):
+    from .registered_recovery import RECOVERED, reboot_predecessor, verifies
 
     pending = set()
     for index, event in enumerate(events):
@@ -117,6 +117,9 @@ def native_unresolved(events):
         elif event["kind"] == "native_role_result":
             pending.discard(event["agent_run_id"])
         elif event["kind"] == "native_inspection_intent":
+            if event.get("scope", {}).get("reboot_boundary"):
+                if predecessor := reboot_predecessor(events[:index], event):
+                    pending.discard(("inspection", predecessor))
             pending.add(("inspection", event["request_id"]))
         elif event["kind"] == "native_inspection_result":
             pending.discard(("inspection", event["request_id"]))
@@ -163,15 +166,31 @@ def native_unresolved(events):
             pending.add(("original-apply", event["run_id"]))
         elif event["kind"] == "original_apply_result":
             pending.discard(("original-apply", event["run_id"]))
-    return bool(pending)
+    return pending
 
 
-def require_admission(events, *, allow_supervised=False):
+def native_unresolved(events):
+    return bool(_native_pending(events))
+
+
+def require_admission(events, *, allow_supervised=False, reboot_boundary=None):
     if shutdown_state(events)["state"] in HELD:
         raise Blocked("Shutdown has closed admission")
     if diagnostic_unresolved(events):
         raise Blocked("Diagnostic process ownership requires recovery")
-    if native_unresolved(events):
+    pending = _native_pending(events)
+    if reboot_boundary is not None:
+        from .registered_recovery import reboot_scope
+
+        tail = ""
+        for seq, row in enumerate(events, 1):
+            tail = digest([seq, tail, row])
+        expected = reboot_scope(events, tail, reboot_boundary["project_id"], reboot_boundary["old_request_id"],
+                                reboot_boundary["expires"], reboot_boundary["boot"], int(time()))
+        if reboot_boundary != expected or pending != {("inspection", expected["old_request_id"])}:
+            raise Blocked("Reboot approval cannot bypass other unresolved execution")
+        pending.clear()
+    if pending:
         raise Blocked("Native process ownership requires recovery")
     pending = {event["run_id"] for event in events if event["kind"] == "subscription_session_started"}
     pending.difference_update(event["run_id"] for event in events if event["kind"] == "subscription_session_ended")
@@ -624,12 +643,15 @@ class Runner:
 
     def _idle_diagnostic(self, abandoned):
         events, tail = self.ledger.snapshot(recover_journal=True)
-        require_admission(events)
+        self._check_idle_diagnostic(events, abandoned)
+        return events, tail
+
+    def _check_idle_diagnostic(self, events, abandoned, *, reboot_boundary=None):
+        require_admission(events, reboot_boundary=reboot_boundary)
         run, development = last_run(events), session_view(events)
         if (abandoned or (run and State(run[-1]["state"]) not in TERMINAL)
                 or (development and not development["end"])):
             raise Blocked("Diagnostic execution requires an idle Controller")
-        return events, tail
 
     def _check_diagnostic_fence(self, count, fence):
         events, actual = self.ledger.snapshot()

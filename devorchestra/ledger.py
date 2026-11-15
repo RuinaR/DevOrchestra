@@ -206,6 +206,9 @@ class Ledger:
                     prefix_hash = digest([sequence, prefix_hash, item])
                 if prefix_hash != expected_tail:
                     raise Blocked("Execution fence changed")
+            from .registered_recovery import check_reboot_receipt
+
+            check_reboot_receipt(events, event)
             if admission is not None:
                 admission(events)
             return event

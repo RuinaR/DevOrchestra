@@ -191,7 +191,7 @@ class VisualReviewTests(unittest.TestCase):
                    "observations": [], "user_test_required": ["C1"], "source_sha256": "source"}
         order = []
         ledger = SimpleNamespace(state_boundary=Path.cwd())
-        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True,
+        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True, "verifier": {},
                                          "project_id": "fixture", "requirements": []},
                                   check=Mock(), check_image=Mock(), record=Mock(), phases=[],
                                   capture_review=Mock(side_effect=lambda _: order.append("capture") or receipt),
@@ -229,7 +229,7 @@ class VisualReviewTests(unittest.TestCase):
         receipt = {"verdict": "NOT_VALIDATED", "phase": "verifier", "outcome": "COMPLETED",
                    "owned_tree": "DRAINED", "observations": [], "user_test_required": ["C1"],
                    "visual_preview": {"reason": "NO_RUNNABLE_GUI"}, "source_sha256": "source"}
-        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True},
+        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True, "verifier": {}},
                                   fields={"run_id": "a" * 32}, source=lambda: "source",
                                   runner=SimpleNamespace(ledger=None), capture_review=Mock(return_value=receipt),
                                   verify_registered=Mock(return_value=receipt),
@@ -268,7 +268,7 @@ class VisualReviewTests(unittest.TestCase):
         actions = [{"step": 1, "action": {"action": "click", "x": 10, "y": 12}, "result": "SCREEN_CHANGED",
                     "before": "hash-0", "after": "hash-1"}]
         ledger = SimpleNamespace(state_boundary=Path.cwd())
-        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True,
+        session = SimpleNamespace(scope={"criteria": criteria, "visual_review": True, "verifier": {},
                                          "adaptive_play": adaptive_play.approval(),
                                          "project_id": "fixture", "requirements": []},
                                   check=Mock(), check_image=Mock(), record=Mock(), phases=[],

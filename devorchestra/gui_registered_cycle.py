@@ -276,6 +276,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
     play_foreground = tk.BooleanVar(panel, value=draft.get("play_foreground") is True)
     direct_branch = tk.StringVar(panel, value=draft.get("direct_branch", ""))
+    reboot_request = tk.StringVar(panel)
     spec = None
     play_entries = {}
 
@@ -311,6 +312,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                command=lambda: save_budget() and (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
     ttk.Label(body, text="원본 직접 Git 브랜치 · 비워 두면 기존 복제본 개발").pack(anchor="w")
     ttk.Entry(body, textvariable=direct_branch).pack(fill="x")
+    ttk.Label(body, text="전체 재부팅 후 새 1사이클 · 미종결 계획 요청 ID (해당 시에만 입력)").pack(anchor="w")
+    ttk.Entry(body, textvariable=reboot_request).pack(fill="x")
 
     def retry_git():
         from . import direct_git
@@ -570,7 +573,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             panel.destroy()
 
     def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False,
-               direct_branch=None):
+               direct_branch=None, reboot=None):
         nonlocal future, active
         future = Future()
         active = True
@@ -580,13 +583,13 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         state.set("승인 범위 확인 중")
         options = ({"graceful": graceful} if resume else
                    {"soft_limits": soft_limits, "visual_review": visual_review, "play": play,
-                    "direct_branch": direct_branch})
+                    "direct_branch": direct_branch, "reboot": reboot})
         review_fn = registered_cycle.review_resume if resume else registered_cycle.review
         run_fn = registered_cycle.run_resume if resume else registered_cycle.run
 
         def work():
             try:
-                if not resume:
+                if not resume and not reboot:
                     archive = codex_setup.archive_path(runner.ledger)
                     if archive.is_file() and Path(args[1]).absolute() == archive:
                         account = codex_setup.run(runner, "status", cancelled=cancelled.is_set)
@@ -813,6 +816,16 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 changes = [label for key, label in names.items() if prior.get(key) != current.get(key)]
                 if changes:
                     summary += "\n이전 승인과 달라진 설정 · " + " · ".join(changes)
+            if boundary := result.get("reboot_boundary"):
+                boot = boundary["boot"]
+                summary += (f"\n\n전체 재부팅 이후 새 실행 · 부팅 {boot['started']} (Unix 초)"
+                            f" · Windows 기록 {boot['start_record']}/{boot['type_record']}"
+                            f"\n기존 요청 {boundary['old_request_id']} · 응답·사용량 UNKNOWN 유지"
+                            f"\n새 실행 {digest(boundary)[:32]} · 원장 Seq {boundary['ledger_sequence']}"
+                            f"\n원장 SHA-256 {boundary['ledger_head']}"
+                            f"\n체크아웃 {boundary['checkout']} · {boundary['direct_git']['ref']}"
+                            f"\nGit 시작 HEAD {boundary['direct_git']['head']}"
+                            f"\n승인 만료 {boundary['expires']} (Unix 초)")
             if center.confirm("등록 프로젝트 Codex 세션 승인", summary + _play_approval(result), parent=panel):
                 launch(result)
             else:
@@ -882,8 +895,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             state.set(str(error))
             return
         cancelled.clear()
+        reboot = reboot_request.get().strip()
         submit(args, soft_limits=limits, visual_review=use_images.get(), play=play,
-               direct_branch=direct_branch.get().strip() or None)
+               direct_branch=direct_branch.get().strip() or None, reboot=(reboot, int(time()) + 900) if reboot else None)
 
     def resume():
         try:

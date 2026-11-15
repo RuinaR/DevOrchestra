@@ -2,6 +2,7 @@ import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from time import time
@@ -10,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from devorchestra import native_cycle, registered_cycle, registered_recovery as recovery
+from devorchestra.ai_usage import QUOTA_STOP_PERCENT, SUBSCRIPTION_MODE
 from devorchestra.lease import Blocked, execution_slot
 from devorchestra.ledger import Ledger, digest
 from devorchestra.runtime import Runner, native_unresolved, require_admission
@@ -202,3 +204,155 @@ class RegisteredRecoveryTests(unittest.TestCase):
                     self.assertIn("retained_stdout_sha256", final)
                 if mode in {"start", "cancel", "wrong signature"}:
                     self.assertEqual(final["provider_usage"], "UNKNOWN")
+
+
+class RebootRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.ledger = Ledger(Path(temp.name) / "ledger.sqlite3")
+        self.ledger.initialize()
+        self.project = "synthetic-project"
+        self.old = "a" * 32
+        self.now = int(time())
+        self.expires = self.now + 60
+        self.boot = dict(started=self.now - 60, start_event=self.now - 60, type_event=self.now - 60,
+                         start_record=12, type_record=13, boot_type=0)
+        self.git = dict(ref="refs/heads/pilot", url="https://github.com/synthetic/fixture", head="b" * 40)
+        self.image = {"files": {}}
+        self.scope = dict(project_id=self.project, replica=temp.name, replica_sha256=digest(self.image),
+                          development_mode="DIRECT_GIT_WORKTREE", direct_git=self.git,
+                          original_apply=False, shell_roles=["developer", "reviewer"],
+                          cycles=1, token_mode=SUBSCRIPTION_MODE, quota_stop_percent=QUOTA_STOP_PERCENT)
+        self.identity = dict(project_id=self.project, run_id=self.old, request_id=self.old,
+                             probe_kind=registered_cycle.KIND, approval_sha256=digest(self.scope))
+        self.start = dict(self.identity, kind="native_inspection_intent", scope=self.scope,
+                          workspace="native-command-fixture", started_at=self.now - 120)
+        self.role = dict(self.identity, kind="native_inspection_role_intent",
+                         phase="manager-planning", role_call=1, cycle=1)
+        self.append(self.start)
+        self.append(self.role)
+
+    def append(self, event, admission=None):
+        events, tail = self.ledger.snapshot()
+        return self.ledger.append(len(events), tail, event, admission=admission)
+
+    def reviewed(self, *, events=None, boot=None, expires=None, project=None):
+        current, head = self.ledger.snapshot()
+        return recovery.reboot_scope(current if events is None else events, head, project or self.project,
+                                     self.old, self.expires if expires is None else expires,
+                                     self.boot if boot is None else boot, self.now)
+
+    def fresh(self):
+        boundary = self.reviewed()
+        scope = recovery.bind_reboot(dict(self.scope, ledger_head=boundary["ledger_head"]), boundary)
+        new = digest(boundary)[:32]
+        intent = dict(self.identity, request_id=new, run_id=new, approval_sha256=digest(scope),
+                      kind="native_inspection_intent", started_at=self.now, scope=scope)
+        return scope, intent
+
+    def test_old_request_stays_pending_until_atomic_fresh_intent_finishes(self):
+        scope, intent = self.fresh()
+        original = self.ledger.read()
+        reopened = Ledger(self.ledger.path)
+        with self.assertRaises(Blocked):
+            require_admission(reopened.read())
+        self.assertEqual(recovery.reboot_predecessor(original, intent), self.old)
+        self.append(intent, recovery.reboot_admission(scope))
+        self.assertEqual(reopened.read()[:2], original)
+        self.assertTrue(native_unresolved(reopened.read()))
+        self.assertEqual(intent["scope"]["reboot_boundary"]["model_response"], "UNKNOWN")
+        self.assertEqual(intent["scope"]["reboot_boundary"]["provider_usage"], "UNKNOWN")
+        with self.assertRaises(Blocked):
+            self.append(intent, recovery.reboot_admission(scope))
+        result = {key: intent[key] for key in recovery.IDENTITY}
+        self.append(dict(result, kind="native_inspection_result"))
+        require_admission(reopened.read())
+        with self.assertRaises(Blocked):
+            self.reviewed()
+
+    def test_boot_evidence_and_role_must_match(self):
+        for override in ({"started": self.start["started_at"] - 1}, {"boot_type": 1},
+                         {"start_record": self.boot["type_record"]}, {"type_event": self.now}):
+            with self.subTest(override=override), self.assertRaises(Blocked):
+                self.reviewed(boot=dict(self.boot, **override))
+        with self.assertRaises(Blocked):
+            self.reviewed(project="other")
+        with self.assertRaises(Blocked):
+            self.reviewed(expires=self.now)
+        with self.assertRaises(Blocked):
+            self.reviewed(events=[self.start, dict(self.role, phase="developer")])
+        with patch.object(recovery, "windows_boot_boundary", side_effect=Blocked("Old run may have restarted")):
+            with self.assertRaisesRegex(Blocked, "Old run may"):
+                registered_cycle._reboot_review(Runner(self.ledger), False, self.project, (self.old, self.expires))
+        with self.assertRaisesRegex(Blocked, "Abandoned slot"):
+            registered_cycle._reboot_review(Runner(self.ledger), True, self.project, (self.old, self.expires))
+
+    def test_binding_changed_boot_and_approval_fail_closed(self):
+        scope, intent = self.fresh()
+        boundary = scope["reboot_boundary"]
+        for override in ({"ref": "refs/heads/other"}, {"head": "e" * 40}):
+            with self.assertRaises(Blocked):
+                recovery.bind_reboot(dict(scope, direct_git=dict(self.git, **override)), boundary)
+        with self.assertRaises(Blocked):
+            recovery.bind_reboot(dict(scope, replica_sha256="f" * 64), boundary)
+        altered = dict(scope, reboot_boundary=dict(boundary, boot=dict(self.boot, start_record=14)))
+        self.assertIsNone(recovery.reboot_predecessor(self.ledger.read(), dict(intent, scope=altered)))
+        with self.assertRaisesRegex(Blocked, "Invalid post-reboot"):
+            self.append(dict(intent, approval_sha256=self.identity["approval_sha256"]))
+        self.append(dict(kind="test_unrelated_update"))
+        with self.assertRaises(Blocked):
+            self.append(intent, recovery.reboot_admission(scope))
+
+    def test_late_result_and_mixed_publication_are_rejected(self):
+        scope, intent = self.fresh()
+        self.append(intent, recovery.reboot_admission(scope))
+        with self.assertRaisesRegex(Blocked, "superseded"):
+            self.append(dict(self.identity, kind="native_inspection_role_result"))
+        fresh = {key: intent[key] for key in recovery.IDENTITY}
+        pinned = dict(fresh, kind="direct_git_intent", branch=self.git["ref"],
+                      before=self.git["head"], origin=self.git["url"])
+        for changed in (dict(run_id="f" * 32), dict(request_id=self.old), dict(branch="refs/heads/other"),
+                        dict(before="d" * 40), dict(project_id="other")):
+            with self.subTest(changed=changed), self.assertRaises(Blocked):
+                self.append(dict(pinned, **changed))
+        self.append(pinned)
+
+    def test_registered_review_and_run_recheck_boot_before_intent(self):
+        rc = registered_cycle
+        options = {"direct_branch": "pilot", "reboot": (self.old, self.expires)}
+        original, head = self.ledger.snapshot()
+        scope = dict(self.scope, ledger_head=head, auth_home=self.scope["replica"])
+
+        @contextmanager
+        def staging(_ledger):
+            yield Path(self.scope["replica"]), {}
+
+        runner = Runner(self.ledger)
+        observer = SimpleNamespace(scratch=Path(self.scope["replica"]), check=lambda: None)
+        changed_boot = dict(self.boot, start_record=50)
+        with (patch.object(rc, "_contract", return_value=scope),
+              patch.object(recovery, "windows_boot_boundary", side_effect=[self.boot, self.boot, changed_boot]),
+              patch.object(rc, "_staging", staging), patch.object(rc, "RegisteredSession", return_value=observer),
+              patch.object(rc, "_check_dedicated_config"),
+              patch("devorchestra.direct_git.admit", return_value=self.git),
+              patch.object(rc, "snapshot", return_value=self.image)):
+            reviewed = rc.review(runner, self.project, **options)
+            with self.assertRaisesRegex(Blocked, "Boot evidence or preserved checkout changed"):
+                rc.run(runner, self.project, approval=digest(reviewed), **options)
+        self.assertEqual(self.ledger.snapshot(), (original, head))
+
+    @unittest.skipUnless(os.name == "nt", "Requires the Windows execution slot")
+    def test_second_controller_cannot_review_during_a_held_slot(self):
+        script = (
+            "from devorchestra.lease import SlotBlocked, execution_slot\n"
+            "try:\n"
+            " with execution_slot(): pass\n"
+            "except SlotBlocked as error:\n"
+            " raise SystemExit(0 if error.code == 'EXECUTION_SLOT_BUSY' else 2)\n"
+            "raise SystemExit(1)\n"
+        )
+        with execution_slot() as abandoned:
+            self.assertFalse(abandoned)
+            result = subprocess.run([sys.executable, "-B", "-c", script], timeout=10)
+        self.assertEqual(result.returncode, 0)
