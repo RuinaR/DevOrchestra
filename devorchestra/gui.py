@@ -12,7 +12,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from uuid import UUID, uuid4
 
-from .catalog import Catalog, REQUIREMENT_ROLES, new_project, read_frozen_requirements
+from .catalog import Catalog, REQUIREMENT_PRIORITIES, REQUIREMENT_ROLES, new_project, read_frozen_requirements
 from .ai_usage import QUOTA_FRESH_SECONDS, SUBSCRIPTION_MODE
 from .build_info import build_label
 from .default_instructions import defaults_text, public_instruction
@@ -95,7 +95,7 @@ def handoff_stage(item):
 
 def storage_message(storage):
     if storage["status"] == "NOT_INITIALIZED":
-        return "처음 실행입니다. ‘초기 설정’에서 로컬 저장소를 준비하세요."
+        return "처음 실행입니다. ‘시작하기’에서 로컬 저장소를 준비하세요."
     return {
         "ACCESS_DENIED": "저장 폴더에 접근할 수 없습니다. 이 폴더의 읽기·쓰기 권한을 확인하세요.",
         "CORRUPT": "기존 원장 검증에 실패했습니다. 백업과 원장 상태를 확인하세요.",
@@ -251,9 +251,7 @@ class CommandCenter:
         self.action_grid(projects, (("프로젝트 등록", self.register_project),
                                     ("프로젝트 빠른 검색", self.search_projects),
                                     ("목표와 완료 기준 편집", lambda: self.register_project(edit=True)),
-                                    ("요구사항 문서", self.requirement_settings),
-                                    ("처음부터 다시 시작", self.restart_registered_development),
-                                    ("기존 Git 문맥 및 준비 상태", self.onboarding_panel)))
+                                    ("작업 폴더 준비", self.prepare_selected_project)))
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
 
@@ -264,11 +262,11 @@ class CommandCenter:
         self.goal = label(mission, fg=MUTED)
         self.goal.pack(fill="x")
         on_width(mission, lambda width: self.goal.configure(wraplength=max(240, width - 40)))
-        self.development_button = ttk.Button(mission, text="자동 개발 · 시간/토큰 설정",
-                                             command=self.registered_development,
+        self.development_button = ttk.Button(mission, text="개발 시작 준비",
+                                             command=self.prepare_selected_project,
                                              style="Primary.TButton", state="disabled")
         self.development_button.pack(fill="x", pady=(8, 2))
-        self.development_options = ttk.Button(mission, text="다른 개발 옵션", command=self.development_start,
+        self.development_options = ttk.Button(mission, text="감독형 작업과 추가 옵션", command=self.development_start,
                                               state="disabled")
         self.development_options.pack(fill="x", pady=(2, 0))
         self.question_button = ttk.Button(mission, text="사용자 응답 대기 없음", state="disabled",
@@ -277,12 +275,11 @@ class CommandCenter:
 
         hero = tk.Frame(body, bg=ui_design.HERO, padx=22, pady=18)
         hero.grid(row=1, column=0, sticky="ew", padx=18, pady=(10, ui_design.GAP))
-        label(hero, "WORKSPACE  /  개요", size=10, fg=CYAN, bg=ui_design.HERO, bold=True).pack(anchor="w")
         label(hero, "개발 상황판", size=24, bg=ui_design.HERO, bold=True).pack(anchor="w", pady=(2, 4))
         self.overview = label(hero, bg=ui_design.HERO, fg=MUTED)
         self.overview.pack(anchor="w")
-        self.action_grid(hero, (("AI 사용량", self.ai_usage_panel), ("프로젝트 검색  Ctrl+K", self.search_projects),
-                                ("초기 설정", self.setup_wizard)), background=ui_design.HERO)
+        self.action_grid(hero, (("시작하기", self.setup_wizard), ("AI 사용량", self.ai_usage_panel)),
+                         background=ui_design.HERO)
 
         briefing = section(body, "다음 행동과 안전 경계")
         briefing.grid(row=5, column=0, sticky="ew", padx=18, pady=(0, ui_design.GAP))
@@ -399,13 +396,31 @@ class CommandCenter:
         self.flow_cards(roster, list(self.card_frames.values()), 185)
 
         audit = self.build_audit(body)
-        verification = section(body, "검증 센터")
+        verification = section(body, "실행 결과")
         verification.grid(row=3, column=0, sticky="ew", padx=18)
         self.verify_overview = label(verification, fg=MUTED, wraplength=480)
         self.verify_overview.pack(fill="x")
-        self.action_grid(verification, (("GUI 검증 보고서와 이미지", self.gui_verification_report),
-                                        ("복제본 빌드·테스트", self.onboarding_panel),
+        self.action_grid(verification, (("개발 기록과 Git 게시 결과", self.show_registered_history),
+                                        ("완료 기준별 결과", self.show_registered_criteria),
+                                        ("GUI 검증 보고서와 이미지", self.gui_verification_report),
                                         ("원본 반영 검토", self.original_apply_panel)))
+        requirements = section(body, "요구사항")
+        requirements.grid(row=3, column=0, sticky="ew", padx=18)
+        self.action_grid(requirements, (("요구사항 목록 및 편집", self.requirement_settings),
+                                        ("프로젝트 목표와 완료 기준", lambda: self.register_project(edit=True))))
+        permissions = section(body, "작업 권한")
+        permissions.grid(row=3, column=0, sticky="ew", padx=18)
+        label(permissions, "프로젝트별 권한과 한도를 저장합니다. 실제 실행 범위는 승인할 때 확정됩니다.",
+              fg=MUTED, wraplength=460).pack(fill="x")
+        self.action_grid(permissions, (("권한·시간·사용량 설정", self.registered_development),
+                                       ("사용자 승인 대기", lambda: self.navigate("approval"))))
+        advanced = section(body, "고급 도구")
+        advanced.grid(row=3, column=0, sticky="ew", padx=18)
+        self.action_grid(advanced, (("감사 원장 및 복구", lambda: self.navigate("records")),
+                                    ("검증 계약과 도구 패키지", self.registered_development),
+                                    ("오프라인 빌드 및 테스트", self.onboarding_panel),
+                                    ("새 작업 사본으로 다시 준비", self.restart_registered_development),
+                                    ("실행 환경 진단", self._advanced_development_start)))
         approval = section(body, "승인 센터")
         approval.grid(row=3, column=0, sticky="ew", padx=18)
         self.approval_button = ttk.Button(approval, state="disabled", command=self.answer_question)
@@ -414,7 +429,7 @@ class CommandCenter:
         self.gates.pack(fill="x")
         settings = section(body, "설정")
         settings.grid(row=3, column=0, sticky="ew", padx=18)
-        self.action_grid(settings, (("초기 설정", self.setup_wizard), ("작업 지침", self.instruction_settings),
+        self.action_grid(settings, (("시작하기", self.setup_wizard), ("작업 지침", self.instruction_settings),
                                     ("Codex 환경 및 로그인", self.codex_setup_panel),
                                     ("프로젝트 설정", lambda: self.edit_settings("edit")),
                                     ("공용 예산", lambda: self.edit_settings("limits")),
@@ -424,15 +439,16 @@ class CommandCenter:
             "dashboard": (hero, mission, briefing), "projects": (projects,),
             "operations": (operations, safety), "verification": (verification,),
             "approval": (approval,), "records": (audit, safety), "settings": (settings,),
+            "requirements": (requirements,), "permissions": (permissions,), "advanced": (advanced,),
         }
         command.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, ui_design.GAP))
         for frame in {frame for frames in self.page_frames.values() for frame in frames}:
             frame.grid_remove()
         self.navigation = {}
-        label(rail, "운영 공간", 9, bg=ui_design.RAIL, fg=MUTED).pack(anchor="w", pady=(0, 8))
-        for key, title in (("dashboard", "01  대시보드"), ("projects", "02  프로젝트"),
-                           ("operations", "03  개발 운영실"), ("verification", "04  검증 센터"),
-                           ("approval", "05  승인 센터"), ("records", "06  기록·복구"), ("settings", "07  설정")):
+        for key, title in (("dashboard", "대시보드"), ("projects", "프로젝트"),
+                           ("requirements", "요구사항"), ("permissions", "작업 권한"),
+                           ("operations", "개발 진행도"), ("verification", "실행 결과"), ("settings", "설정"),
+                           ("advanced", "고급 도구")):
             item = ttk.Button(rail, text=title, width=15, style="Rail.TButton",
                               command=lambda key=key: self.navigate(key))
             item.pack(fill="x", pady=(0, 5))
@@ -519,8 +535,10 @@ class CommandCenter:
         if (page in command_pages) != (previous in command_pages):
             (self.command_frame.grid if page in command_pages else self.command_frame.grid_remove)()
         if previous:
-            self.navigation[previous].configure(style="Rail.TButton")
-        self.navigation[page].configure(style="RailActive.TButton")
+            previous_item = self.navigation.get({"approval": "permissions", "records": "advanced"}.get(previous, previous))
+            previous_item.configure(style="Rail.TButton")
+        self.navigation[{"approval": "permissions", "records": "advanced"}.get(page, page)].configure(
+            style="RailActive.TButton")
         self.workspace_canvas.yview_moveto(0)
         if self.view and details_changed:
             self.render()
@@ -1094,6 +1112,7 @@ class CommandCenter:
     def show_registered_criteria(self):
         progress = (self.view or {}).get("registered_progress")
         if not progress:
+            self.registered_readout("완료 기준별 상태", "선택한 프로젝트의 독립 검증 실행 기록이 없습니다.")
             return
         names = {"VERIFIED": "독립 검증 완료", "IMPLEMENTED": "구현 검토 · 검증 대기", "REWORK": "재작업",
                  "BLOCKED": "차단", "NEEDS_INPUT": "입력 대기", "NOT_VERIFIED": "미검증"}
@@ -1869,19 +1888,27 @@ class CommandCenter:
             self.root.destroy()
 
     def setup_wizard(self):
+        existing = getattr(self, "setup_window", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
         wizard = self.panel()
-        wizard.title("DevOrchestra · 초기 설정")
-        wizard.configure(bg=PANEL, padx=12, pady=12)
-        label(wizard, "저장소 준비 → Codex 연결 → 프로젝트 등록 → 개발 검토",
-              size=12, bold=True, wraplength=520).pack(fill="x", pady=6)
-        label(wizard, f"사용자 저장 위치\n{self.reader.ledger.state_boundary}",
-              wraplength=520).pack(fill="x", pady=6)
-        storage = self.reader.ledger.storage_status()
-        status = label(wizard, "저장소가 준비됐습니다." if storage["status"] == "READY"
-                       else storage_message(storage), fg=AMBER, wraplength=520)
-        status.pack(fill="x")
+        self.setup_window = wizard
+        wizard.transient(self.root)
+        wizard.title("DevOrchestra · 시작하기")
+        wizard.configure(bg=BG, padx=20, pady=16)
+        heading = label(wizard, size=16, bold=True, bg=BG)
+        heading.pack(fill="x")
+        status = label(wizard, fg=MUTED, bg=BG, wraplength=500)
+        status.pack(fill="x", pady=(8, 12))
+        actions = ttk.Frame(wizard)
+        actions.pack(fill="x")
+        footer = ttk.Frame(wizard)
+        footer.pack(fill="x", pady=(12, 0))
+        step = 0
 
-        def save():
+        def prepare():
             try:
                 self.controller.command("init")
             except (Blocked, OSError, sqlite3.Error, ValueError) as error:
@@ -1889,22 +1916,85 @@ class CommandCenter:
                 if isinstance(error, PermissionError):
                     current = {"status": "BLOCKED", "reason": "ACCESS_DENIED"}
                 status.configure(text="저장소 준비 실패 · " + storage_message(current))
-                return
-            wizard.destroy()
+                return False
             self.refresh()
-            if self.view and not any(key not in PROJECTS for key in self.view["project_names"]):
-                self.codex_setup_panel()
+            return self.reader.ledger.storage_status()["status"] == "READY"
 
-        ttk.Button(wizard, text="저장소 준비", command=save,
-                   state="normal" if storage["status"] != "BLOCKED"
-                   else "disabled").pack(anchor="e")
+        def open_accounts():
+            if self.reader.ledger.storage_status()["status"] == "READY" or prepare():
+                    self.codex_setup_panel(on_continue=lambda: show_step(1))
 
-    def codex_setup_panel(self):
+        def registration():
+            self.register_project(on_saved=lambda: show_step(2))
+
+        def active_project():
+            return bool(self.view and self.view["registration"])
+
+        def project_rights():
+            self.registered_development()
+
+        def show_step(number):
+            nonlocal step
+            if not wizard.winfo_exists():
+                return
+            step = number
+            for area in (actions, footer):
+                for child in area.winfo_children():
+                    child.destroy()
+            names = ("계정 연결", "프로젝트 등록", "작업 권한", "개발 시작")
+            heading.configure(text=f"{step + 1} / {len(names)}  {names[step]}")
+            if step == 0:
+                storage = self.reader.ledger.storage_status()
+                storage_label = ("사용자 저장소 준비 완료" if storage["status"] == "READY"
+                                 else storage_message(storage))
+                status.configure(text=f"{storage_label}\n{self.reader.ledger.state_boundary}\n\n"
+                                       "ChatGPT 구독으로 Codex에 연결하고 공식 잔여량을 확인합니다. "
+                                       "GitHub 인증은 GitHub에 게시할 때만 필요합니다. "
+                                       "로컬 Git의 기존 인증을 사용하며 최종 검토에서 게시 범위를 확인합니다.")
+                ttk.Button(actions, text="ChatGPT / Codex 연결 관리", command=open_accounts,
+                           state="disabled" if storage["status"] == "BLOCKED" else "normal").pack(fill="x")
+            elif step == 1:
+                status.configure(text="개발할 폴더를 선택하고 프로젝트 이름, 목표와 완료 기준을 입력하세요. "
+                                      "폴더에서 Git과 빌드·테스트 설정을 찾아 표시합니다.")
+                ttk.Button(actions, text="프로젝트 등록", command=registration).pack(fill="x")
+                if active_project():
+                    ttk.Button(actions, text="선택한 등록 프로젝트 사용",
+                               command=lambda: show_step(2)).pack(fill="x", pady=(4, 0))
+            elif step == 2:
+                status.configure(text="프로젝트의 파일·빌드·검증 권한과 실행 한도를 확인하세요. "
+                                      "저장한 설정은 다음 승인 검토에 사용됩니다.")
+                ttk.Button(actions, text="작업 권한 및 한도 설정", command=project_rights,
+                           state="normal" if active_project() else "disabled").pack(fill="x")
+            else:
+                status.configure(text="작업 권한 화면에서 개발 방식, 대상 파일, 검증 방식과 Git 게시 범위를 "
+                                      "검토하세요. 사용자 확인 후 단일 실행 슬롯에서 시작합니다.")
+                ttk.Button(actions, text="개발 승인 검토 열기",
+                           command=lambda: (wizard.destroy(), project_rights()),
+                           style="Primary.TButton", state="normal" if active_project() else "disabled").pack(fill="x")
+            ttk.Button(footer, text="닫기", command=wizard.destroy).pack(side="left")
+            if step:
+                ttk.Button(footer, text="뒤로", command=lambda: show_step(step - 1)).pack(side="left", padx=6)
+            if step in (0, 2):
+                def advance():
+                    if step or self.reader.ledger.storage_status()["status"] == "READY" or prepare():
+                        show_step(step + 1)
+                ttk.Button(footer, text="다음", command=advance, style="Primary.TButton",
+                           state="disabled" if step == 0 and storage["status"] == "BLOCKED" else "normal").pack(side="right")
+
+        show_step(0)
+        wizard.update_idletasks()
+        x = max(0, self.root.winfo_rootx() + (self.root.winfo_width() - wizard.winfo_reqwidth()) // 2)
+        y = max(0, self.root.winfo_rooty() + 36)
+        wizard.geometry(f"+{x}+{y}")
+
+    def codex_setup_panel(self, *, on_continue=None):
         from .gui_codex_setup import show
 
-        show(self)
+        show(self, on_continue=on_continue)
 
-    def register_project(self, *, edit=False):
+    def register_project(self, *, edit=False, on_saved=None):
+        from .gui_workspace import inspect_folder
+
         if self.view is None:
             self.setup_wizard()
             return
@@ -1914,10 +2004,10 @@ class CommandCenter:
             panel.destroy()
             self.observation.configure(text="편집할 프로젝트를 선택하세요.")
             return
-        panel.title("프로젝트 편집" if edit else "프로젝트 등록")
+        panel.title("프로젝트 편집" if edit else "프로젝트 등록 · 2 / 4" if on_saved else "프로젝트 등록")
         panel.configure(padx=16, pady=12)
         fields = {}
-        for title, key in (("프로젝트 이름", "name"), ("원본 프로젝트 폴더", "original")):
+        for title, key in (("프로젝트 이름", "name"), ("개발할 로컬 폴더", "original")):
             ttk.Label(panel, text=title).pack(anchor="w")
             row = ttk.Frame(panel)
             row.pack(fill="x", pady=(2, 8))
@@ -1929,7 +2019,27 @@ class CommandCenter:
                     if folder:
                         field.delete(0, "end")
                         field.insert(0, str(Path(folder)))
+                        if not fields["name"].get():
+                            fields["name"].insert(0, Path(folder).name)
+                        inspect()
                 ttk.Button(row, text="폴더 선택", command=choose).pack(side="right", padx=(6, 0))
+        folder_status = ttk.Label(panel, wraplength=530, justify="left")
+        folder_status.pack(fill="x", pady=(0, 8))
+
+        def inspect(_event=None):
+            try:
+                kind, _url, branch, hints = inspect_folder(fields["original"].get().strip())
+            except (Blocked, ValueError, OSError):
+                folder_status.configure(text="프로젝트 폴더를 선택하면 개발 방식과 구성 파일을 확인합니다.")
+                return
+            summary = {
+                "folder": "일반 폴더 · GitHub 없이 감독형 작업과 로컬 기록을 사용할 수 있습니다.",
+                "git": "Git 폴더 · 게시 대상 자동 확인 불가. 복제본 준비에서 자세히 확인하세요.",
+                "github": f"GitHub HTTPS 후보 · {branch} · 원격과 게시 권한은 실행 전에 검토합니다.",
+            }[kind]
+            folder_status.configure(text=summary + ("\n" + " · ".join(hints) if hints else ""))
+
+        fields["original"].bind("<FocusOut>", inspect, add="+")
         ttk.Label(panel, text="목표와 상세 설명 · 최대 8,000자").pack(anchor="w")
         goal = self.editor_box(panel, height=5)
         ttk.Label(panel, text="완료 기준 · 한 줄에 한 항목, 최대 32개 (항목당 2,000자)").pack(anchor="w")
@@ -1972,9 +2082,10 @@ class CommandCenter:
             if self.view["setup"]:
                 replica.insert(0, self.view["setup"]["replica"])
                 mode.current(1)
-        ttk.Label(panel, text="개발 모드 · 감독형 Codex  |  자동 실행은 차단됨").pack(anchor="w", pady=6)
-        add_docs = tk.BooleanVar(panel, value=not edit)
-        ttk.Checkbutton(panel, text="등록 후 요구사항 문서 추가", variable=add_docs).pack(anchor="w")
+        inspect()
+        add_docs = tk.BooleanVar(panel, value=False)
+        if on_saved is None:
+            ttk.Checkbutton(panel, text="등록 후 요구사항 추가", variable=add_docs).pack(anchor="w")
         status = ttk.Label(panel, wraplength=530)
         status.pack(fill="x")
 
@@ -2000,9 +2111,10 @@ class CommandCenter:
                 documents = {key: value for key, value in data["documents"].items() if key != "agents"}
                 if agents.get().strip():
                     documents["agents"] = agents.get().strip()
+                detected = inspect_folder(values["original"])
                 data.update(name=values["name"], goal=values["goal"], documents=documents,
                             local_path=str(Path(values["original"])), acceptance=acceptance,
-                            repository=repository.get().strip())
+                            repository=repository.get().strip() or (detected[1] if not edit else ""))
                 revision = existing["revision"] if existing else 0
                 catalog = Catalog(self.reader.ledger)
                 if values["replica"]:
@@ -2036,8 +2148,15 @@ class CommandCenter:
                     self.onboarding_panel(values["replica"])
                 elif open_docs:
                     self.requirement_settings()
+                elif on_saved is not None:
+                    on_saved()
 
-        ttk.Button(panel, text="저장" if edit else "프로젝트 등록", command=save).pack(anchor="e")
+        footer = ttk.Frame(panel)
+        footer.pack(fill="x")
+        ttk.Button(footer, text="취소", command=panel.destroy).pack(side="left")
+        ttk.Button(footer, text="저장" if edit else "프로젝트 등록", command=save,
+                   style="Primary.TButton").pack(side="right")
+        fields["name"].focus_set()
 
     def restart_registered_development(self, project=None):
         self.onboarding_panel(project=project, restart=True)
@@ -2541,8 +2660,56 @@ class CommandCenter:
         except (Blocked, OSError, sqlite3.Error, ValueError):
             status.set("원장이 준비되지 않았습니다.")
 
+    def prepare_selected_project(self):
+        from . import project_onboarding, replica_readiness
+        from .gui_workspace import inspect_folder
+
+        if not self.view or not self.view["registration"]:
+            self.register_project()
+            return
+        project = self.view["project_id"]
+        root = self.view["registration"]["data"]["local_path"]
+        if not root:
+            self.register_project(edit=True)
+            return
+        try:
+            kind, _, _, _ = inspect_folder(root)
+            if kind != "folder":
+                try:
+                    replica_readiness.baseline(self.reader.ledger, project)
+                except Blocked:
+                    destination = project_onboarding.restart_destination(self.reader.ledger, project)
+                    self.onboarding_panel(destination, project=project)
+                    return
+        except (Blocked, OSError, ValueError, sqlite3.Error) as error:
+            self.registered_readout("작업 폴더 확인", str(error))
+            return
+        self.registered_development()
+
     def registered_development(self):
         if self.view and self.view["registration"]:
+            from .gui_workspace import inspect_folder
+
+            root = self.view["registration"]["data"]["local_path"]
+            if not root:
+                self.register_project(edit=True)
+                return
+            try:
+                kind, _, _, _ = inspect_folder(root)
+            except (Blocked, OSError, ValueError) as error:
+                self.registered_readout("작업 폴더 확인", str(error))
+                return
+            if kind == "folder":
+                panel = self.panel()
+                panel.title("개발 준비 · 일반 폴더")
+                label(panel, "일반 폴더", bg=BG, bold=True, size=16).pack(anchor="w")
+                label(panel, "요구사항과 작업 기록을 로컬에 보관할 수 있습니다. 현재 자동 개발 Controller는 "
+                             "Git 기준점이 있는 작업 사본이 필요합니다. 감독형 작업에서 구현을 요청할 때는 "
+                             "원본과 별도의 폴더를 준비하세요.",
+                      bg=BG, wraplength=480).pack(fill="x", pady=8)
+                ttk.Button(panel, text="감독형 작업 열기", style="Primary.TButton",
+                           command=lambda: (panel.destroy(), self.supervised_work())).pack(anchor="e")
+                return
             from .gui_registered_cycle import show
 
             show(self, self.view["project_id"])
@@ -3176,8 +3343,8 @@ class CommandCenter:
             return
         project_id = self.view["project_id"]
         panel = self.panel()
-        panel.title("DevOrchestra · 요구사항 문서")
-        label(panel, "목표와 완료 기준은 프로젝트 전체를 안내합니다. 요구사항 문서는 이번 차수에 수행할 구체적인 작업을 설명합니다.",
+        panel.title("DevOrchestra · 요구사항")
+        label(panel, "추가하거나 수정한 요구사항은 다음 개발 승인에 반영됩니다.",
               bg=BG, wraplength=690).pack(fill="x", pady=(0, 8))
         catalog = Catalog(self.reader.ledger)
         panel.geometry("780x690")
@@ -3193,7 +3360,8 @@ class CommandCenter:
         role_help.pack(fill="x", pady=(3, 7))
         role.bind("<<ComboboxSelected>>", lambda _event: role_help.configure(
             text=REQUIREMENT_HELP[REQUIREMENT_ROLES[role.current()]]))
-        status = ttk.Label(panel, text="관련 항목을 선택한 뒤 문서를 추가하면 두 기록을 연결합니다.")
+        status = ttk.Label(panel, text="최신 개정을 선택해 수정하거나 이전 개정을 열어 이력을 확인하세요.",
+                           wraplength=625)
         status.pack(fill="x")
         history = []
 
@@ -3218,12 +3386,20 @@ class CommandCenter:
             preview.insert("1.0", text)
             preview.configure(state="disabled")
 
-        def refresh():
+        def refresh(selected_id=None):
             history[:] = catalog.read().get("requirements", {}).get(project_id, ())
             table.delete(0, "end")
-            for item in reversed(history):
-                relation = f" · 관련 {item['related'][:8]}" if item["related"] else ""
-                table.insert("end", f"{item['path']} · {REQUIREMENT_NAMES[item['role']]} · v{item['version']}{relation}")
+            seen = set()
+            for index, item in enumerate(reversed(history)):
+                key = item["path"].casefold()
+                current = "이전 개정" if key in seen else "최신 개정"
+                seen.add(key)
+                priority = {"high": "높음", "normal": "보통", "low": "낮음"}[item.get("priority", "normal")]
+                table.insert("end", f"{item.get('title', item['path'])} · {REQUIREMENT_NAMES[item['role']]} "
+                                    f"· {priority} · v{item['version']} · {current}")
+                if item["id"] == selected_id:
+                    table.selection_set(index)
+                    table.see(index)
             show_document()
 
         def register():
@@ -3240,50 +3416,106 @@ class CommandCenter:
                 related = selected_item()
                 item = catalog.register_requirement(project_id, relative, REQUIREMENT_ROLES[role.current()],
                                                     related=related["id"] if related else None)
-                refresh()
+                refresh(item["id"])
                 status.configure(text=f"등록 확인 · v{item['version']} · {item['sha256']}")
                 self.refresh()
             except (Blocked, ValueError, OSError, sqlite3.Error, KeyError):
                 status.configure(text="등록 실패 · 경로, 파일 형식 또는 원장 상태를 확인하세요.")
 
-        def write_document():
-            related = selected_item()
+        def write_document(*, revise=False):
+            item = selected_item() if revise else None
+            original_text = ""
+            if revise:
+                if not item or any(other["path"].casefold() == item["path"].casefold()
+                                   for other in history[history.index(item) + 1:]):
+                    status.configure(text="수정할 최신 개정을 선택하세요.")
+                    return
+                try:
+                    original_text = read_frozen_requirements(
+                        catalog.read(), project_id, [item], self.reader.ledger.state_boundary)[0]["text"]
+                except (Blocked, OSError, ValueError, sqlite3.Error):
+                    status.configure(text="등록 당시 문서 내용을 읽을 수 없습니다. 변경된 파일은 가져오기를 이용하세요.")
+                    return
             editor = self.panel()
-            editor.title("요구사항 작성")
-            ttk.Label(editor, text="프로젝트 상대 이름으로 저장합니다. 파일은 DevOrchestra의 비공개 저장소에 보관합니다.",
-                      wraplength=480).pack(anchor="w")
-            name = ttk.Entry(editor, width=58)
-            name.insert(0, "requirements-" + uuid4().hex[:8] + ".md")
-            name.pack(fill="x", pady=6)
+            editor.title("요구사항 수정" if revise else "요구사항 추가")
+            ttk.Label(editor, text="제목").pack(anchor="w")
+            title = ttk.Entry(editor, width=58)
+            title.pack(fill="x", pady=(0, 8))
+            ttk.Label(editor, text="유형과 우선순위").pack(anchor="w")
+            choices = ttk.Frame(editor)
+            choices.pack(fill="x", pady=(0, 8))
+            kind = ttk.Combobox(choices, values=tuple(REQUIREMENT_NAMES.values()), state="readonly")
+            kind.current(REQUIREMENT_ROLES.index(item["role"]) if item else role.current())
+            kind.pack(side="left", fill="x", expand=True)
+            priority = ttk.Combobox(choices, values=("높음", "보통", "낮음"), state="readonly", width=8)
+            priority.current(REQUIREMENT_PRIORITIES.index(item.get("priority", "normal")) if item else 1)
+            priority.pack(side="right", padx=(6, 0))
+            ttk.Label(editor, text="상세 내용").pack(anchor="w")
             body = self.editor_box(editor, height=14)
+            if item:
+                title.insert(0, item.get("title", Path(item["path"]).stem))
+                body.insert("1.0", original_text)
             notice = ttk.Label(editor, wraplength=480)
             notice.pack(fill="x")
+            path = item["path"] if item else f"requirements/req-{uuid4().hex[:12]}.md"
 
             def save_document():
                 try:
-                    item = catalog.write_local_requirement(
-                        project_id, name.get().strip(), body.get("1.0", "end-1c"),
-                        REQUIREMENT_ROLES[role.current()], related=related["id"] if related else None,
+                    saved = catalog.write_local_requirement(
+                        project_id, path, body.get("1.0", "end-1c"), REQUIREMENT_ROLES[kind.current()],
+                        title=title.get().strip(), priority=REQUIREMENT_PRIORITIES[priority.current()],
+                        expected_revision=item["id"] if item else None, related=item["related"] if item else None,
                     )
-                except FileExistsError:
-                    notice.configure(text="같은 이름의 원본 문서가 등록되어 있습니다. 다른 이름을 입력하세요.")
-                    return
-                except (Blocked, OSError, ValueError, sqlite3.Error, KeyError):
-                    notice.configure(text="저장 또는 등록 실패. 문서 이름, 권한 및 실행 상태를 확인하세요.")
+                except (Blocked, OSError, ValueError, sqlite3.Error, KeyError) as error:
+                    notice.configure(text=str(error) if isinstance(error, (Blocked, ValueError)) else
+                                     "저장 실패 · 사용자 저장소 권한을 확인하세요.")
                     return
                 editor.destroy()
-                refresh()
-                status.configure(text=f"등록 완료 · {item['path']} · 다음 개발 기준본에 반영됩니다.")
+                refresh(saved["id"])
+                status.configure(text=f"저장 완료 · v{saved['version']} · 다음 개발 승인에 반영됩니다.")
                 self.refresh()
 
-            ttk.Button(editor, text="저장 및 등록", command=save_document).pack(anchor="e")
+            buttons = ttk.Frame(editor)
+            buttons.pack(fill="x")
+            ttk.Button(buttons, text="취소", command=editor.destroy).pack(side="left")
+            ttk.Button(buttons, text="저장", style="Primary.TButton", command=save_document).pack(side="right")
+            title.focus_set()
+
+        def show_history():
+            item = selected_item()
+            if not item:
+                status.configure(text="개발 이력을 확인할 요구사항 개정을 선택하세요.")
+                return
+            try:
+                events = self.reader.ledger.read()
+            except (Blocked, OSError, ValueError, sqlite3.Error):
+                status.configure(text="개발 원장을 읽을 수 없습니다.")
+                return
+            outcomes = {row["run_id"]: row.get("outcome", "미확인") for row in events
+                        if row.get("project_id") == project_id and row["kind"] == "native_inspection_result"}
+            runs = [row for row in events if row.get("project_id") == project_id
+                    and row["kind"] == "native_inspection_intent"
+                    and any(ref.get("id") == item["id"] for ref in row.get("scope", {}).get("requirements", ()))]
+            self.registered_readout("요구사항 개정의 개발 이력", "\n".join(
+                f"{row['run_id']} · {REGISTERED_STATES.get(outcomes.get(row['run_id'], 'REQUEST_UNKNOWN'), '원장 결과 확인')}"
+                for row in runs) or "이 개정을 포함한 개발 승인이 없습니다.")
 
         table.bind("<<ListboxSelect>>", show_document)
         controls = ttk.Frame(panel)
         controls.pack(fill="x", pady=6)
-        ttk.Button(controls, text="요구사항 직접 작성", command=write_document).pack(side="left", padx=3)
-        ttk.Button(controls, text="TXT / Markdown 가져오기", command=register).pack(side="left", padx=3)
-        ttk.Button(controls, text="관련 문서 선택 해제",
+        ttk.Button(controls, text="빠른 추가", style="Primary.TButton", command=write_document).pack(side="left", padx=3)
+        ttk.Button(controls, text="수정", command=lambda: write_document(revise=True)).pack(side="left", padx=3)
+        ttk.Button(controls, text="개발 이력", command=show_history).pack(side="left", padx=3)
+        advanced = ttk.Frame(panel)
+        ttk.Button(controls, text="파일 가져오기 옵션",
+                   command=lambda: advanced.pack_forget() if advanced.winfo_manager() else
+                   advanced.pack(fill="x")).pack(side="right", padx=3)
+        role.pack_forget()
+        role_help.pack_forget()
+        role.pack(in_=advanced, fill="x")
+        role_help.pack(in_=advanced, fill="x")
+        ttk.Button(advanced, text="TXT / Markdown 가져오기", command=register).pack(side="left")
+        ttk.Button(advanced, text="관련 문서 선택 해제",
                    command=lambda: (table.selection_clear(0, "end"), show_document())).pack(side="left", padx=3)
         try:
             refresh()

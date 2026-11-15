@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from devorchestra.adapter import MockEvent
-from devorchestra.catalog import Catalog, new_project
+from devorchestra.catalog import Catalog, latest_requirements, new_project, read_frozen_requirements
+from devorchestra.gui_workspace import inspect_folder
 from devorchestra.lease import Blocked
 from devorchestra.ledger import Ledger
 from devorchestra.projection import ProjectionReader
@@ -32,6 +33,46 @@ class CatalogContracts(unittest.TestCase):
         self.run = self.runner.command("start", project=project)
         self.run_id = self.run["run_id"]
         self.assertEqual("NEED_APPROVAL", self.command("step")["state"])
+
+    def test_quick_requirement_revision_retains_original_and_orders_new_scope(self):
+        folder = TemporaryDirectory(dir=Path.cwd())
+        self.addCleanup(folder.cleanup)
+        original = Path(folder.name)
+        external = original / "feature.txt"
+        external.write_text("Old evidence", encoding="utf-8")
+        self.catalog.save_project({**self.alpha, "local_path": str(original)})
+        external_ref = self.catalog.register_requirement("alpha", "feature.txt", "FEATURE")
+        self.catalog.write_local_requirement("alpha", "other.md", "Other", "BUG", title="Other")
+        revision = self.catalog.write_local_requirement(
+            "alpha", "feature.txt", "Updated", "FEATURE", title="A feature",
+            priority="high", expected_revision=external_ref["id"],
+        )
+        view = self.catalog.read()
+        self.assertEqual(external_ref["id"], revision["supersedes"])
+        self.assertEqual(2, revision["version"])
+        self.assertEqual(revision, latest_requirements(view, "alpha")[0])
+        self.assertEqual(["Old evidence", "Updated"], [doc["text"] for doc in read_frozen_requirements(
+            view, "alpha", [external_ref, revision], self.ledger.state_boundary)])
+        with self.assertRaisesRegex(Blocked, "최신 개정"):
+            self.catalog.write_local_requirement(
+                "alpha", "feature.txt", "Stale", "FEATURE", expected_revision=external_ref["id"])
+        self.assertEqual("Old evidence", external.read_text(encoding="utf-8"))
+
+    def test_folder_hints_do_not_contact_remote_or_accept_conflicting_config(self):
+        root = self.ledger.path.parent / "original"
+        root.mkdir()
+        (root / "pyproject.toml").touch()
+        self.assertEqual(("folder", "", "", ["Python · pyproject.toml"]), inspect_folder(root))
+        git = root / ".git"
+        git.mkdir()
+        (git / "HEAD").write_text("ref: refs/heads/work/pilot\n", encoding="ascii")
+        local = git / "config"
+        url = "https://github.com/sample/example.git"
+        remote = f'[remote "origin"]\n\turl = {url}\n'
+        local.write_text(remote, encoding="utf-8")
+        self.assertEqual(("github", url, "work/pilot"), inspect_folder(root)[:3])
+        local.write_text(remote + "\tpushurl = https://example.org/test.git\n", encoding="utf-8")
+        self.assertEqual(("git", "", ""), inspect_folder(root)[:3])
 
     def command(self, action):
         return self.runner.command(action, expected_run=self.run_id)

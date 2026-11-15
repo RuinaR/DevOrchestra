@@ -22,18 +22,17 @@ STATUS = {
 }
 
 
-def show(center):
+def show(center, *, on_continue=None):
     panel = center.panel()
-    panel.title("DevOrchestra · Codex 환경 및 로그인")
+    panel.title("DevOrchestra · 계정 연결")
     panel.minsize(490, 0)
     runner = center.controller
     cancelled = Event()
     pending = None
-    state = tk.StringVar(value="공식 Codex 0.167.1 Windows x64 ZIP을 준비하세요.")
-    ttk.Label(panel, text="Codex 연결", style="Heading.TLabel").pack(anchor="w")
-    ttk.Label(panel, text=f"개인 저장 위치\n{runner.ledger.state_boundary}", wraplength=500).pack(anchor="w")
-    ttk.Label(panel, text="공식 ZIP 선택 → ChatGPT 로그인 → 로컬 실행 확인 → 프로젝트 등록",
-              wraplength=500).pack(anchor="w", pady=6)
+    installed = codex_setup.archive_path(runner.ledger).is_file()
+    state = tk.StringVar(value="공식 Codex ZIP 준비 완료. 로그인 상태 또는 구독 잔여량을 확인하세요."
+                         if installed else "처음 연결하려면 공식 Codex Windows ZIP을 선택하세요.")
+    ttk.Label(panel, text="ChatGPT 구독으로 Codex 연결", style="Heading.TLabel").pack(anchor="w")
     ttk.Label(panel, textvariable=state, wraplength=500, justify="left").pack(fill="x", pady=8)
     commands = ttk.Frame(panel)
     commands.pack(fill="x")
@@ -108,7 +107,7 @@ def show(center):
 
     for index, (action, title) in enumerate((
             ("install", "공식 ZIP 선택"), ("status", "로그인 상태"), ("login", "ChatGPT 로그인"),
-            ("logout", "로그아웃"), ("provider", "계정·모델 조회"), ("verify", "로컬 실행 확인"))):
+            ("logout", "로그아웃"), ("provider", "공식 구독 사용량"), ("verify", "로컬 실행 확인"))):
         button = ttk.Button(commands, text=title, command=lambda key=action: submit(key))
         button.grid(row=index // 3, column=index % 3, sticky="ew", padx=2, pady=2)
         buttons.append(button)
@@ -119,10 +118,16 @@ def show(center):
     for title, url in (("공식 ZIP 다운로드", codex_setup.RELEASE_URL), ("로그인 도움말", codex_setup.AUTH_DOCS),
                        ("Git 설치 안내", "https://git-scm.com/install/windows")):
         ttk.Button(links, text=title, command=lambda target=url: webbrowser.open(target)).pack(side="left")
+    git = ttk.LabelFrame(panel, text="GitHub 게시 · 선택 사항", padding=8)
+    git.pack(fill="x", pady=(10, 0))
+    ttk.Label(git, text="GitHub에 게시할 때는 Windows의 기존 Git 인증을 사용합니다. 프로젝트 등록만으로 "
+                        "게시 권한을 부여하지 않습니다. 일반 폴더에는 GitHub 연결이 필요 없습니다.",
+              wraplength=475, justify="left").pack(fill="x")
     bottom = ttk.Frame(panel)
     bottom.pack(fill="x", pady=(8, 0))
     ttk.Button(bottom, text="로그인 취소", command=cancelled.set).pack(side="left")
     recover_button = ttk.Button(bottom, text="복구 확인", command=lambda: submit("recover"))
     buttons.append(recover_button)
-    ttk.Button(bottom, text="프로젝트 등록", command=lambda: (panel.destroy(), center.register_project())).pack(side="right")
+    ttk.Button(bottom, text="프로젝트 등록 단계" if on_continue else "프로젝트 등록",
+               command=lambda: (panel.destroy(), (on_continue or center.register_project)())).pack(side="right")
     panel.bind("<Destroy>", lambda event: cancelled.set() if event.widget is panel else None, add="+")

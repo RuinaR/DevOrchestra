@@ -19,6 +19,7 @@ SCOPE_FIELDS = ("files", "network", "tools")
 FIELDS = frozenset(("project_id", "repository", "local_path", "documents", "git_sha",
                     "roles", "budget", "requested_scope", "git_policy", *TEXT_FIELDS, *LIST_FIELDS))
 REQUIREMENT_ROLES = ("GOAL", "FEATURE", "DESIGN", "BUG", "IMPROVEMENT")
+REQUIREMENT_PRIORITIES = ("high", "normal", "low")
 MAX_REQUIREMENT_BYTES = 256 * 1024
 MAX_MANAGER_REQUIREMENT_BYTES = 512 * 1024
 
@@ -281,7 +282,7 @@ class Catalog:
             return self._append_requirement(events, tail, project_id, relative, role, checksum, related, latest)
 
     def _append_requirement(self, events, tail, project_id, relative, role, checksum, related, latest,
-                            *, local=False):
+                            *, local=False, title=None, priority="normal"):
         now = datetime.now(timezone.utc).isoformat()
         item = {"project_id": project_id, "path": relative, "role": role, "sha256": checksum,
                 "version": latest["version"] + 1 if latest else 1,
@@ -289,16 +290,23 @@ class Catalog:
                 "registered_at": now}
         if local:
             item["storage"] = "local"
+        if title is not None:
+            item["title"] = title
+        if priority != "normal":
+            item["priority"] = priority
         item["id"] = digest(item)
         self.ledger.append(len(events), tail, {"kind": "requirement_registered",
                                               "data": item, "timestamp": now})
         return item
 
-    def write_local_requirement(self, project_id, relative, text, role, *, related=None):
+    def write_local_requirement(self, project_id, relative, text, role, *, related=None,
+                                title=None, priority="normal", expected_revision=None):
         """Save an owner-authored revision without changing either Git worktree."""
         relative = _requirement_path(relative)
-        if not relative.lower().endswith(".md") or role not in REQUIREMENT_ROLES or not text.strip():
-            raise ValueError("Markdown 문서 이름과 내용을 입력하세요.")
+        if (role not in REQUIREMENT_ROLES or not text.strip()
+                or priority not in REQUIREMENT_PRIORITIES
+                or (title is not None and (not _text(title, 120) or not title.strip()))):
+            raise ValueError("요구사항 유형, 제목 및 내용을 확인하세요.")
         data = text.encode("utf-8")
         if len(data) > MAX_REQUIREMENT_BYTES:
             raise ValueError("문서는 UTF-8 기준 256 KiB까지 저장할 수 있습니다.")
@@ -316,8 +324,13 @@ class Catalog:
                            if item["path"].casefold() == relative.casefold()), None)
             if related is not None and not any(item["id"] == related for item in history):
                 raise Blocked("Related requirement does not belong to this project")
-            if latest and latest.get("storage") != "local":
-                raise FileExistsError(relative)
+            if expected_revision is not None and (not latest or latest["id"] != expected_revision):
+                raise Blocked("요구사항의 최신 개정이 바뀌었습니다. 목록을 다시 확인하세요.")
+            if expected_revision is None:
+                if not relative.lower().endswith(".md"):
+                    raise ValueError("새 문서는 Markdown 이름으로 등록하세요.")
+                if latest and latest.get("storage") != "local":
+                    raise FileExistsError(relative)
             checksum = sha256(data).hexdigest()
             root = _local_requirement_root(self.ledger.state_boundary, project_id)
             target = root / (checksum + ".md")
@@ -329,10 +342,13 @@ class Catalog:
                     stream.write(data)
             if _read_requirement(root, target.name, self.ledger.state_boundary, local=True) != data:
                 raise Blocked("Stored requirement does not match the authored revision")
-            if latest and (latest["sha256"], latest["role"], latest["related"]) == (checksum, role, related):
+            if (latest and latest.get("storage") == "local"
+                    and (latest["sha256"], latest["role"], latest["related"],
+                         latest.get("title"), latest.get("priority", "normal"))
+                    == (checksum, role, related, title, priority)):
                 return latest
             return self._append_requirement(events, tail, project_id, relative, role, checksum, related, latest,
-                                            local=True)
+                                            local=True, title=title, priority=priority)
 
     def write_requirement(self, project_id, relative, text, role, *, related=None):
         """Explicit owner action. Create a Markdown file exclusively, then register it."""
@@ -393,4 +409,4 @@ def latest_requirements(catalog, project_id):
     latest = {}
     for item in catalog.get("requirements", {}).get(project_id, ()):
         latest[item["path"].casefold()] = item
-    return list(latest.values())
+    return sorted(latest.values(), key=lambda item: REQUIREMENT_PRIORITIES.index(item.get("priority", "normal")))

@@ -282,7 +282,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         state.set("저장한 개발 설정을 읽지 못했습니다. 화면의 권한과 검증 설정을 다시 확인하세요.")
     draft = restored if restored is not None else prior.copy()
     if draft:
-        ttk.Label(body, text="이전 설정을 불러왔습니다. 실행 권한은 승인 화면에서 다시 확인합니다.",
+        ttk.Label(body, text="저장한 설정을 불러왔습니다. 이미 승인한 실행의 권한은 그대로 유지됩니다.",
                   wraplength=580).pack(anchor="w")
     grants = _permission_checkboxes(body, draft)
     ttk.Label(body, text="자동 설치를 허용하면 필요한 공개 GitHub 도구나 소스를 작업 중 찾아 복제본에 준비합니다.",
@@ -326,10 +326,35 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         return
     ttk.Button(body, text="등록 목표·기준 편집",
                command=lambda: save_budget() and (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
-    ttk.Label(body, text="원본 직접 Git 브랜치 · 비워 두면 기존 복제본 개발").pack(anchor="w")
+    from .gui_workspace import inspect_folder
+
+    try:
+        _, _, detected_branch, _ = inspect_folder(data["local_path"])
+    except (OSError, ValueError, RuntimeError):
+        detected_branch = ""
+    ttk.Label(body, text="Git 자동 게시 · 비워 두면 작업 사본에 개발").pack(anchor="w")
     ttk.Entry(body, textvariable=direct_branch).pack(fill="x")
-    ttk.Label(body, text="전체 재부팅 후 새 1사이클 · 미종결 계획 요청 ID (해당 시에만 입력)").pack(anchor="w")
-    ttk.Entry(body, textvariable=reboot_request).pack(fill="x")
+    if detected_branch:
+        ttk.Button(body, text=f"현재 GitHub 브랜치 사용 · {detected_branch}",
+                   command=lambda: direct_branch.set(detected_branch)).pack(anchor="w")
+    elif not direct_branch.get():
+        ttk.Label(body, text="지원되는 GitHub 원격과 브랜치를 자동으로 찾지 못했습니다. 작업 사본을 사용할 수 있습니다.",
+                  wraplength=580).pack(fill="x")
+    recovery = ttk.LabelFrame(body, text="실행 복구", padding=8)
+
+    def toggle_section(frame, button, title):
+        if frame.winfo_manager():
+            frame.pack_forget()
+            button.configure(text=f"{title} 보기")
+        else:
+            frame.pack(fill="x", after=button, pady=(0, 6))
+            button.configure(text=f"{title} 닫기")
+
+    recovery_button = ttk.Button(body, text="실행 복구 보기",
+                                 command=lambda: toggle_section(recovery, recovery_button, "실행 복구"))
+    recovery_button.pack(anchor="w", pady=(4, 6))
+    ttk.Label(recovery, text="전체 재부팅 후 새 1사이클 · 미종결 계획 요청 ID").pack(anchor="w")
+    ttk.Entry(recovery, textvariable=reboot_request).pack(fill="x", pady=(0, 4))
 
     def retry_git():
         from . import direct_git
@@ -343,7 +368,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             else:
                 state.set(f"원격 HEAD 확인 · {commit}")
 
-    ttk.Button(body, text="미완료 Git 푸시 재시도", command=retry_git).pack(anchor="w")
+    ttk.Button(recovery, text="미완료 Git 푸시 재시도", command=retry_git).pack(anchor="w")
     inputs = ttk.Frame(body)
     inputs.pack(fill="x")
     entries = {}
@@ -446,19 +471,20 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             entries["archive"].insert(0, path)
 
     ttk.Button(inputs, text="찾기", command=archive).grid(row=0, column=2)
-    ttk.Label(body, text="독립 검증 설정").pack(anchor="w")
-    ttk.Label(body, text="기본 검증은 원본 Git, 복제본과 변경 범위를 확인합니다. 입력·동작 검증은 실행 검사를 설정하세요.",
-              wraplength=580).pack(anchor="w")
-    ttk.Label(body, text="실행 검사에 screen_changed를 설정하면 소유 창의 입력 전후 화면을 비교합니다.",
-              wraplength=580).pack(anchor="w")
+    ttk.Label(body, text="기본 검증은 작업 사본과 변경 범위를 확인합니다. 기능 동작은 검증 계약에서 설정할 수 있습니다.",
+              wraplength=580).pack(anchor="w", pady=(4, 0))
     ttk.Checkbutton(body, text="AI 시각 검토 · 소유 테스트 창 캡처를 Codex에 전달",
                     variable=use_images).pack(anchor="w", pady=(0, 6))
     play_option()
-    visual_hint = ttk.Label(body, wraplength=580)
+    advanced = ttk.LabelFrame(body, text="검증 계약", padding=8)
+    advanced_button = ttk.Button(body, text="검증 계약과 실행 도구 보기",
+                                 command=lambda: toggle_section(advanced, advanced_button, "검증 계약과 실행 도구"))
+    advanced_button.pack(anchor="w", pady=(4, 6))
+    visual_hint = ttk.Label(advanced, wraplength=570)
     visual_hint.pack(fill="x")
-    verifier_actions = ttk.Frame(body)
+    verifier_actions = ttk.Frame(advanced)
     verifier_actions.pack(fill="x")
-    spec = center.editor_box(body, height=6)
+    spec = center.editor_box(advanced, height=6)
     template = {"executable": "", "checks": {key: {"args": [], "stdout": "", "inputs": []} for key in criteria}}
     default_verifier = {"mode": registered_cycle.BASELINE_VERIFIER}
     godot_verifier = {"mode": game_pilot.REGISTERED_GUI}
@@ -533,11 +559,11 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                      "stdout": "Hello", "inputs": []} for key in criteria}})
         state.set("텍스트 읽기 예제를 불러왔습니다. 프로젝트에 맞는 검증 도구, 인자와 기대 출력으로 바꾸세요.")
 
-    ttk.Button(verifier_actions, text="검증 도구 선택", command=choose_verifier).pack(side="left")
-    ttk.Button(verifier_actions, text="기본 검증 사용",
-               command=lambda: write_spec(godot_verifier if is_godot else default_verifier)).pack(side="left")
-    ttk.Button(verifier_actions, text="Godot GUI 검증", command=select_godot).pack(side="left")
-    ttk.Button(verifier_actions, text="Windows 텍스트 검사 예제", command=windows_text_check).pack(side="left", padx=4)
+    center.action_grid(verifier_actions, (("검증 도구 선택", choose_verifier),
+                                         ("기본 검증 사용", lambda: write_spec(
+                                             godot_verifier if is_godot else default_verifier)),
+                                         ("Godot GUI 검증", select_godot),
+                                         ("Windows 텍스트 검사 예제", windows_text_check)))
     detail = center.editor_box(body, height=8, state="disabled")
     cancelled = Event()
     future = None
