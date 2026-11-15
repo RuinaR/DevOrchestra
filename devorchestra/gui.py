@@ -400,7 +400,7 @@ class CommandCenter:
         verification.grid(row=3, column=0, sticky="ew", padx=18)
         self.verify_overview = label(verification, fg=MUTED, wraplength=480)
         self.verify_overview.pack(fill="x")
-        self.action_grid(verification, (("개발 기록과 Git 게시 결과", self.show_registered_history),
+        self.action_grid(verification, (("개발 기록과 게시 상태", self.show_registered_history),
                                         ("완료 기준별 결과", self.show_registered_criteria),
                                         ("GUI 검증 보고서와 이미지", self.gui_verification_report),
                                         ("원본 반영 검토", self.original_apply_panel)))

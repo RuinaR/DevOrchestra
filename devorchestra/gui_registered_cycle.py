@@ -290,7 +290,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     draft = restored if restored is not None else prior.copy()
     if local:
         draft = {"web-research": False, "portable-tools": False, "cycles": "1", **draft}
-    if draft:
+    if restored is not None or prior:
         ttk.Label(body, text="저장한 설정을 불러왔습니다. 이미 승인한 실행의 권한은 그대로 유지됩니다.",
                   wraplength=580).pack(anchor="w")
     grants = _permission_checkboxes(body, draft, local=local)
@@ -404,7 +404,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     def edit_mode():
         entries["files"].configure(state="disabled" if whole.get() else "normal")
 
-    ttk.Checkbutton(inputs, text="복제본 전체 개발 · 소스·설정·에셋 생성, 수정 및 삭제",
+    whole_label = ("개발 사본 전체 · 보호 경로를 제외한 파일 추가 및 수정" if local else
+                   "복제본 전체 개발 · 소스·설정·에셋 생성, 수정 및 삭제")
+    ttk.Checkbutton(inputs, text=whole_label,
                     variable=whole, command=edit_mode).grid(row=len(entries), column=0, columnspan=2, sticky="w")
     edit_mode()
     ttk.Label(inputs, text="복제본 전체 개발을 끄면 쉼표로 지정한 파일만 수정합니다. "
@@ -928,6 +930,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     remaining = f" 외 {len(missing) - 3}개" if len(missing) > 3 else ""
                     raise ValueError("독립 검증의 기대 출력을 입력하세요. " + ", ".join(missing[:3]) + remaining)
             values = {key: entry.get().strip() for key, entry in entries.items()}
+            if local and not values["archive"]:
+                raise ValueError("설정에서 공식 Codex를 연결하거나 검증된 Codex ZIP을 선택하세요.")
             seconds = int(values["seconds"])
             tokens = None if subscription.get() else int(values["tokens"])
             cycles = int(values["cycles"]) if values["cycles"] else None
