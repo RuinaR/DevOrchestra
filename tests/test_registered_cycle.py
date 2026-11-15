@@ -362,7 +362,7 @@ class RegisteredTrustTests(unittest.TestCase):
                  "resume": {"parent_run_id": "previous"}, "graceful_stop": {}, "model_calls_max": 3}
         session = SimpleNamespace(scope=scope, image={"files": {"prior": 1}}, runner=Mock(), check=Mock(),
                                   record=Mock(), source=lambda: digest(session.image), calls=0, stop_reason=None,
-                                  check_image=Mock(), owned_verified=True, usage_complete=True)
+                                  check_image=Mock(), owned_verified=True, usage_complete=True, publish_cycle=Mock())
         plan = {"criterion": "C1", "plan": "Resolve the missing evidence", "mode": "documentation",
                 "artifact": paths[0]}
         continuation = {"cycle": 1, "stagnant": 1, "criteria_status": {"C1": "USER_TEST_REQUIRED"},
@@ -387,6 +387,7 @@ class RegisteredTrustTests(unittest.TestCase):
         self.assertIn("Add test evidence", session.call.call_args.args[3])
         self.assertEqual(session.call.call_args.kwargs["allowed_paths"], paths[:1])
         self.assertEqual(session.cycles_checked, 2)
+        session.publish_cycle.assert_called_once_with(2, "C1", "CONTINUE", comparison)
 
     def test_unreadable_plan_saves_prior_candidate_and_call_exhaustion_stops_safely(self):
         scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Design", "checks": []}}, "goal": "Work",
@@ -419,7 +420,7 @@ class RegisteredTrustTests(unittest.TestCase):
                  "requirements": [], "visual_preview": True, "verifier": {"mode": registered_cycle.BASELINE_VERIFIER}}
         session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), record=Mock(),
                                   source=lambda: digest(session.image), changes=[], cycles_checked=0,
-                                  check_image=Mock(), owned_verified=True, usage_complete=True)
+                                  check_image=Mock(), owned_verified=True, usage_complete=True, publish_cycle=Mock())
 
         def call(number, phase, target, prompt, **_options):
             if phase == "manager-planning":
@@ -453,7 +454,7 @@ class RegisteredTrustTests(unittest.TestCase):
                  "requirements": [], "verifier": {"mode": registered_cycle.BASELINE_VERIFIER}}
         session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), record=Mock(),
                                   source=lambda: digest(session.image), changes=["docs/DESIGN.md"],
-                                  check_image=Mock(), owned_verified=True, usage_complete=True)
+                                  check_image=Mock(), owned_verified=True, usage_complete=True, publish_cycle=Mock())
 
         def call(number, phase, target, prompt, **_options):
             if phase == "manager-planning":
@@ -506,7 +507,7 @@ class RegisteredTrustTests(unittest.TestCase):
                  "verifier": {"checks": {key: {"args": []}}}}
         session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), check_image=Mock(),
                                   record=Mock(), source=lambda: digest(session.image), changes=["docs/DESIGN.md"],
-                                  owned_verified=True, usage_complete=True)
+                                  owned_verified=True, usage_complete=True, publish_cycle=Mock())
 
         def call(number, phase, target, prompt, **options):
             if phase == "manager-planning":

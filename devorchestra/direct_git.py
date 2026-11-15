@@ -357,7 +357,7 @@ def _safe_file(root, name, expected, *, redact=False):
     return data
 
 
-def publish(root, scratch, check, approved, image, paths, message, record):
+def publish(root, scratch, check, approved, image, paths, message, record, *, report=None):
     """Commit only the attested paths, then push the exact commit without force."""
     git = lambda *args, **kw: _command(root, scratch, check, *args, **kw)
     if binding(root, scratch, check) != approved or snapshot(root) != image:
@@ -376,31 +376,107 @@ def publish(root, scratch, check, approved, image, paths, message, record):
             _safe_file(root, name, image["files"][name])
         elif _protected(name):
             raise Blocked(f"Protected Git deletion: {name}")
-    record("direct_git_intent", before=head, branch=ref, origin=url, candidate_sha256=digest(image),
-           paths=sorted(dirty), files_sha256=digest(image["files"]))
+    identity = {"before": head, "branch": ref, "origin": url}
+    facts = {**identity, "candidate_sha256": digest(image), "paths": sorted(dirty),
+             "files_sha256": digest(image["files"])}
+    if report is None:
+        record("direct_git_intent", **facts)
+        commit = _commit_publication(git, root, head, image["files"], dirty, message)
+    else:
+        commit = _commit_with_record(git, root, scratch, image["files"], dirty, message, record, facts, report)
+    record("direct_git_commit", **identity, commit=commit)
+    push_pending(root, scratch, check, approved, commit, record)
+    return commit
+
+
+def _commit_with_record(git, root, scratch, files, dirty, message, record, facts, report):
+    from .development_record import patch, reserved
+
+    if any(reserved(name) for name in dirty):
+        raise Blocked("Candidate overlaps Controller development record paths")
+    if not report[0].endswith(f" {facts['branch']} -->\n"):
+        raise Blocked("Development record does not match the approved branch")
+    outputs, payload = patch(root, files, report)
+    if any(SECRET.search(data) or PRIVATE_PATH.search(data) for data in outputs.values()):
+        raise Blocked("Development record contains protected material")
+    names = sorted(outputs)
+    if git("check-ignore", "--no-index", "--", *names, codes=(0, 1)):
+        raise Blocked("Git ignore policy excludes a Controller development record")
+    manifest = _record_manifest(outputs)
+    combined = {**files, **manifest}
+    paths = dirty | outputs.keys()
+    head = facts["before"]
+    with TemporaryDirectory(prefix="publication-record-", dir=scratch) as folder:
+        delta = Path(folder) / "record.patch"
+        delta.write_bytes(payload)
+        apply = ("apply", "--index", "--whitespace=nowarn")
+        git(*apply, "--check", str(delta))
+        details = {**facts, "paths": sorted(paths), "files_sha256": digest(combined),
+                   "development_record": report[3], "record_files_sha256": digest(manifest)}
+        record("direct_git_intent", **details)
+        try:
+            git(*apply, str(delta))
+            if snapshot(root)["files"] != combined:
+                raise Blocked("Generated development record did not match the prepared bytes")
+            return _commit_publication(git, root, head, combined, paths, message, ref=facts["branch"],
+                                       prepared=lambda tree, commit: record("direct_git_prepared", **details,
+                                                                            tree=tree, commit=commit))
+        except (Blocked, OSError, ValueError, KeyboardInterrupt):
+            if _head(git) == head and git("symbolic-ref", "HEAD").strip() == facts["branch"]:
+                current = snapshot(root)["files"]
+                if current == combined:
+                    git(*apply, "--reverse", str(delta))
+                if snapshot(root)["files"] != files:
+                    raise Blocked("Development record rollback could not be verified")
+                staged = set(filter(None, git("diff", "--cached", "--name-only", "-z").split("\0")))
+                if not staged <= dirty:
+                    raise Blocked("Publication rollback found unexpected staged paths")
+                for name in sorted(staged):
+                    if head:
+                        git("restore", "--staged", "--source=HEAD", "--", name)
+                    else:
+                        git("update-index", "--force-remove", "--", name)
+                _check_worktree(git, sorted(dirty))
+                record("direct_git_aborted", before=head, branch=facts["branch"], origin=facts["origin"])
+            raise
+
+
+def _record_manifest(outputs):
+    return {name: {"sha256": sha256(data).hexdigest(), "bytes": len(data)} for name, data in outputs.items()}
+
+
+def _commit_publication(git, root, head, files, dirty, message, *, ref=None, prepared=None):
     # Batches keep Windows command lines bounded and preserve literal path semantics.
     ordered = sorted(dirty)
     for start in range(0, len(ordered), 16):
         git("add", "-A", "--", *ordered[start:start + 16])
     if set(git("diff", "--cached", "--name-only", "-z").rstrip("\0").split("\0")) != dirty:
         raise Blocked("Git staged paths changed")
-    if git("diff", "--name-only", "-z") or snapshot(root)["files"] != image["files"] or _head(git) != head:
+    if git("diff", "--name-only", "-z") or snapshot(root)["files"] != files or _head(git) != head:
         raise Blocked("Working tree changed during Git staging")
-    for name in sorted(dirty & image["files"].keys()):
+    for name in sorted(dirty & files.keys()):
         expected = git("hash-object", "--no-filters", "--", name).strip()
         if git("rev-parse", f":{name}").strip() != expected:
             raise Blocked(f"Git filters changed staged bytes: {name}")
     tree = git("write-tree").strip()
     if not re.fullmatch(OID, tree):
         raise Blocked("Invalid staged Git tree")
-    git("commit", "--no-gpg-sign", "-m", message)
-    commit = _head(git)
-    if (commit == head or git("rev-list", "--parents", "-n", "1", commit).split() !=
+    if prepared:
+        # Journal the exact object before moving the ref. A later retry must find this object, not just a similar tree.
+        commit = git("commit-tree", tree, *(["-p", head] if head else []), "--no-gpg-sign", "-m", message).strip()
+        if not re.fullmatch(OID, commit):
+            raise Blocked("Invalid prepared Git commit")
+        prepared(tree, commit)
+        if git("symbolic-ref", "HEAD").strip() != ref:
+            raise Blocked("Approved Git branch changed before publication")
+        git("update-ref", "-m", "DevOrchestra cycle publication", ref, commit, head or "0" * len(tree))
+    else:
+        git("commit", "--no-gpg-sign", "-m", message)
+        commit = _head(git)
+    if (commit == head or _head(git) != commit or git("rev-list", "--parents", "-n", "1", commit).split() !=
             [commit, *([head] if head else [])] or git("status", "--porcelain=v1", "-z")
             or git("rev-parse", "HEAD^{tree}").strip() != tree):
         raise Blocked("Git commit could not be verified")
-    record("direct_git_commit", before=head, commit=commit, branch=ref, origin=url)
-    push_pending(root, scratch, check, approved, commit, record)
     return commit
 
 
@@ -432,6 +508,9 @@ def pending(events, project):
             checkpoint = event
         elif event["kind"] == "direct_git_pushed":
             checkpoint = None
+        elif event["kind"] == "direct_git_aborted" and checkpoint and checkpoint["kind"] == "direct_git_intent":
+            if all(event.get(key) == checkpoint.get(key) for key in ("run_id", "cycle", "branch", "origin", "before")):
+                checkpoint = None
     return checkpoint
 
 
@@ -442,13 +521,18 @@ def retry(runner, project):
 
     with execution_slot() as abandoned:
         events, fence = runner._idle_diagnostic(abandoned)
-        commit = pending(events, project)
-        if not commit or commit["kind"] != "direct_git_commit":
+        checkpoint = pending(events, project)
+        if not checkpoint:
             raise Blocked("No recorded local commit is eligible for a push retry")
         source, _, _, _ = baseline(runner.ledger, project)
-        intent = next((row for row in reversed(events) if row["kind"] == "direct_git_intent"
-                       and row.get("project_id") == project and row.get("run_id") == commit.get("run_id")), None)
-        if (not intent or any(intent[key] != commit[key] for key in ("origin", "branch", "before"))
+        identity = ("project_id", "run_id", "cycle", "approval_sha256", "origin", "branch", "before")
+
+        def matching(kind, rows=events):
+            return next((row for row in reversed(rows) if row["kind"] == kind
+                         and all(row.get(key) == checkpoint.get(key) for key in identity)), None)
+
+        intent = matching("direct_git_intent")
+        if (not intent
                 or digest(snapshot(source)["files"]) != intent["files_sha256"]):
             raise Blocked("Pending Git candidate evidence changed")
         count = len(events)
@@ -458,14 +542,34 @@ def retry(runner, project):
 
         def record(kind, **facts):
             nonlocal count, fence
-            count, fence = runner.ledger.append(count, fence, {
-                "kind": kind, "project_id": project, "run_id": commit["run_id"], **facts})
+            count, fence = runner.ledger.append(count, fence, {"kind": kind, "project_id": project,
+                "run_id": checkpoint["run_id"], **{key: checkpoint[key] for key in ("approval_sha256", "cycle", "criterion", "verdict")
+                                                   if key in checkpoint}, **facts})
 
-        approved = {"ref": commit["branch"], "url": commit["origin"], "head": commit["before"]}
-        push_pending(source, runner.ledger.local_directory("temp"), check, approved, commit["commit"], record)
+        scratch = runner.ledger.local_directory("temp")
+        approved = {"ref": intent["branch"], "url": intent["origin"], "head": intent["before"]}
+        if checkpoint["kind"] == "direct_git_commit":
+            commit = checkpoint["commit"]
+        else:
+            prepared = matching("direct_git_prepared", events[events.index(intent) + 1:])
+            if (not prepared or not intent.get("development_record") or any(prepared.get(key) != intent.get(key)
+                    for key in ("candidate_sha256", "paths", "files_sha256", "record_files_sha256", "development_record"))):
+                raise Blocked("No prepared development record is eligible for a push retry")
+            git = lambda *args: _command(source, scratch, check, *args)
+            commit = binding(source, scratch, check)["head"]
+            if (not commit or commit != prepared.get("commit") or commit == approved["head"]
+                    or git("status", "--porcelain", "-z")
+                    or git("rev-parse", "HEAD^{tree}").strip() != prepared.get("tree")
+                    or git("rev-list", "--parents", "-n", "1", commit).split() !=
+                    [commit, *([approved["head"]] if approved["head"] else [])]):
+                raise Blocked("Prepared Git commit could not be verified")
+            if binding(source, scratch, check) != {**approved, "head": commit}:
+                raise Blocked("Prepared Git destination changed")
+            record("direct_git_commit", before=approved["head"], origin=approved["url"], branch=approved["ref"], commit=commit)
+        push_pending(source, scratch, check, approved, commit, record)
         migration = next((row for row in reversed(events) if row["kind"] == "direct_git_migration_intent"
-                          and row.get("run_id") == commit["run_id"]), None)
+                          and row.get("run_id") == checkpoint["run_id"]), None)
         if migration:
-            record("direct_git_migrated", scope=migration["scope"], commit=commit["commit"],
+            record("direct_git_migrated", scope=migration["scope"], commit=commit,
                    source_sha256=digest(snapshot(source)))
-        return commit["commit"]
+        return commit

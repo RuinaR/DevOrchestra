@@ -12,7 +12,7 @@ from threading import Lock
 from time import monotonic, time
 from uuid import uuid4
 
-from . import adaptive_play, codex_setup, cycle_progress, game_pilot, project_tools, visual_review as visual
+from . import adaptive_play, codex_setup, cycle_progress, development_record, game_pilot, project_tools, visual_review as visual
 from .ai_usage import QUOTA_FRESH_SECONDS, QUOTA_STOP_PERCENT, SUBSCRIPTION_MODE
 from .catalog import Catalog, latest_requirements, read_frozen_requirements
 from .default_instructions import public_instruction
@@ -273,7 +273,7 @@ def _editable_paths(paths, protected=(), *, limit=MAX_EDIT_PATHS):
     if (type(paths) is not list or not 1 <= len(paths) <= limit
             or any(type(name) is not str for name in paths)
             or len({name.casefold() for name in paths}) != len(paths)
-            or any(_protected(name) or name.casefold() in blocked
+            or any(_protected(name) or name.casefold() in blocked or development_record.reserved(name)
                    or ".git" in {part.casefold() for part in _relative(name).parts}
                    or _relative(name).name.casefold() in {"agents.md", "agents.override.md"} for name in paths)):
         raise Blocked(f"복제본에서 보호되지 않은 파일 경로를 최대 {limit}개 선택하세요.")
@@ -579,7 +579,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     if source_requirement_paths.intersection(files):
         raise Blocked("Registered requirements cannot be changed by the Developer")
     protected = sorted(set(data["documents"].values()) | source_requirement_paths
-                       | {path for check in verifier.get("checks", {}).values() for path in check["inputs"]})
+                       | {path for check in verifier.get("checks", {}).values() for path in check["inputs"]}
+                       | {development_record.DIRECTORY})
     if direct:
         protected = sorted(set(protected) | {".gitattributes", ".gitmodules"})
     if prior_replica_candidate and prior_replica_candidate.get("unsettled_candidate"):
@@ -965,6 +966,15 @@ class RegisteredSession(_FixtureSession):
 
     def publish_cycle(self, cycle, criterion, verdict, comparison, *, recovered_paths=None):
         if not self.direct_binding:
+            if self.owned_verified:
+                events, _ = self.runner.ledger.snapshot()
+                _, current, _, path, detail = development_record.render(
+                    events, project=self.scope["project_id"], run=self.fields["run_id"], cycle=cycle,
+                    branch=None, head=self.scope.get("original_head"), candidate=self.source(), criterion=criterion,
+                    final=verdict, criteria=comparison["criteria"], requirements=len(self.scope["requirements"]),
+                    paths=self.signoff_state["changed"])
+                self.record("native_inspection_development_record", cycle=cycle, criterion=criterion, path=path,
+                            current=current, detail=detail, publication="LOCAL_ONLY")
             return
         from . import direct_git
 
@@ -977,20 +987,34 @@ class RegisteredSession(_FixtureSession):
                         if self.direct_files.get(name) != current.get(name)))
         if paths:
             _editable_paths(paths, self.scope.get("protected_edit_paths", ()), limit=4096)
+        else:
+            return
         verified = sum(value == "VERIFIED" for value in comparison["criteria"].values())
         message = (f"{self.scope['project_name']} cycle {cycle}: {criterion} ({verdict})\n\n"
                    f"Ledger Seq {self.count}\nIndependent verification: {verified}/{len(comparison['criteria'])}\n"
                    + "\n".join(paths[:24]))
 
-        def record(kind, **facts):
-            self.record(kind, cycle=cycle, criterion=criterion, verdict=verdict, **facts)
+        original_files = digest(current)
+        planned_files = original_files
 
+        def record(kind, **facts):
+            nonlocal planned_files
+            self.record(kind, cycle=cycle, criterion=criterion, verdict=verdict, **facts)
+            if kind == "direct_git_intent":
+                planned_files = facts["files_sha256"]
+
+        events, _ = self.runner.ledger.snapshot()
+        report = development_record.render(events, project=self.scope["project_id"], run=self.fields["run_id"],
+                                           cycle=cycle, branch=self.direct_binding["ref"],
+                                           head=self.direct_binding["head"], candidate=self.source(), criterion=criterion,
+                                           final=verdict, criteria=comparison["criteria"],
+                                           requirements=len(self.scope["requirements"]), paths=paths)
         try:
             head = direct_git.publish(self.work, self.scratch, self.check, self.direct_binding,
-                                      self.image, paths, message, record)
+                                      self.image, paths, message, record, report=report)
         finally:
             actual = snapshot(self.work)
-            if actual["files"] != current:
+            if digest(actual["files"]) not in {original_files, planned_files}:
                 raise Blocked("Git publication changed candidate files")
             self.image = actual
         self.direct_binding = {**self.direct_binding, "head": head}
@@ -1161,7 +1185,8 @@ class RegisteredSession(_FixtureSession):
                 extra_roots = (Path(tool["template"]).parent,) if game and phase == "developer" else ()
                 if whole:
                     extra_roots += tuple(self.work / _relative(name) for name in self.scope["protected_edit_paths"]
-                                         if name in self.image["files"])
+                                         if name in self.image["files"] or (name == development_record.DIRECTORY
+                                             and any(path.startswith(development_record.ROOT) for path in self.image["files"])))
                 if portable is not None:
                     extra_roots += (portable,)
                     prompt += (f"\nThe Controller provisioned approved portable tools in {portable}. "
@@ -2117,7 +2142,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         status = {key: ("NOT_VERIFIED" if key == game_pilot.CRITERIA[0] else "USER_TEST_REQUIRED")
                   for key in criteria}
         session.progress = status
-    known = {digest(session.image["files"])}
+    known = {development_record.candidate_files_digest(session.image["files"])}
     reviewed = set()
     failures = set()
     prior_candidate = scope.get("prior_replica_candidate", {})
@@ -2473,7 +2498,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 if str(error) != "GRACEFUL_STOP":
                     raise
                 return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
-            identity = digest(session.image["files"])
+            identity = development_record.candidate_files_digest(session.image["files"])
             if not diff or identity in known:
                 stagnant += 1
                 if diff:
@@ -2510,8 +2535,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         expected = _expected_final(scope, key, comparison, review)
         rework = expected == "REWORK"
         final = _decide(session, count, key, review, comparison, expected)
-        if scope.get("direct_git"):
-            session.publish_cycle(count, key, final, comparison)
+        session.publish_cycle(count, key, final, comparison)
         session.signoff_state = {}
         if final == "COMPLETED":
             return final
@@ -3309,7 +3333,8 @@ def _legacy_review_checkpoint(rows, source, replica, frozen, image, onboarding, 
     if not diff or len(diff) > MAX_DIFF or digest(diff) != diffs[0]["cycle_diff_sha256"]:
         raise Blocked("기존 Developer diff가 실행 기록과 일치하지 않습니다.")
     checkpoint = {"cycle": 1, "criterion": ref["target"], "criteria_status": dict.fromkeys(scope["criteria"], "NOT_STARTED"),
-                  "changed": changed, "continuation": {"known": sorted({digest(before), digest(image["files"])}),
+                  "changed": changed, "continuation": {"known": sorted({development_record.candidate_files_digest(before),
+                                                                           development_record.candidate_files_digest(image["files"])}),
                   "reviewed": [], "failures": [], "stagnant": 0}}
     if scope.get("visual_review"):
         candidates = [row for row in rows if row["kind"] == "native_inspection_role_result"
@@ -3777,7 +3802,7 @@ def _resume_remaining(session, diff):
             session.progress = comparison["criteria"]
             session.cycles_checked = count
     if postprocess:
-        saved = resume.get("continuation") or {"known": [digest(session.image["files"])], "reviewed": [],
+        saved = resume.get("continuation") or {"known": [development_record.candidate_files_digest(session.image["files"])], "reviewed": [],
                                                "failures": [], "stagnant": 0}
         accepted = set(saved.get("accepted_without_functional_check", ()))
         stagnant = _cycle_stagnation(session.scope, key, review, checked, comparison, accepted,
@@ -3791,8 +3816,7 @@ def _resume_remaining(session, diff):
     expected = _expected_final(session.scope, key, comparison, review)
     final = _decide(session, count, key, review, comparison, expected)
     direct = session.scope.get("direct_git")
-    if direct:
-        session.publish_cycle(count, key, final, comparison, recovered_paths=resume["changed"])
+    session.publish_cycle(count, key, final, comparison, recovered_paths=resume["changed"])
     feedback = {"target": key, "next": final, "change_hash": digest(diff),
                 "review": session.signoff_state.get("review_feedback", review),
                 "verifier": checked.get("observations", [])}
