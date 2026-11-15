@@ -130,14 +130,18 @@ def read_frames(ledger, evidence):
                 if fingerprint(binding[0], 256 * 1024**2)["sha256"] != binding[1]:
                     raise Blocked("Visual evidence executable changed")
                 verified_executables.add(binding)
-        data, observed = verified_image(path, frame["sha256"])
-        if any(observed[key] != frame[key] for key in ("width", "height", "file")):
-            raise Blocked("Visual artifact dimensions changed")
-        pixels = _verify_pixels(data, frame["width"], frame["height"])
-        if "client_sha256" in frame:
-            _verify_client(frame, pixels)
-        result.append(data)
+        result.append(read_frame(path, frame))
     return result
+
+
+def read_frame(path, frame):
+    data, observed = verified_image(path, frame["sha256"])
+    if any(observed[key] != frame[key] for key in ("width", "height", "file")):
+        raise Blocked("Visual artifact dimensions changed")
+    pixels = _verify_pixels(data, frame["width"], frame["height"])
+    if "client_sha256" in frame:
+        _verify_client(frame, pixels)
+    return data
 
 
 def _verify_pixels(data, width, height):

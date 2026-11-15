@@ -57,6 +57,8 @@ def _scope_preferences(scope):
         values["play_foreground"] = policy.get("foreground") is True
         if "capture_fps" in policy:
             values["capture_fps"] = str(policy["capture_fps"])
+        if "evidence_mib" in policy:
+            values["evidence_mib"] = str(policy["evidence_mib"])
     if git := scope.get("direct_git"):
         values["direct_branch"] = git["ref"].removeprefix("refs/heads/")
     return values
@@ -165,6 +167,8 @@ def _play_approval(scope):
         if "capture_fps" in play:
             extra += (f"Windows Graphics Capture 최대 {play['capture_fps']}FPS로 관찰마다 1초 동안 수집하고 "
                       "마지막 소유 창 프레임 하나만 사용합니다. ")
+        if "evidence_mib" in play:
+            extra += f"플레이 증거 상한은 사이클당 {play['evidence_mib']} MiB입니다. "
         foreground = ("전경 QA · 소유 HWND에 직접 클릭과 키 메시지를 보냅니다. "
                       "창이 전경에서 벗어나면 입력을 중단합니다. "
                       if play.get("foreground") else "")
@@ -306,9 +310,14 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
     play_foreground = tk.BooleanVar(panel, value=draft.get("play_foreground") is True)
     capture_fps = tk.StringVar(panel, value=draft.get("capture_fps", ""))
+    evidence_mib = tk.StringVar(panel, value=draft.get("evidence_mib", ""))
     direct_branch = tk.StringVar(panel, value="" if local else draft.get("direct_branch", ""))
     reboot_request = tk.StringVar(panel)
     auto_apply = tk.BooleanVar(panel)
+    allow_documentation = tk.BooleanVar(panel)
+    if not resume_only:
+        ttk.Checkbutton(body, text="이번 승인에서 문서 전용 개발 허용",
+                        variable=allow_documentation).pack(anchor="w")
     spec = None
     play_entries = {}
 
@@ -334,6 +343,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         ttk.Label(limits, text="소유 창 고속 캡처 상한 (FPS)").grid(row=3, column=0, sticky="w")
         ttk.Combobox(limits, textvariable=capture_fps, values=("", "30", "60"),
                      state="readonly", width=12).grid(row=3, column=1, sticky="w")
+        ttk.Label(limits, text="사이클당 플레이 증거 상한 (4~64 MiB)").grid(row=4, column=0, sticky="w")
+        ttk.Entry(limits, textvariable=evidence_mib, width=12).grid(row=4, column=1, sticky="w")
     ttk.Button(body, text="시각 검토 결과와 캡처 보기",
                command=lambda: _open_visual_report(center, runner, project)).pack(anchor="w")
     if is_godot and project == game_pilot.PROJECT and not resume_only:
@@ -450,7 +461,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         preferences.update(whole_replica=whole.get(), token_mode=SUBSCRIPTION_MODE if subscription.get() else "fixed",
                            use_images=use_images.get(), use_play=use_play.get(),
                            play_foreground=play_foreground.get(), direct_branch=direct_branch.get().strip(),
-                           capture_fps=capture_fps.get())
+                           capture_fps=capture_fps.get(), evidence_mib=evidence_mib.get())
         preferences.update((field, entry.get().strip()) for field, entry in play_entries.items())
         if spec is not None:
             try:
@@ -657,7 +668,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         options = ({"graceful": graceful} if resume else
                    {"soft_limits": soft_limits, "visual_review": visual_review, "play": play,
                     "direct_branch": direct_branch, "reboot": reboot, "approved_criterion": criterion,
-                    "auto_apply": apply_original})
+                    "auto_apply": apply_original, "allow_documentation": allow_documentation.get()})
         review_fn = registered_cycle.review_resume if resume else registered_cycle.review
         run_fn = registered_cycle.run_resume if resume else registered_cycle.run
 
@@ -717,6 +728,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                         role, ROLE_LABELS.get(role, role)) for role in updated_roles)
                                     if updated_roles else "")
                 instruction_note += _criterion_approval(result) + _play_approval(result)
+                if "allow_documentation" in result:
+                    instruction_note += ("\n문서 전용 개발: "
+                                         + ("허용" if result["allow_documentation"] else "차단"))
                 if result.get("development_mode") == LOCAL_MODE:
                     instruction_note += "\n재개 결과는 개발 사본에 저장합니다. 원본 반영은 다시 승인하세요."
                 if checkpoint.get("mode") == "partial-candidate":
@@ -968,7 +982,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     files, permissions, verifier, role_tokens["manager-planning"])
             play = use_play.get()
-            if play and (play_foreground.get() or capture_fps.get()
+            if play and (play_foreground.get() or capture_fps.get() or evidence_mib.get().strip()
                          or any(entry.get().strip() for entry in play_entries.values())):
                 from . import adaptive_play
                 default = adaptive_play.approval(godot=registered_cycle.godot_verifier_spec(verifier))
@@ -978,9 +992,16 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 except ValueError as error:
                     raise ValueError("AI 플레이 입력 횟수와 실행 시간은 정수로 입력하세요.") from error
                 rate = int(capture_fps.get()) if capture_fps.get() else None
-                adaptive_play.approval(limits=play, foreground=play_foreground.get(), capture_fps=rate)
+                try:
+                    cap = int(evidence_mib.get().strip()) if evidence_mib.get().strip() else None
+                except ValueError as error:
+                    raise ValueError("플레이 증거 상한은 MiB 정수로 입력하세요.") from error
+                adaptive_play.approval(limits=play, foreground=play_foreground.get(), capture_fps=rate,
+                                       evidence_mib=cap)
                 if rate is not None:
                     play["capture_fps"] = rate
+                if cap is not None:
+                    play["evidence_mib"] = cap
                 if play_foreground.get():
                     play["foreground"] = True
         except (RuntimeError, ValueError) as error:

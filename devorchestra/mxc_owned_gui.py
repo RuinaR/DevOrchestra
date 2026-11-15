@@ -228,9 +228,15 @@ def _capture(window, path, workers, *, fps=None):
     worker = Thread(target=render, daemon=True)
     workers.append(worker)
     worker.start()
-    while not future.done():
-        window.check()
-        worker.join(0.03)
+    try:
+        while not future.done():
+            window.check()
+            worker.join(0.03)
+    finally:
+        # The caller may immediately retire this observation's staging directory.
+        worker.join(5)
+        if worker.is_alive():
+            raise Blocked("Owned capture worker did not settle")
     data, backend, uniform, metrics = future.result()
     window.check()
     if window.dimensions() != (width, height) or window.client_in_image() != client:

@@ -473,8 +473,11 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image, *,
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
               manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False, game_limits=None, visual_review=False,
-              play=False, tools=None, direct_branch=None, approved_criterion=None, auto_apply=False):
+              play=False, tools=None, direct_branch=None, approved_criterion=None, auto_apply=False,
+              allow_documentation=None):
     now = time()
+    if allow_documentation is not None and type(allow_documentation) is not bool:
+        raise Blocked("Invalid documentation approval")
     if (type(play) not in (bool, dict) or
             (play is not False and (not visual_review or game_limits is None))):
         raise Blocked("AI 플레이에는 이미지 검토와 역할별 예산 승인이 필요합니다.")
@@ -644,15 +647,17 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     play_limits = dict(play) if isinstance(play, dict) else None
     foreground = play_limits.pop("foreground", False) if play_limits is not None else False
     capture_fps = play_limits.pop("capture_fps", None) if play_limits is not None else None
+    evidence_mib = play_limits.pop("evidence_mib", None) if play_limits is not None else None
     if type(foreground) is not bool:
         raise Blocked("Invalid foreground play approval")
     play_policy = (adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI),
                                          limits=play_limits, control_actions=True, foreground=foreground,
-                                         capture_fps=capture_fps)
+                                         capture_fps=capture_fps, evidence_mib=evidence_mib)
                    if play is not False else None)
     scope = {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),
             **({"approved_criterion": approved_criterion} if approved_criterion is not None else {}),
+            **({"allow_documentation": allow_documentation} if allow_documentation is not None else {}),
             **({"visual_review": True, "replica_head": onboarding["replica_head"]} if visual_review else {}),
             **({"adaptive_play": play_policy} if play_policy else {}),
             **({"visual_preview": "scratch-windows-exe"}
@@ -724,7 +729,7 @@ def _reboot_review(runner, abandoned, project, reboot):
 
 
 def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None, direct_branch=None,
-           reboot=None, approved_criterion=None, auto_apply=False):
+           reboot=None, approved_criterion=None, auto_apply=False, allow_documentation=None):
     from .registered_recovery import bind_reboot
 
     with execution_slot() as abandoned:
@@ -734,7 +739,7 @@ def review(runner, *args, soft_limits=None, visual_review=False, play=False, too
             events, head = runner._idle_diagnostic(abandoned)
         scope = _contract(runner, events, head, *args, game_limits=soft_limits, visual_review=visual_review,
                           play=play, tools=tools, direct_branch=direct_branch, approved_criterion=approved_criterion,
-                          auto_apply=auto_apply)
+                          auto_apply=auto_apply, allow_documentation=allow_documentation)
         return bind_reboot(scope, boundary) if reboot else scope
 
 
@@ -2163,6 +2168,24 @@ def _test_path(name):
             or bool(re.search(r"(^qa$|^(test|qa)[_.-]|[_.-](test|tests|spec)$)", path.stem.casefold())))
 
 
+def _product_plan_block(scope, plan, paths, check):
+    if "allow_documentation" not in scope or plan.get("mode") == "verify":
+        return None
+    if "artifact" not in plan and isinstance(plan.get("plan"), str):
+        try:
+            detail = json.loads(plan["plan"], object_pairs_hook=_unique_object)
+        except (ValueError, Blocked, RecursionError):
+            detail = None
+        if isinstance(detail, dict) and isinstance(name := detail.get("artifact"), str) and Path(name).name:
+            paths = [name]
+    if plan.get("mode") == "documentation" or (paths and all(map(_documentation_path, paths))):
+        return None if scope["allow_documentation"] else "Documentation-only work needs explicit approval."
+    if paths and all(_documentation_path(path) or _test_path(path) for path in paths):
+        if not check or check.get("level", "functional") not in {"functional", "run", "gui"}:
+            return "Test-only work needs an approved independent functional check."
+    return None
+
+
 def _cycle_stagnation(scope, key, review, checked, comparison, accepted, changed, stagnant, *, documentation=False):
     """Count each accepted, changed criterion once without promoting it to functional VERIFIED."""
     integrity = (scope["verifier"].get("mode") == BASELINE_VERIFIER and not scope["criteria"][key]["checks"]
@@ -2191,6 +2214,7 @@ def _cycle_stagnation(scope, key, review, checked, comparison, accepted, changed
         level = scope["verifier"].get("checks", {}).get(key, {}).get("level")
         comparison["delivery"] = {
             "artifact_changed": bool(changed), "document_only": only_docs, "test_changes_only": test_changes,
+            "product_files_changed": bool(changed) and not (only_docs or test_changes),
             "criterion": key, "verification": comparison.get("criterion_evidence", {}).get(key, "MISSING"),
             "independent_criterion_improvement": key in comparison["newly_verified"],
             "verification_level": level,
@@ -2429,7 +2453,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             outstanding = sum(value != "VERIFIED" for value in status.values())
             _handoff(session, count, "manager-planning",
                      f"{previous_text}미검증 기준 {outstanding}개 · 이번 계획 후보 {len(pending)}개.")
-            modes = ["edit", "documentation", "needs-input"] + (["verify"] if review_candidate else [])
+            modes = ["edit", "needs-input"] + (["verify"] if review_candidate else [])
+            if scope.get("allow_documentation") is not False:
+                modes.append("documentation")
             schema = _response_schema(criterion=pending, mode=modes, plan=None)
             evidence_prompt = ""
             if scope.get("project_evidence_contract"):
@@ -2443,6 +2469,10 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                     "verification for project-native build/test/run commands or procedures, and "
                                    "evidence for the observable result. Propose checks as data; Controller approval "
                                    "is required to bind an independent check. ")
+            if scope.get("allow_documentation") is False:
+                evidence_prompt += ("Reuse existing checks and authorized evidence. Do not schedule documentation-only "
+                                    "work or recreate QA. For test-only work identify the approved independent "
+                                    "functional check it supports, or request the missing prerequisite. ")
             handoff_prompt = ""
             if role_capabilities:
                 schema["properties"]["prerequisite"] = {"type": "string", "enum": list(PLAN_PREREQUISITES)}
@@ -2479,9 +2509,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    f"Use the supplied context directly. Choose from {pending}. "
                                    "Reply with one JSON object. criterion is an exact ID; plan is a JSON string "
                                    "containing the artifact, changes and checks. Do not nest a plan object. "
-                                   "Set mode to edit for implementation. For a planned document-only milestone, "
-                                   "set mode to documentation and use only "
-                                   "unprotected document paths. Document progress does not satisfy functional checks. "
+                                   "Set mode to edit for implementation. If documentation mode is available, use it "
+                                   "for approved document-only work. Document progress does not satisfy functional checks. "
                                    "When implementation already exists and only execution evidence is missing, "
                                    "prefer running the existing checks through approved verification, preparing the "
                                    "smallest missing execution or preview prerequisite, or reporting the missing grant. "
@@ -2535,9 +2564,14 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         if "artifact" in plan:
             planned_files = [plan["artifact"]]
         whole = scope.get("project_edit")
+        tool = scope["verifier"]
+        check = tool.get("checks", {}).get(key)
+        reason = _product_plan_block(scope, plan, planned_files, check)
+        if reason:
+            defer(count, key, "PREREQUISITE", reason)
+            return stop(count, outcome=NEEDS_INPUT, feedback={"target": key, "instruction": reason})
         if documentation and not planned_files and not whole:
             raise Blocked("문서 작업에 승인된 파일 경로가 없습니다.")
-        tool = scope["verifier"]
         verification_args = tool.get("checks", {}).get(key, {}).get("args")
         if plan.get("mode") == "verify":
             if not review_candidate:
@@ -2685,6 +2719,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                     "change_hash": digest(diff), "next": final}
         if scope.get("project_evidence_contract"):
             feedback["verification"] = comparison["delivery"]
+        if comparison["progress_basis"] == "TEST_CHANGES_ONLY" and scope.get("allow_documentation") is False:
+            feedback["instruction"] = ("Do not repeat the QA edits. Execute an approved independent check or "
+                                       "identify the missing prerequisite.")
         if "graceful_stop" in scope and session.stop_reason:
             if (scope["cycles"] is None or count < scope["cycles"]) and save_if_requested():
                 return MANUAL_CHECKPOINT
@@ -3988,10 +4025,12 @@ def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False,
 
 
 def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None,
-        pause=None, play=False, tools=None, direct_branch=None, reboot=None, approved_criterion=None, auto_apply=False):
+        pause=None, play=False, tools=None, direct_branch=None, reboot=None, approved_criterion=None, auto_apply=False,
+        allow_documentation=None):
     return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits,
                 visual_review=visual_review, activity=activity, pause=pause, play=play, tools=tools,
-                direct_branch=direct_branch, reboot=reboot, approved_criterion=approved_criterion, auto_apply=auto_apply)
+                direct_branch=direct_branch, reboot=reboot, approved_criterion=approved_criterion, auto_apply=auto_apply,
+                allow_documentation=allow_documentation)
 
 
 def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False,
@@ -4005,7 +4044,7 @@ def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambd
 
 def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False,
          visual_review=False, activity=None, pause=None, play=False, tools=None, direct_branch=None, reboot=None,
-         approved_criterion=None, auto_apply=False):
+         approved_criterion=None, auto_apply=False, allow_documentation=None):
     from .registered_recovery import bind_reboot, reboot_admission, reboot_target, windows_boot_boundary
     from .runtime import require_admission
 
@@ -4018,7 +4057,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                        else (_contract(runner, events, head, *args, game=game, game_limits=game_limits,
                                        visual_review=visual_review, play=play, tools=tools,
                                        direct_branch=direct_branch, approved_criterion=approved_criterion,
-                                       auto_apply=auto_apply), None))
+                                       auto_apply=auto_apply, allow_documentation=allow_documentation), None))
         if reboot:
             scope = bind_reboot(scope, boundary)
         if cancelled() or digest(scope) != approval:

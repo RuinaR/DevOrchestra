@@ -1,7 +1,9 @@
 """Bounded, session-owned play driven by a read-only Codex Reviewer."""
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from shutil import copyfile
+from tempfile import mkdtemp
 from time import monotonic, sleep
 
 from . import visual_review as visual
@@ -10,6 +12,7 @@ from .ledger import check_path, digest
 from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_owned_gui import NO_CLIENT_FRAME, inspect_owned_window, optional_capture_stop
 from .native_developer_trial import PROFILE, trial_flags
+from .owned_artifacts import _remove_owned_tree
 from .replica_evidence import fingerprint, snapshot
 from .role_contract import _unique_object
 
@@ -26,6 +29,8 @@ MAX_PLAY_SECONDS = 1800
 FOREGROUND_SETTLE_SECONDS = 4
 FIRST_FRAME_SECONDS = 8
 GAME_EXECUTABLE_LIMIT = 256 * 1024**2
+PLAY_EVIDENCE_MIB = 64
+FRAME_PNG_LIMIT = 4 * 1024**2
 GODOT_PLAY_OVERRIDE = b"[display]\nwindow/size/no_focus=true\n"
 KEYS = {**{name: ord(name) for name in "WASDQEZXRFCV"},
         "UP": 0x26, "DOWN": 0x28, "LEFT": 0x25, "RIGHT": 0x27,
@@ -54,11 +59,14 @@ def _legacy_approval():
 
 
 def approval(*, godot=False, limits=None, window_actions=False, control_actions=False, foreground=False,
-             capture_fps=None):
+             capture_fps=None, evidence_mib=None):
     if capture_fps is not None and (type(capture_fps) is not int or capture_fps not in (30, 60)):
         raise Blocked("Owned window capture must use 30 or 60 FPS")
     actions = list(CONTROL_ACTIONS if control_actions else WINDOW_ACTIONS if window_actions else ACTIONS)
     capture = {"capture_fps": capture_fps} if capture_fps is not None else {}
+    if evidence_mib is not None:
+        _evidence_limit(evidence_mib)
+        capture["evidence_mib"] = evidence_mib
     if foreground:
         actions = ["keys", "click", "wait", "observe", "stop"]
     if limits is None:
@@ -73,7 +81,16 @@ def approval(*, godot=False, limits=None, window_actions=False, control_actions=
             **({"foreground": True} if foreground else {}), **capture}
 
 
+def _evidence_limit(mib):
+    if type(mib) is not int or not 4 <= mib <= PLAY_EVIDENCE_MIB:
+        raise Blocked("Owned play evidence limit must be between 4 and 64 MiB")
+    return mib * 1024**2
+
+
 def validate_policy(policy):
+    if isinstance(policy, dict) and "evidence_mib" in policy:
+        _evidence_limit(policy["evidence_mib"])
+        policy = {key: value for key, value in policy.items() if key != "evidence_mib"}
     if isinstance(policy, dict) and "capture_fps" in policy:
         fps = policy["capture_fps"]
         if type(fps) is not int or fps not in (30, 60):
@@ -311,8 +328,11 @@ def run(session, cycle, key, verification, context):
     ledger = session.runner.ledger
     folder = ledger.local_directory("recovery", create=True) / f"play-{session.fields['run_id']}-{cycle}"
     check_path(folder)
-    folder.mkdir()
+    if folder.exists():
+        raise Blocked("Owned play evidence directory already exists")
     frames, actions, workers = [], [], []
+    evidence_bytes = 0
+    evidence_limit = _evidence_limit(policy.get("evidence_mib", PLAY_EVIDENCE_MIB))
     model_clear, game_clear = True, False
     outcome = "STEP_LIMIT"
     started = monotonic()
@@ -323,10 +343,25 @@ def run(session, cycle, key, verification, context):
 
     def interact(api, job, deadline):
         def play(window, capture):
-            nonlocal outcome, model_clear
+            nonlocal outcome, model_clear, evidence_bytes
 
-            def observe():
-                path = folder / f"P{len(frames)}.png"
+            def capture_room():
+                # Reserve space before requesting input so its evidence can be settled.
+                return evidence_bytes + FRAME_PNG_LIMIT <= evidence_limit
+
+            @contextmanager
+            def scratch_capture():
+                check_path(logs)
+                root = Path(mkdtemp(prefix="capture-", dir=logs))
+                identity = root.stat().st_ino
+                try:
+                    yield root
+                finally:
+                    if not any(worker.is_alive() for worker in workers):
+                        if _remove_owned_tree(root, identity)["status"] != "REMOVED":
+                            raise Blocked("Temporary owned capture could not be removed")
+
+            def observe(path):
                 client = window.client_in_image()
                 size = window.dimensions()
                 image = capture(path)
@@ -338,30 +373,40 @@ def run(session, cycle, key, verification, context):
                          "executable_file": None, "observation_version": 1,
                          "project_id": session.fields["project_id"], "run_id": session.fields["run_id"],
                          "window_state": "FOREGROUND" if window.is_foreground() else "BACKGROUND"}
-                visual.read_frames(ledger, [frame])
-
                 return client, frame
 
-            def record_frame(client, frame):
-                frames.append(frame)
+            def record_frame(client, frame, path):
+                nonlocal evidence_bytes
+                size = path.stat().st_size
+                if size > FRAME_PNG_LIMIT or evidence_bytes + size > evidence_limit:
+                    raise Blocked("Owned play evidence exceeds the session byte limit")
+                # Move the verified candidate before appending. If ledger settlement
+                # is ambiguous, only the promoted evidence is retained for recovery.
+                visual.read_frame(path, frame)
+                if not frames:
+                    folder.mkdir()
+                check_path(folder / frame["file"])
+                path.rename(folder / frame["file"])
                 session.record("native_inspection_play_observation", cycle=cycle, target=key, frame=frame,
                                client=list(client), elapsed_seconds=round(monotonic() - started, 2))
+                evidence_bytes += size
+                frames.append(frame)
 
             background = not foreground and _wait_for_background(window, deadline)
             # A newly created HWND can precede the first rendered game frame.
             ready_until = min(deadline, monotonic() + FIRST_FRAME_SECONDS)
             while True:
                 try:
-                    client, frame = observe()
+                    with scratch_capture() as staging:
+                        path = staging / "P0.png"
+                        client, frame = observe(path)
+                        if not frame.get("uniform_client") or monotonic() >= ready_until:
+                            record_frame(client, frame, path)
+                            break
                 except Blocked as error:
                     if (not str(error).startswith(NO_CLIENT_FRAME)
                             or monotonic() >= ready_until):
                         raise
-                else:
-                    if not frame.get("uniform_client") or monotonic() >= ready_until:
-                        record_frame(client, frame)
-                        break
-                    (folder / frame["file"]).unlink()
                 sleep(0.2)
             if (not foreground and not background
                     or (frame["window_state"] == "FOREGROUND") != foreground):
@@ -377,8 +422,8 @@ def run(session, cycle, key, verification, context):
             input_count = 0
             for step in range(1, policy["steps"] + 1):
                 session.soft_boundary("reviewer")
-                if not _budget(session):
-                    outcome = "PLAY_BUDGET"
+                if not _budget(session) or not capture_room():
+                    outcome = "PLAY_BUDGET" if capture_room() else "PLAY_EVIDENCE_LIMIT"
                     return
                 window.check()
                 if window.is_foreground() != foreground:
@@ -469,21 +514,23 @@ def run(session, cycle, key, verification, context):
                                    action=action, result="FOREGROUND_BEFORE_INPUT")
                     return
                 try:
-                    apply(window, proposed, client, foreground=foreground)
-                    client, observed = observe()
+                    with scratch_capture() as staging:
+                        path = staging / f"P{len(frames)}.png"
+                        apply(window, proposed, client, foreground=foreground)
+                        client, observed = observe(path)
+                        changed = frame["sha256"] != observed["sha256"]
+                        row = {"step": step, "action": action,
+                               "result": "SCREEN_CHANGED" if changed else "SCREEN_UNCHANGED",
+                               "before": frame["sha256"], "after": observed["sha256"],
+                               "client_result": _client_result(frame, observed)}
+                        observed["previous_action"] = digest(row)
+                        record_frame(client, observed, path)
                 except (Blocked, OSError):
                     session.record("native_inspection_play_action_result", cycle=cycle, target=key, step=step,
                                    action=action, result="INPUT_OR_CAPTURE_UNCONFIRMED")
                     session.check()
                     outcome = "INPUT_OR_CAPTURE_UNCONFIRMED"
                     return
-                changed = frame["sha256"] != observed["sha256"]
-                row = {"step": step, "action": action,
-                       "result": "SCREEN_CHANGED" if changed else "SCREEN_UNCHANGED",
-                       "before": frame["sha256"], "after": observed["sha256"],
-                       "client_result": _client_result(frame, observed)}
-                observed["previous_action"] = digest(row)
-                record_frame(client, observed)
                 actions.append(row)
                 input_count += int(action["action"] in INPUT_ACTIONS)
                 session.record("native_inspection_play_action_result", cycle=cycle, target=key, **row)
@@ -520,7 +567,8 @@ def run(session, cycle, key, verification, context):
             session.record("native_inspection_play_finished", cycle=cycle, target=key, outcome=outcome,
                            owned_tree="DRAINED", elapsed_seconds=round(monotonic() - started, 2),
                            source_sha256=session.source(), executable_sha256=expected, actions=len(actions),
-                           inputs=sum(row["action"]["action"] in INPUT_ACTIONS for row in actions))
+                           inputs=sum(row["action"]["action"] in INPUT_ACTIONS for row in actions),
+                           evidence_bytes=evidence_bytes, evidence_limit=evidence_limit)
     if not session.owned_verified:
         raise Blocked("Owned play resources are unresolved")
     session.check()

@@ -1239,6 +1239,15 @@ class CommandCenter:
         verify_state = verifier.get("verdict") or self.registered_role_state(verifier, end, bool(local and running))
         review_summary = [f"Reviewer · {REGISTERED_STATES.get(review_state, review_state)}",
                           f"독립 Verifier · {REGISTERED_STATES.get(verify_state, verify_state)}"]
+        delivery = (progress or {}).get("latest_progress", {}).get("delivery", {})
+        if delivery.get("product_files_changed"):
+            review_summary.append("제품 파일 변경 확인")
+        elif delivery.get("test_changes_only"):
+            review_summary.append("테스트 파일 변경")
+        elif delivery.get("document_only"):
+            review_summary.append("문서 파일 변경")
+        if delivery.get("independent_criterion_improvement"):
+            review_summary.append("완료 기준 독립 검증 확인")
         if git := (progress or {}).get("direct_git"):
             review_summary.append(f"직접 Git · {git['branch'].removeprefix('refs/heads/')} · {git['status']}")
             review_summary.append(f"로컬 {(git['local'] or '—')[:12]} · 원격 {(git['remote'] or '—')[:12]}")

@@ -28,6 +28,11 @@ class PlayTests(unittest.TestCase):
             self.assertEqual(policy, {**legacy, "capture_fps": rate})
             self.assertNotEqual(digest(legacy), digest(policy))
             adaptive_play.validate_policy(policy)
+            capped = adaptive_play.approval(godot=True, capture_fps=rate, evidence_mib=4)
+            adaptive_play.validate_policy(capped)
+            for invalid in (True, 3, 65):
+                with self.assertRaises(Blocked):
+                    adaptive_play.validate_policy({**capped, "evidence_mib": invalid})
         for rate in (True, 0, 120, "30"):
             with self.subTest(rate=rate), self.assertRaises(Blocked):
                 adaptive_play.validate_policy({**legacy, "capture_fps": rate})
@@ -263,6 +268,10 @@ class Fixture : Form {
             self.assertEqual(4, len({frame["sha256"] for frame in frames}))
             self.assertEqual(["SCREEN_CHANGED"] * 3, [row["result"] for row in actions])
             self.assertEqual(["CLIENT_CHANGED"] * 3, [row["client_result"] for row in actions])
+            self.assertEqual({f"P{i}.png" for i in range(4)}, {
+                path.name for path in (recovery / ("play-" + "b" * 32 + "-1")).iterdir()})
+            self.assertEqual([], list(scratch.rglob("capture-*")))
+            self.assertEqual([], list(scratch.rglob("frame.bgra")))
             self.assertEqual(3, adaptive_play.verify_action_chain(
                 frames, actions, "source", policy=session.scope["adaptive_play"]))
             with self.assertRaises(Blocked):

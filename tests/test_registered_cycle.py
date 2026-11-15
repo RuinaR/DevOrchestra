@@ -631,6 +631,25 @@ class RegisteredTrustTests(unittest.TestCase):
         self.assertEqual(comparison["criteria"][key], "BLOCKED")
         self.assertEqual(session.record.call_args.args[0], "native_inspection_progress_checkpoint")
 
+    def test_product_approval_stops_documentation_and_unverifiable_qa_before_developer(self):
+        for path, mode in (("docs/DESIGN.md", "documentation"), ("src/qa.gd", "edit")):
+            with self.subTest(path=path):
+                scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Work", "checks": []}},
+                         "allow_documentation": False, "goal": "Work", "files": [path, "src/game.gd"], "cycles": 1,
+                         "requirements": [], "verifier": {}}
+                session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(),
+                                          check_image=Mock(), record=Mock(), changes=[], source=lambda: "source",
+                                          owned_verified=True, usage_complete=True, publish_cycle=Mock(),
+                                          call=Mock(return_value=json.dumps({"criterion": "C1", "plan": json.dumps({
+                                              "artifact": path}),
+                                                                            "mode": mode})))
+                with (patch.object(registered_cycle, "Catalog"),
+                      patch.object(registered_cycle, "read_frozen_requirements", return_value=[])):
+                    self.assertEqual(registered_cycle.NEEDS_INPUT, registered_cycle._cycles(session))
+                self.assertEqual(["manager-planning"], [call.args[1] for call in session.call.call_args_list])
+                self.assertFalse(session.publish_cycle.called)
+                self.assertEqual("PREREQUISITE", session.record.call_args.kwargs["deferred_criteria"]["C1"]["kind"])
+
     def test_test_only_delivery_does_not_count_as_reviewed_implementation(self):
         scope = {"criteria": {"C1": {"checks": []}}, "verifier": {"mode": "replica-integrity"}}
         checked = {"runtime": "replica-integrity", "integrity": "PASS", "owned_tree": "DRAINED"}
