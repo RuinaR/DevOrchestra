@@ -3,13 +3,64 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from devorchestra import ai_usage
+from devorchestra import ai_usage, codex_setup
 from devorchestra.chatgpt_subscription import SubscriptionError
+from devorchestra.gui_usage import UsageBadge
 from devorchestra.lease import Blocked
 from devorchestra.ledger import digest
 
 
 class UsageTests(unittest.TestCase):
+    def test_official_read_uses_only_account_rpcs_and_classifies_failures(self):
+        valid = {"rateLimits": {"primary": {"usedPercent": 89},
+                                "credits": {"hasCredits": False, "unlimited": False}},
+                 "ordinaryUsageAllowed": True}
+        for payload, error, detail, expected in (
+            (valid, None, None, "AVAILABLE"),
+            ({"unknown": 1}, None, None, "RESPONSE_INVALID"),
+            ({**valid, "rateLimits": {"primary": {"usedPercent": "89"}}}, None, None, "RESPONSE_INVALID"),
+            (None, "METHOD_NOT_FOUND", None, "UNSUPPORTED"),
+            (None, "INTERNAL_ERROR", "USAGE_NETWORK_FAILED", "NETWORK_FAILED"),
+            (None, "INVALID_REQUEST", "USAGE_AUTH_REQUIRED", "AUTH_REQUIRED"),
+        ):
+            with self.subTest(expected=expected):
+                server = Mock(cleanup_receipt={"job": "DRAINED_NORMALLY", "pipes": "CLOSED"}, failure_code=None,
+                              diagnostics=[{"error": error, "shape": {"detail": detail}}])
+                def request(_, method, params, **kwargs):
+                    if method == "account/read":
+                        return {"account": {"type": "chatgpt"}}
+                    if payload is None:
+                        raise Blocked("RPC_ERROR")
+                    return payload
+
+                server.request.side_effect = request
+                with patch.object(codex_setup, "open_app_server", return_value=nullcontext(server)):
+                    result = codex_setup.read_subscription_quota(None, None, {}, lambda: None)
+                self.assertEqual(expected, result["status"])
+                self.assertEqual(11 if expected == "AVAILABLE" else None, result["remaining"])
+                server.restrict_outbound.assert_called_with(
+                    frozenset({"initialize", "initialized", "account/read", "account/rateLimits/read"}))
+                self.assertTrue(all(call.args[1] in ("account/read", "account/rateLimits/read")
+                                    for call in server.request.call_args_list))
+                self.assertEqual({"refreshToken": False}, server.request.call_args_list[0].args[2])
+
+    def test_badge_shares_conservative_result_and_clears_it_on_reset_or_failure(self):
+        badge = UsageBadge.__new__(UsageBadge)
+        badge.button, badge.update_tip = Mock(), Mock()
+        bucket = {"primary": {"usedPercent": 40, "resetsAt": 120},
+                  "secondary": {"usedPercent": 91, "resetsAt": 130},
+                  "credits": {"hasCredits": False, "unlimited": False}}
+        quota = ai_usage.subscription_quota({"rateLimits": bucket, "ordinaryUsageAllowed": True}, checked_at=100)
+        with patch("devorchestra.gui_usage.time", return_value=110):
+            badge.update(quota)
+        badge.button.configure.assert_called_with(text="Codex 잔여 · 9%")
+        self.assertIn("잔여 60%", badge.detail)
+        with patch("devorchestra.gui_usage.time", return_value=120):
+            badge.expire()
+        badge.button.configure.assert_called_with(text="Codex 잔여 · —")
+        badge.update({"status": "NETWORK_FAILED"})
+        self.assertIn("네트워크", badge.detail)
+
     def test_included_quota_uses_lowest_window_and_requires_permission(self):
         main = {"limitId": "codex", "primary": {"usedPercent": 18, "resetsAt": 200},
                 "credits": {"hasCredits": False, "unlimited": False}}

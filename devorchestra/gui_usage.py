@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import Thread
-from time import monotonic
+from time import monotonic, time
 import tkinter as tk
 from tkinter import filedialog, ttk
 from webbrowser import open as open_browser
@@ -29,7 +29,8 @@ class UsageBadge:
         self.cancelled = False
         self.last_query = float("-inf")
         self.detail = "Codex 제공자 사용량을 확인하는 중입니다."
-        self.has_snapshot = False
+        self.checked_at = None
+        self.valid_until = None
         self.button.bind("<Enter>", self.show)
         self.button.bind("<FocusIn>", self.show)
         self.button.bind("<Leave>", self.hide)
@@ -39,6 +40,7 @@ class UsageBadge:
 
     def tick(self):
         if not self.cancelled:
+            self.expire()
             if monotonic() - self.last_query >= 300:
                 self.refresh()
             self.root.after(30000, self.tick)
@@ -61,46 +63,63 @@ class UsageBadge:
         self.root.after(150, self.poll)
 
     def poll(self):
+        from .codex_setup import QuotaAdmissionBlocked
+
         if self.cancelled:
             return
         if not self.future.done():
             self.root.after(150, self.poll)
             return
         future, self.future = self.future, None
-        if future.exception():
-            self.unavailable()
+        if error := future.exception():
+            self.unavailable("미종결 실행의 안전 조건을 확인하지 못했습니다."
+                             if isinstance(error, QuotaAdmissionBlocked) else "사용량 조회 실행 실패")
             return
         self.update(future.result())
 
-    def unavailable(self):
-        notice = "최신 사용량 조회 불가 · 클릭하여 다시 확인"
-        self.detail = f"{self.detail.split(notice, 1)[0].rstrip()}\n{notice}" if self.has_snapshot else notice
+    def unavailable(self, notice):
+        self.checked_at = None
+        self.valid_until = None
+        self.button.configure(text="Codex 잔여 · —")
+        self.detail = f"{notice} · 클릭하여 다시 확인"
         self.update_tip()
 
+    def expire(self):
+        if self.checked_at is not None and not self.checked_at <= time() < self.valid_until:
+            self.unavailable("공식 사용량 조회 시각 만료")
+
     def update(self, result):
-        rows = [row for row in result.get("provider", {}).get("windows", []) if row["remaining"] is not None]
-        if rows:
-            self.has_snapshot = True
-            bars = " / ".join("▰" * round(row["remaining"] / 25)
-                              + "▱" * (4 - round(row["remaining"] / 25)) for row in rows[:2])
-            self.button.configure(text=f"Codex 잔여 · {bars}")
-            lines = []
-            for row in rows:
-                window = f'{row["minutes"]}분 구간' if row["minutes"] else row["window"]
-                reset = f' · 초기화 {_local_time(row["resets_at"])}' if row["resets_at"] else ""
-                lines.append(f'{row["bucket"]} · {window} · 잔여 {row["remaining"]:g}%{reset}')
-            self.detail = "\n".join(lines + [f"조회 {_local_time()}"])
-        else:
-            if self.has_snapshot and result.get("status") == "CONNECTED":
-                self.unavailable()
-                return
-            self.has_snapshot = False
-            self.button.configure(text="Codex 잔여 · —")
-            self.detail = ("설정에서 ChatGPT 계정을 연결하세요." if result.get("status") == "SIGNED_OUT"
-                           else "제공자가 잔여 사용량을 반환하지 않았습니다.")
+        status = result["status"]
+        if status != "AVAILABLE":
+            self.unavailable({
+                "AUTH_REQUIRED": "ChatGPT 인증을 확인하세요",
+                "QUERY_FAILED": "공식 사용량 조회 실패 · 제공자 응답 확인 필요",
+                "NETWORK_FAILED": "공식 사용량 요청의 네트워크 연결 실패",
+                "UNSUPPORTED": "설치된 Codex의 공식 사용량 조회 계약 미지원",
+                "RESPONSE_INVALID": "공식 사용량 응답 형식 오류",
+                "STALE": "공식 사용량 보고 구간 만료",
+                "CONFLICT": "공식 사용량 보고 구간 불일치",
+                "LIMIT_REACHED": "공식 구독 한도 도달",
+                "PAID_FALLBACK_POSSIBLE": "유료 크레딧 사용 가능성이 있어 실행 보류",
+            }.get(status, "공식 포함 사용량을 확인할 수 없습니다"))
+            return
+        self.checked_at = result["checked_at"]
+        self.valid_until = min([self.checked_at + ai_usage.QUOTA_FRESH_SECONDS,
+                                *(row["resets_at"] for row in result["windows"] if row["resets_at"] is not None)])
+        self.expire()
+        if self.checked_at is None:
+            return
+        self.button.configure(text=f'Codex 잔여 · {result["remaining"]:g}%')
+        lines = []
+        for row in result["windows"]:
+            window = f'{row["minutes"]}분 구간' if row["minutes"] else row["window"]
+            reset = f' · 초기화 {_local_time(row["resets_at"])}' if row["resets_at"] else ""
+            lines.append(f'{row["bucket"]} · {window} · 잔여 {row["remaining"]:g}%{reset}')
+        self.detail = "\n".join(lines + [f"공식 조회 {_local_time(self.checked_at)}"])
         self.update_tip()
 
     def show(self, _event=None):
+        self.expire()
         if self.tip is not None:
             return
         self.tip = tip = tk.Toplevel(self.root)

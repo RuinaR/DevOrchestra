@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from devorchestra import native_cycle, registered_cycle, registered_recovery as recovery
+from devorchestra import codex_setup, native_cycle, registered_cycle, registered_recovery as recovery
 from devorchestra.ai_usage import QUOTA_STOP_PERCENT, SUBSCRIPTION_MODE
 from devorchestra.lease import Blocked, execution_slot
 from devorchestra.ledger import Ledger, digest
@@ -250,6 +250,18 @@ class RebootRecoveryTests(unittest.TestCase):
         intent = dict(self.identity, request_id=new, run_id=new, approval_sha256=digest(scope),
                       kind="native_inspection_intent", started_at=self.now, scope=scope)
         return scope, intent
+
+    def test_usage_only_can_read_after_verified_boot_without_admitting_a_run(self):
+        before = self.ledger.snapshot()
+        runner = Runner(self.ledger)
+        with patch.object(recovery, "windows_boot_boundary", return_value=self.boot):
+            self.assertEqual(before, codex_setup._quota_context(runner, False))
+        with patch.object(recovery, "windows_boot_boundary", return_value=dict(self.boot, boot_type=1)):
+            with self.assertRaises(Blocked):
+                codex_setup._quota_context(runner, False)
+        self.assertEqual(before, self.ledger.snapshot())
+        with self.assertRaises(Blocked):
+            require_admission(self.ledger.read())
 
     def test_old_request_stays_pending_until_atomic_fresh_intent_finishes(self):
         scope, intent = self.fresh()

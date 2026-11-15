@@ -36,6 +36,7 @@ REGISTERED_STATES = {
     "SIGNOFF_PENDING": "검토 재개 대기", "USER_TEST_REQUIRED": "사용자 검증 필요",
     "QUOTA_LOW": "구독 잔여량 10% 이하", "QUOTA_LIMIT_REACHED": "구독 사용 제한",
     "QUOTA_UNKNOWN": "구독 잔여량 미확인", "QUOTA_QUERY_FAILED": "구독 조회 실패",
+    "QUOTA_NETWORK_FAILED": "구독 조회 네트워크 오류", "QUOTA_RESPONSE_INVALID": "구독 응답 형식 오류",
     "QUOTA_AUTH_REQUIRED": "ChatGPT 인증 필요", "QUOTA_CONFLICT": "구독 조회 결과 불일치",
     "QUOTA_STALE": "구독 조회 시각 만료", "QUOTA_PAID_FALLBACK_POSSIBLE": "추가 크레딧 사용 가능성이 있어 보류",
     "QUOTA_UNSUPPORTED": "이 Codex 버전에서 구독 조회 계약을 지원하지 않음",

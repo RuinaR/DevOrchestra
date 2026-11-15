@@ -369,6 +369,14 @@ class AppServer:
                 if (self.request_method == "thread/start" and error["message"].startswith("error creating thread:")
                         and "MXC launcher: CreateProcessW failed with error code 1816 (0x00000718)." in error["message"]):
                     detail = "MXC_PROCESS_QUOTA_1816"
+                if self.request_method in ("account/read", "account/rateLimits/read"):
+                    usage_error = error["message"].casefold()
+                    if any(marker in usage_error for marker in ("authentication required", "401 unauthorized",
+                                                                 "token expired", "refresh_token_expired")):
+                        detail = "USAGE_AUTH_REQUIRED"
+                    elif any(marker in usage_error for marker in ("error sending request", "dns error",
+                                                                   "connection refused", "certificate verify failed")):
+                        detail = "USAGE_NETWORK_FAILED"
                 self._fail("RPC_ERROR", matches=True, valid=True, size=size,
                            error=ERROR_CODES.get(error["code"], "OTHER_RPC_ERROR"),
                            shape={"detail": detail} if detail else None)
