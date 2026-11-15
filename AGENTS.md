@@ -14,6 +14,7 @@
 - At any instant at most ONE active project, ONE task, ONE agent and ONE execution slot across DevOrchestra. Includes spawned agent subtasks, asynchronous tool invocations, test processes, scheduled triggers, model/GPU workers and child processes.
 - Roles run strictly: Manager -> Developer -> Reviewer -> deterministic Verifier -> Manager decision. A role MUST release all owned resources/processes before next role is admitted.
 - No parallel agents, speculative tasks, detached child processes, overlapping SDK turns, concurrent project builds or concurrent tests. Do not add a parallel-mode flag.
+- Prefer real builds and GUI validation in an owner-approved development session. One approved build or test invocation may use its own bounded workers under the same execution slot, owned Job and resource budget. Reuse approved public research and tool delivery paths. Low interactive use does not grant additional permissions.
 - Implement durable, cross-process global lease/lock with exclusive ownership, generation/fencing token, crash recovery, child ownership accounting and fail-closed stale lease handling. PID alone is insufficient. Lock validity must be checked before EVERY side effect.
 - External applications already running on the user's computer are never execution slots to acquire, inspect, pause, terminate or alter.
 
