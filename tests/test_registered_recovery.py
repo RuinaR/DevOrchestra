@@ -354,6 +354,70 @@ class RebootRecoveryTests(unittest.TestCase):
                 rc.run(runner, self.project, approval=digest(reviewed), **options)
         self.assertEqual(self.ledger.snapshot(), (original, head))
 
+    def test_fixed_criterion_mismatch_settles_manager_without_opening_a_new_job(self):
+        rc = registered_cycle
+        runner = Runner(self.ledger)
+        before, head = self.ledger.snapshot()
+        scope = dict(self.scope, ledger_head=head, auth_home=self.scope["replica"], goal="Fixture goal",
+                     requirements=[], files=["feature.txt"], verifier={"mode": rc.BASELINE_VERIFIER},
+                     criteria={key: {"text": key, "checks": []} for key in ("C1", "C2")})
+        response = json.dumps({"criterion": "C2", "plan": "Fixture plan for the wrong criterion"})
+        roles = []
+
+        @contextmanager
+        def staging(_ledger):
+            yield Path(self.scope["replica"]), {}
+
+        def contract(*_args, approved_criterion, **_options):
+            return dict(scope, approved_criterion=approved_criterion)
+
+        def session(_runner, approved, lab, count, fence, fields, cancelled):
+            current = SimpleNamespace(scope=approved, image=self.image, runner=runner, check=lambda: None,
+                                      source=lambda: digest(self.image), check_image=lambda: None, scratch=lab,
+                                      prepare=lambda: None, owned_verified=True, usage_complete=True, phases=[],
+                                      changes=[], calls=0, usage=0, cycles_checked=0,
+                                      progress=dict.fromkeys(scope["criteria"], "NOT_STARTED"),
+                                      count=count, fence=fence, started=rc.monotonic())
+
+            def record(kind, **facts):
+                current.count, current.fence = self.ledger.append(current.count, current.fence,
+                                                                 {**fields, "kind": kind, **facts})
+
+            def call(cycle, phase, key, prompt, **_options):
+                roles.append(phase)
+                self.assertEqual("manager-planning", phase)
+                facts = dict(cycle=cycle, phase=phase, owned_tree="DRAINED", outcome="COMPLETED",
+                             provider_usage={"input_tokens": 3, "output_tokens": 2}, message_sha256=digest(response))
+                record("native_inspection_role_result", **facts)
+                current.phases.append(facts)
+                current.calls, current.usage = 1, 5
+                return response
+
+            current.record, current.call = record, call
+            return current
+
+        options = {"direct_branch": "pilot", "reboot": (self.old, self.expires), "approved_criterion": "C1"}
+        with (patch.object(rc, "_contract", side_effect=contract),
+              patch.object(recovery, "windows_boot_boundary", return_value=self.boot),
+              patch.object(rc, "_staging", staging), patch.object(rc, "RegisteredSession", side_effect=session),
+              patch.object(rc, "_check_dedicated_config"), patch.object(rc, "Catalog"),
+              patch.object(rc, "read_frozen_requirements", return_value=[]),
+              patch("devorchestra.direct_git.admit", return_value=self.git),
+              patch.object(rc, "snapshot", return_value=self.image)):
+            reviewed = rc.review(runner, self.project, **options)
+            with self.assertRaisesRegex(Blocked, "approval changed"):
+                rc.run(runner, self.project, approval=digest(reviewed), **dict(options, approved_criterion="C2"))
+            receipt = rc.run(runner, self.project, approval=digest(reviewed), **options)
+        self.assertEqual(["manager-planning"], roles)
+        self.assertEqual(rc.CRITERION_APPROVAL_REQUIRED, receipt["outcome"])
+        self.assertEqual(("DRAINED", True, 5), (receipt["owned_tree"], receipt["usage_complete"],
+                                                receipt["known_reported_tokens"]))
+        self.assertEqual(digest(response), receipt["roles"][0]["message_sha256"])
+        self.assertEqual("RETAINED_FOR_RECOVERY", receipt["staging_cleanup"]["status"])
+        self.assertEqual(before, self.ledger.read()[:len(before)])
+        self.assertNotIn("native_inspection_plan_accepted", {row["kind"] for row in self.ledger.read()})
+        require_admission(self.ledger.read())
+
     @unittest.skipUnless(os.name == "nt", "Requires the Windows execution slot")
     def test_second_controller_cannot_review_during_a_held_slot(self):
         script = (

@@ -48,6 +48,7 @@ REGISTERED_STATES = {
     "TIME_LIMIT": "시간 기준 도달", "TOKEN_LIMIT": "토큰 기준 도달", "CYCLE_LIMIT": "사이클 상한 도달",
     "NO_PROGRESS": "진척 없음", "NOT_VERIFIED": "검증 미확인", "VERIFIED": "검증 완료",
     "NEEDS_INPUT": "필요한 자료 또는 권한 대기",
+    "CRITERION_APPROVAL_REQUIRED": "완료 기준 재승인 필요 · Developer 호출 전 중단",
     "CHECKPOINT_SAVED": "체크포인트 저장됨",
     "CLEANUP_UNVERIFIED": "임시 폴더 정리 미확인",
     "POSTPROCESS_PENDING": "응답 저장됨 · 판정 재처리 대기", "RESPONSE_REUSED": "저장된 응답 재사용",

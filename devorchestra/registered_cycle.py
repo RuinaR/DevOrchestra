@@ -63,6 +63,7 @@ MAX_SIGNOFF_TOKENS = REGISTERED_ROLE_TOKEN_CAPS["reviewer"] + REGISTERED_ROLE_TO
 MANUAL_CHECKPOINT = "CHECKPOINT_SAVED"
 POSTPROCESS_PENDING = "POSTPROCESS_PENDING"
 NEEDS_INPUT = "NEEDS_INPUT"
+CRITERION_APPROVAL_REQUIRED = "CRITERION_APPROVAL_REQUIRED"
 LEGACY_VERDICT_ERROR = "Role did not return a valid verdict"
 LEGACY_PLAN_ERROR = "Manager plan exceeds the approved criteria"
 REVIEW_VERDICTS = {"ACCEPT", "REWORK"}
@@ -77,6 +78,18 @@ class VerdictError(Blocked):
 
 class PlanFormatError(Blocked):
     """Planning completed, but its response could not be decoded as a plan."""
+
+
+class CriterionMismatch(Blocked):
+    def __init__(self, approved, selected):
+        super().__init__(f"Criterion approval required: {approved}")
+        self.selected = selected
+
+
+def _require_criterion(scope, criterion):
+    approved = scope.get("approved_criterion")
+    if approved is not None and criterion != approved:
+        raise CriterionMismatch(approved, criterion)
 
 
 class NoDeveloperChange(Blocked):
@@ -382,11 +395,17 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image, *,
                 allowed_changes.update(row["changed"])
     progress_checkpoint = (
         (manual or (end.get("outcome") in {"NO_PROGRESS", "CYCLE_LIMIT", "GRACEFUL_STOP", "CONTINUE", "REWORK",
-                                          NEEDS_INPUT, "USER_TEST_REQUIRED"}
+                                    NEEDS_INPUT, "USER_TEST_REQUIRED", CRITERION_APPROVAL_REQUIRED}
                     and saved_progress.get("kind") == "native_inspection_progress_checkpoint"))
         and saved_progress.get("run_id") == end.get("run_id") and saved_progress.get("source_sha256") == image_hash
         and saved_progress.get("changed") == end.get("changed") and end.get("usage_complete") is True
-        and end.get("staging_cleanup", {}).get("status") == "REMOVED"
+        and (end.get("staging_cleanup", {}).get("status") == "REMOVED"
+             or (end.get("outcome") == CRITERION_APPROVAL_REQUIRED
+                 and end.get("staging_cleanup") == {"status": "RETAINED_FOR_RECOVERY", "workspace": start.get("workspace")}
+                 and len(rows) >= 3 and rows[-3].get("kind") == "native_inspection_criterion_approval_required"
+                 and rows[-3].get("run_id") == end.get("run_id")
+                 and rows[-3].get("approved_criterion") == prior.get("approved_criterion")
+                 and rows[-3].get("source_sha256") == image_hash))
         and digest(prior) == start.get("approval_sha256") == end.get("approval_sha256")
         and set(end.get("changed", ())) <= allowed_changes)
     if recovered_preflight:
@@ -453,7 +472,7 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image, *,
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
               manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False, game_limits=None, visual_review=False,
-              play=False, tools=None, direct_branch=None):
+              play=False, tools=None, direct_branch=None, approved_criterion=None):
     now = time()
     if (type(play) not in (bool, dict) or
             (play is not False and (not visual_review or game_limits is None))):
@@ -541,6 +560,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     if any(name in data["documents"].values() for name in files):
         raise Blocked("Registered instruction documents cannot be edited in this session")
     criteria = cycle_progress.freeze(data["acceptance"], None)
+    if approved_criterion is not None and (type(approved_criterion) is not str or approved_criterion not in criteria):
+        raise Blocked("Select an exact registered completion criterion ID")
     if game:
         if tuple(criteria) != game_pilot.CRITERIA or digest(criteria) != game_pilot.FROZEN_CRITERIA_SHA256:
             raise Blocked("The five frozen game criteria changed")
@@ -617,6 +638,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
                    if play is not False else None)
     scope = {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),
+            **({"approved_criterion": approved_criterion} if approved_criterion is not None else {}),
             **({"visual_review": True, "replica_head": onboarding["replica_head"]} if visual_review else {}),
             **({"adaptive_play": play_policy} if play_policy else {}),
             **({"visual_preview": "scratch-windows-exe"}
@@ -652,14 +674,16 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             **({"portable_source_policy": project_tools.GITHUB_POLICY} if auto_tools else {}),
             **({"tool_packages": packages} if packages else {})}
     if prior_replica_candidate and prior_replica_candidate.get("unsettled_candidate"):
-        if saved := _candidate_plan(ledger, events, scope):
+        saved = _candidate_plan(ledger, events, scope)
+        if saved and (approved_criterion is None or saved[1].get("criterion") == approved_criterion):
             scope["candidate_plan"] = {"run_id": saved[0], "sha256": digest(saved[1])}
     if prior_replica_candidate and (plan := prior_replica_candidate.get("tool_plan")):
         parent = prior_replica_candidate["run_id"]
         start = next(row for row in events if row.get("run_id") == parent
                      and row["kind"] == "native_inspection_intent")
         prior = start["scope"]
-        if (all(prior.get(key) == scope.get(key) for key in (
+        if ((approved_criterion is None or plan.get("criterion") == approved_criterion)
+                and all(prior.get(key) == scope.get(key) for key in (
                 "project_revision", "goal", "criteria", "requirements", "permissions",
                 "verifier", "protected_edit_paths", "planning_protocol", "project_evidence_contract"))
                 and _allows_github_tools(scope)
@@ -684,7 +708,7 @@ def _reboot_review(runner, abandoned, project, reboot):
 
 
 def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None, direct_branch=None,
-           reboot=None):
+           reboot=None, approved_criterion=None):
     from .registered_recovery import bind_reboot
 
     with execution_slot() as abandoned:
@@ -693,7 +717,7 @@ def review(runner, *args, soft_limits=None, visual_review=False, play=False, too
         else:
             events, head = runner._idle_diagnostic(abandoned)
         scope = _contract(runner, events, head, *args, game_limits=soft_limits, visual_review=visual_review,
-                          play=play, tools=tools, direct_branch=direct_branch)
+                          play=play, tools=tools, direct_branch=direct_branch, approved_criterion=approved_criterion)
         return bind_reboot(scope, boundary) if reboot else scope
 
 
@@ -703,13 +727,13 @@ def _game_args(archive, expires, limits=None):
             list(game_pilot.DEVELOPMENT_FILES), list(PERMISSIONS), None)
 
 
-def review_game(runner, archive, expires, limits=None, *, visual_review=False, play=False):
+def review_game(runner, archive, expires, limits=None, *, visual_review=False, play=False, approved_criterion=None):
     limits = game_pilot.recommended_limits() if limits is None else limits
     game_pilot.validate_limits(limits)
     with execution_slot() as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
         return _contract(runner, events, head, *_game_args(archive, expires, limits), game=True, game_limits=limits,
-                         visual_review=visual_review, play=play)
+                         visual_review=visual_review, play=play, approved_criterion=approved_criterion)
 
 
 def _verified_game_base(ledger, events, replica, image, frozen, onboarding, files):
@@ -986,6 +1010,9 @@ class RegisteredSession(_FixtureSession):
             raise Blocked("Approved executable identity changed")
 
     def publish_cycle(self, cycle, criterion, verdict, comparison, *, recovered_paths=None):
+        if self.direct_binding and (not self.owned_verified or not self.usage_complete):
+            raise Blocked("Git publication requires settled usage and owned Jobs")
+        _require_criterion(self.scope, criterion)
         if not self.direct_binding:
             if self.owned_verified:
                 events, _ = self.runner.ledger.snapshot()
@@ -999,8 +1026,6 @@ class RegisteredSession(_FixtureSession):
             return
         from . import direct_git
 
-        if not self.owned_verified or not self.usage_complete:
-            raise Blocked("Git publication requires settled usage and owned Jobs")
         self.check_image()
         current = self.image["files"]
         paths = (recovered_paths if recovered_paths is not None else
@@ -1122,6 +1147,8 @@ class RegisteredSession(_FixtureSession):
 
     def call(self, cycle, phase, key, prompt, *, images=(), image_evidence=(), allowed_paths=None,
              response_schema=None, selected_tools=None, code_review_only=False):
+        if phase in {"developer", "reviewer", "manager-final"}:
+            _require_criterion(self.scope, key)
         saved = getattr(self, "saved_response", None)
         if saved:
             if ((cycle, phase, key) != (saved["cycle"], saved["phase"], saved["target"])
@@ -1283,10 +1310,16 @@ class RegisteredSession(_FixtureSession):
 
     def verify_registered(self, cycle, *, capture_only=False):
         tool = self.scope["verifier"]
-        review = getattr(self, "signoff_state", {}).get("review")
+        state = getattr(self, "signoff_state", {})
+        _require_criterion(self.scope, state.get("criterion"))
+        approved = self.scope.get("approved_criterion")
+        checks = tool.get("checks", {})
+        if approved is not None:
+            checks = {key: value for key, value in checks.items() if key == approved}
+        review = state.get("review")
         kind = ("Windows 내보내기와 소유 창 검사" if tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI)
                 else "복제본 무결성과 원본 보호 확인" if tool.get("mode") == BASELINE_VERIFIER
-                else f"승인된 독립 검사 {len(tool.get('checks', {}))}개")
+                else f"승인된 독립 검사 {len(checks)}개")
         if not capture_only:
             _handoff(self, cycle, "verifier", (f"Reviewer 판정 {_handoff_status(review)}. "
                      if review else "Developer 후보를 검사합니다. ") + kind)
@@ -1299,7 +1332,7 @@ class RegisteredSession(_FixtureSession):
         if integrity_only:
             self.check()
             self.check_image()
-        for key, spec in tool.get("checks", {}).items():
+        for key, spec in checks.items():
             if capture_only and "screen_changed" not in spec:
                 continue
             self.check()
@@ -1401,7 +1434,7 @@ class RegisteredSession(_FixtureSession):
                    "source_sha256": self.source(), "observations": observations}
         if integrity_only:
             receipt.update(runtime=BASELINE_VERIFIER, integrity="PASS",
-                           user_test_required=list(self.scope["criteria"]))
+                           user_test_required=[approved] if approved is not None else list(self.scope["criteria"]))
         self.record("native_inspection_role_result", cycle=cycle, **receipt)
         self.phases.append({"cycle": cycle, "phase": "verifier", "outcome": receipt["verdict"]})
         return receipt
@@ -1527,6 +1560,7 @@ def _handoff_status(state):
 
 
 def _review_and_verify(session, count, key, diff, status):
+    _require_criterion(session.scope, key)
     scope = session.scope
     criteria = scope["criteria"]
     review_base = ("The owner selected the current replica. The diff compares it with the frozen onboarding baseline."
@@ -1701,6 +1735,7 @@ def _review_and_verify(session, count, key, diff, status):
 
 def _verify_signoff(session, count, key, status):
     scope = session.scope
+    _require_criterion(scope, key)
     criteria = scope["criteria"]
     if session.signoff_state.get("review") not in REVIEW_VERDICTS:
         raise Blocked("Independent Verifier requires a settled Reviewer verdict")
@@ -1739,7 +1774,8 @@ def _verify_signoff(session, count, key, status):
                        receipt_sha256=digest(checked), evidence_sha256=digest(attachment["frames"]), result="PASS")
     verification = {key: checked[key] for key in ("source_sha256", "verdict", "owned_tree") if key in checked}
     session.signoff_state["verification"] = verification
-    comparison = cycle_progress.compare(criteria, status, checked)
+    approved = scope.get("approved_criterion")
+    comparison = cycle_progress.compare({key: criteria[key]} if approved is not None else criteria, status, checked)
     if any(row.get("title") == key and row.get("status") == "NOT_VERIFIED" and row.get("reason")
            for row in checked.get("observations", ())):
         comparison["criterion_environment_blocked"] = True
@@ -1778,6 +1814,8 @@ def _verify_signoff(session, count, key, status):
             comparison["criteria"][key] = "USER_TEST_REQUIRED"
             if key in comparison["newly_verified"]:
                 comparison["newly_verified"].remove(key)
+    if approved is not None:
+        comparison["criteria"] = {**status, **comparison["criteria"]}
     session.progress = comparison["criteria"]
     session.cycles_checked = count
     session.signoff_state["comparison"] = comparison
@@ -1947,7 +1985,7 @@ def _decision_compatible(scope, comparison, expected, final):
 
 
 def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools=False, project_edit=False,
-                role_capabilities=False, evidence_contract=False):
+                role_capabilities=False, evidence_contract=False, approved_criterion=None):
     try:
         plan = json.loads(message, object_pairs_hook=_unique_object)
     except (ValueError, Blocked, RecursionError):
@@ -1957,6 +1995,9 @@ def _parse_plan(message, pending, *, game=False, approved_paths=(), github_tools
         permitted.add("prerequisite")
     if evidence_contract:
         permitted.update({"deliverable", "components", "verification", "evidence"})
+    if (approved_criterion is not None and type(plan) is dict and "criterion" in plan
+            and plan["criterion"] != approved_criterion):
+        raise CriterionMismatch(approved_criterion, plan["criterion"])
     if type(plan) is not dict or not {"criterion", "plan"} <= plan.keys() <= permitted:
         raise PlanFormatError("계획 Manager 응답에 criterion과 plan이 필요합니다.")
     if "tools" in plan:
@@ -2156,6 +2197,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
     scope = session.scope
     project = scope["project_id"]
     criteria = scope["criteria"]
+    approved = scope.get("approved_criterion")
     migration = scope.get("direct_git_migration")
     status = dict.fromkeys(criteria, "NOT_STARTED")
     base = scope.get("candidate_base")
@@ -2250,11 +2292,20 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         save_checkpoint()
         return True
 
+    def criterion_mismatch(selected, plan_sha256):
+        session.check_image()
+        session.record("native_inspection_criterion_approval_required", cycle=count, phase="manager-planning",
+                       target=selected if isinstance(selected, str) and selected in criteria else None,
+                       approved_criterion=approved, plan_sha256=plan_sha256, source_sha256=session.source())
+        return stop(count - 1, outcome=CRITERION_APPROVAL_REQUIRED, feedback=feedback)
+
     while scope["cycles"] is None or count < scope["cycles"]:
         session.check()
         if initial_plan is None and save_if_requested():
             return MANUAL_CHECKPOINT
         count += 1
+        if initial_plan is not None and approved is not None and initial_plan["criterion"] != approved:
+            return criterion_mismatch(initial_plan["criterion"], digest(initial_plan))
         if "graceful_stop" in scope and initial_plan is None:
             try:
                 if scope.get("token_mode") == SUBSCRIPTION_MODE:
@@ -2271,6 +2322,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         documents = read_frozen_requirements(catalog, project, scope["requirements"],
                                             session.runner.ledger.state_boundary)
         context = json.dumps({"goal": scope["goal"], "criteria": criteria, "status": status,
+                              **({"approved_criterion": {"id": approved, "text": criteria[approved]["text"]}}
+                                 if approved is not None else {}),
                               "approved_paths": ("whole replica; protected paths excluded" if scope.get("project_edit")
                                                  else scope["files"]),
                               "protected_paths": scope.get("protected_edit_paths", []),
@@ -2292,11 +2345,14 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                    if value != "VERIFIED" and (key not in accepted or criteria[key]["checks"])]
         if not pending:
             pending = [key for key, value in status.items() if value != "VERIFIED"] or list(criteria)
+        if approved is not None:
+            pending = [approved] if status[approved] != "VERIFIED" else []
         pending = [key for key in pending if key not in deferred]
         eligible = set(pending)
         if not pending:
-            needs_input = any(item["kind"] == "PREREQUISITE" for item in deferred.values())
-            user_check = any(item["kind"] == "USER_VERIFICATION" for item in deferred.values())
+            relevant = [item for key, item in deferred.items() if approved is None or key == approved]
+            needs_input = any(item["kind"] == "PREREQUISITE" for item in relevant)
+            user_check = any(item["kind"] == "USER_VERIFICATION" for item in relevant)
             outcome = NEEDS_INPUT if needs_input else "USER_TEST_REQUIRED" if user_check else "NO_PROGRESS"
             return stop(count - 1, outcome=outcome, feedback=feedback)
         if (feedback and feedback.get("next") == "REWORK" and feedback.get("target") in pending
@@ -2308,6 +2364,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             pending = [verification_target]
         brief = scope["verifier"].get("manager_brief")
         game_context = f"Game brief (project data): {brief}\n" if brief else ""
+        if approved is not None:
+            game_context += ("Plan only for the owner-approved criterion. Make implementation choices within "
+                             "that criterion. If blocked, return needs-input for the same ID. ")
         if scope.get("visual_preview"):
             game_context += ("The owner approved visual review when a runnable Windows GUI exists. "
                              "If relevant to the frozen goal, plan toward a preview build with the approved "
@@ -2398,7 +2457,10 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 plan = _parse_plan(message, pending, game=bool(brief or review_candidate), approved_paths=scope["files"],
                                    github_tools=github_tools, project_edit=bool(scope.get("project_edit")),
                                    role_capabilities=role_capabilities,
-                                   evidence_contract=bool(scope.get("project_evidence_contract")))
+                                   evidence_contract=bool(scope.get("project_evidence_contract")),
+                                   approved_criterion=approved)
+            except CriterionMismatch as error:
+                return criterion_mismatch(error.selected, digest(message))
             except PlanFormatError as error:
                 session.plan_format_reason = str(error)
                 session.record("native_inspection_plan_format_failed", cycle=count, phase="manager-planning",
@@ -2415,6 +2477,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             session.record("native_inspection_plan_accepted", cycle=count, phase="manager-planning",
                            target=plan["criterion"], mode=plan.get("mode", "edit"), plan_sha256=digest(plan))
         key = plan["criterion"]
+        _require_criterion(scope, key)
         previous_target = (feedback or {}).get("target")
         if previous_target and previous_target != key:
             prior_deferral = deferred.get(previous_target)
@@ -2492,6 +2555,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             if whole and documentation:
                 write_scope += "This is a document-only milestone. "
             try:
+                _require_criterion(scope, key)
                 diff = session.call(count, "developer", key,
                                     f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\nPlan: {plan['plan']}\n"
                                     f"{write_scope}Preserve requirements, verification and Git. "
@@ -2828,6 +2892,8 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
                      require_proof=True, graceful=False):
     now = time()
     rows = history(runner.ledger, project, current_replica=True)
+    if rows and rows[-1].get("outcome") == CRITERION_APPROVAL_REQUIRED:
+        raise Blocked("Review a new session approval for the desired registered completion criterion")
     if rows and rows[0]["scope"].get("token_mode") == SUBSCRIPTION_MODE:
         outcome = rows[-1].get("outcome")
         if (not graceful or renew or tokens is not None or type(seconds) is not int
@@ -3688,7 +3754,8 @@ def _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tok
             or any(e.get("scope", {}).get("resume", {}).get("parent_run_id") == start["run_id"]
                    for e in events if e["kind"] == "native_inspection_intent")):
         raise Blocked("The stopped game plan is not eligible for reuse within the remaining budget")
-    scope = _contract(runner, events, head, *_game_args(prior["archive"], expires), game=True)
+    scope = _contract(runner, events, head, *_game_args(prior["archive"], expires), game=True,
+                      approved_criterion=prior.get("approved_criterion"))
     if (scope["replica_sha256"] != end.get("replica_sha256")
             or scope["replica_sha256"] != intent.get("source_sha256")
             or any(scope.get(key) != value for key, value in prior.items() if key not in {"expires", "ledger_head"})):
@@ -3711,6 +3778,10 @@ def _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tok
 
 def _approved_resume_contract(runner, events, head, args, graceful):
     scope, diff = _resume_contract(runner, events, head, *args, graceful=graceful)
+    if "criterion" in scope["resume"]:
+        _require_criterion(scope, scope["resume"]["criterion"])
+    if isinstance(diff, dict) and "criterion" in diff:
+        _require_criterion(scope, diff["criterion"])
     current = {section: public_instruction(section)["sha256"] for section in ("global", *ROLES)}
     changed = sorted(section for section, checksum in current.items() if scope["instructions"].get(section) != checksum)
     if changed:
@@ -3735,6 +3806,7 @@ def verify_resume_candidate(runner, project, *, cancelled=lambda: False):
         scope, _ = _resume_contract(runner, events, head, project, int(time()) + 180, 120, 400000,
                                     require_proof=False)
         checkpoint = scope["resume"]
+        _require_criterion(scope, checkpoint.get("criterion"))
         if checkpoint["proof_run_id"]:
             return {"outcome": "EXISTING_PASS"}
         identifier = uuid4().hex
@@ -3745,6 +3817,7 @@ def verify_resume_candidate(runner, project, *, cancelled=lambda: False):
             session = RegisteredSession(runner, scope, lab, len(events), head, fields, cancelled)
             _, _, session.original_image, _ = baseline(ledger, project)
             session.image = snapshot(session.work)
+            session.signoff_state = {"criterion": checkpoint.get("criterion")}
             if session.source() != scope["replica_sha256"] or cancelled():
                 raise Blocked("Candidate changed or verification was cancelled")
             session.check_image()
@@ -3768,6 +3841,7 @@ def verify_resume_candidate(runner, project, *, cancelled=lambda: False):
 def _resume_remaining(session, diff):
     resume = session.scope["resume"]
     count, key = resume["cycle"], resume["criterion"]
+    _require_criterion(session.scope, key)
     status = resume["criteria_status"]
     session.progress = status
     session.cycles_checked = count - 1
@@ -3877,22 +3951,24 @@ def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False,
 
 
 def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None,
-        pause=None, play=False, tools=None, direct_branch=None, reboot=None):
+        pause=None, play=False, tools=None, direct_branch=None, reboot=None, approved_criterion=None):
     return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits,
                 visual_review=visual_review, activity=activity, pause=pause, play=play, tools=tools,
-                direct_branch=direct_branch, reboot=reboot)
+                direct_branch=direct_branch, reboot=reboot, approved_criterion=approved_criterion)
 
 
 def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False,
-             activity=None, pause=None, play=False):
+             activity=None, pause=None, play=False, approved_criterion=None):
     limits = game_pilot.recommended_limits() if limits is None else limits
     game_pilot.validate_limits(limits)
     return _run(runner, _game_args(archive, expires, limits), approval, cancelled, resume=False, game=True,
-                game_limits=limits, visual_review=visual_review, activity=activity, pause=pause, play=play)
+                game_limits=limits, visual_review=visual_review, activity=activity, pause=pause, play=play,
+                approved_criterion=approved_criterion)
 
 
 def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False,
-         visual_review=False, activity=None, pause=None, play=False, tools=None, direct_branch=None, reboot=None):
+         visual_review=False, activity=None, pause=None, play=False, tools=None, direct_branch=None, reboot=None,
+         approved_criterion=None):
     from .registered_recovery import bind_reboot, reboot_admission, reboot_target, windows_boot_boundary
     from .runtime import require_admission
 
@@ -3904,7 +3980,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
         scope, diff = (_approved_resume_contract(runner, events, head, args, graceful) if resume
                        else (_contract(runner, events, head, *args, game=game, game_limits=game_limits,
                                        visual_review=visual_review, play=play, tools=tools,
-                                       direct_branch=direct_branch), None))
+                                       direct_branch=direct_branch, approved_criterion=approved_criterion), None))
         if reboot:
             scope = bind_reboot(scope, boundary)
         if cancelled() or digest(scope) != approval:
@@ -3978,7 +4054,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 session.check_image()
                 if outcome == "NO_PROGRESS":
                     reason = outcome
-                elif outcome == NEEDS_INPUT:
+                elif outcome in {NEEDS_INPUT, CRITERION_APPROVAL_REQUIRED}:
                     reason = outcome
                 elif outcome == MANUAL_CHECKPOINT:
                     reason = getattr(session, "plan_format_reason", None)
@@ -4003,7 +4079,7 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
                 return {**fields, "outcome": "RECOVERY_REQUIRED", "owned_tree": "UNRESOLVED", "reason": reason}
             preserve = outcome in {"REQUEST_UNKNOWN", "USAGE_UNKNOWN", "RESPONSE_MISSING", "TOOL_EVIDENCE_REJECTED",
                                    "TIME_LIMIT", "CANCELLED", "BLOCKED",
-                                   POSTPROCESS_PENDING}
+                                   POSTPROCESS_PENDING, CRITERION_APPROVAL_REQUIRED}
             cleanup["preserve"] = preserve
         if preserve:
             cleanup = {"status": "RETAINED_FOR_RECOVERY", "workspace": lab.name}

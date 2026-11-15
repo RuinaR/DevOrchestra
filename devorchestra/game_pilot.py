@@ -525,7 +525,9 @@ def verify_development(session, cycle, *, capture_only=False):
     """Build the reviewed candidate under the session fence and preserve independent EXE evidence."""
     scope = session.scope
     tool = scope["verifier"]
-    generic = tool["mode"] == REGISTERED_GUI
+    approved = scope.get("approved_criterion")
+    # The legacy game check is bound only to its Windows-launch criterion.
+    generic = tool["mode"] == REGISTERED_GUI or approved not in (None, CRITERIA[0])
     ledger = session.runner.ledger
     engine, template = Path(tool["executable"]), Path(tool["template"])
     session.check()
@@ -593,7 +595,8 @@ def verify_development(session, cycle, *, capture_only=False):
     if generic:
         receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
                    "verdict": result["outcome"], "source_sha256": source_hash, "observations": [],
-                   "user_test_required": list(scope["criteria"]) if result["outcome"] == "PASS" else [],
+                   "user_test_required": ([approved] if approved else list(scope["criteria"]))
+                   if result["outcome"] == "PASS" else [],
                    "game": result}
         return _record_development_verification(session, cycle, receipt)
     # A successful launch of the original tile sheet is useful evidence but is not C1.
@@ -609,7 +612,7 @@ def verify_development(session, cycle, *, capture_only=False):
     receipt = {"phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED",
                "verdict": "PASS" if observations[0]["actual"] == observations[0]["expected"] else "FAIL",
                "source_sha256": source_hash, "observations": observations,
-               "user_test_required": list(MANUAL_CHECKS), "game": result}
+               "user_test_required": list(MANUAL_CHECKS) if approved is None else [], "game": result}
     return _record_development_verification(session, cycle, receipt)
 
 

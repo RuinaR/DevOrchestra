@@ -21,6 +21,105 @@ from devorchestra.native_developer_trial import _check_dedicated_config
 
 
 class RegisteredTrustTests(unittest.TestCase):
+    def test_fixed_criterion_routes_only_the_selected_cycle(self):
+        rc = registered_cycle
+        primary, other = "C1-fixture", "C2-fixture"
+        criteria = {key: {"text": f"Goal for {key}", "checks": []} for key in (primary, other)}
+        for target in (primary, other):
+            with self.subTest(target=target), TemporaryDirectory() as directory:
+                work = Path(directory) / "feature.txt"
+                work.write_text("before", encoding="utf-8")
+                scope = dict(project_id="fixture", criteria=criteria, approved_criterion=primary,
+                             goal="Implement the approved feature", files=["feature.txt"], cycles=1,
+                             requirements=[], verifier={"mode": rc.BASELINE_VERIFIER})
+                session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(),
+                                          record=Mock(), source=lambda: "candidate", changes=[],
+                                          check_image=Mock(), owned_verified=True, usage_complete=True,
+                                          publish_cycle=Mock())
+
+                def call(_, phase, criterion, prompt, **options):
+                    if phase == "manager-planning":
+                        self.assertIn(criteria[primary]["text"], prompt)
+                        self.assertEqual([primary], options["response_schema"]["properties"]["criterion"]["enum"])
+                        return json.dumps({"criterion": target, "plan": "Implement feature"})
+                    self.assertEqual(("developer", primary), (phase, criterion))
+                    work.write_text("after", encoding="utf-8")
+                    session.image = {"files": {"feature.txt": {"sha256": digest("after")}}}
+                    session.last_changed = ["feature.txt"]
+                    return "synthetic diff"
+
+                session.call = Mock(side_effect=call)
+                checked = {"owned_tree": "DRAINED", "observations": []}
+                comparison = {"criteria": {primary: "VERIFIED", other: "NOT_STARTED"},
+                              "newly_verified": [primary], "regressed": []}
+                with (patch.object(rc, "Catalog"), patch.object(rc, "read_frozen_requirements", return_value=[]),
+                      patch.object(rc, "_review_and_verify", return_value=("ACCEPT", "ACCEPT", "", checked, comparison)) as verify,
+                      patch.object(rc, "_decide", return_value="CONTINUE")):
+                    result = rc._cycles(session)
+                if target == other:
+                    self.assertEqual(rc.CRITERION_APPROVAL_REQUIRED, result)
+                    self.assertEqual(["manager-planning"], [entry.args[1] for entry in session.call.call_args_list])
+                    self.assertEqual("before", work.read_text(encoding="utf-8"))
+                    verify.assert_not_called()
+                    session.publish_cycle.assert_not_called()
+                    mismatch = next(entry.kwargs for entry in session.record.call_args_list
+                                    if entry.args[0] == "native_inspection_criterion_approval_required")
+                    self.assertEqual((primary, other), (mismatch["approved_criterion"], mismatch["target"]))
+                else:
+                    self.assertEqual("CYCLE_LIMIT", result)
+                    self.assertEqual("after", work.read_text(encoding="utf-8"))
+                    self.assertEqual(primary, verify.call_args.args[2])
+                    self.assertEqual(primary, session.publish_cycle.call_args.args[1])
+
+    def test_locked_checkpoint_and_reused_plan_must_match(self):
+        rc = registered_cycle
+        scope = {"approved_criterion": "C1", "resume": {"criterion": "C2"}}
+        with patch.object(rc, "_resume_contract", return_value=(scope, "saved diff")):
+            with self.assertRaises(rc.CriterionMismatch):
+                rc._approved_resume_contract(None, [], "", (), False)
+        scope["resume"]["criterion"] = "C1"
+        with patch.object(rc, "_resume_contract", return_value=(scope, {"criterion": "C2"})):
+            with self.assertRaises(rc.CriterionMismatch):
+                rc._approved_resume_contract(None, [], "", (), False)
+        session = SimpleNamespace(scope=scope, direct_binding=True, owned_verified=True, usage_complete=True)
+        for check in (lambda: rc.RegisteredSession.call(session, 1, "developer", "C2", ""),
+                      lambda: rc._verify_signoff(session, 1, "C2", {}),
+                      lambda: rc.RegisteredSession.publish_cycle(session, 1, "C2", "ACCEPT", {})):
+            with self.assertRaises(rc.CriterionMismatch):
+                check()
+
+    def test_locked_manager_unknown_never_reaches_developer(self):
+        rc = registered_cycle
+        scope = dict(project_id="fixture", approved_criterion="C1",
+                     criteria={"C1": {"text": "Goal", "checks": []}}, cycles=1, goal="Goal",
+                     files=["feature.txt"], requirements=[], verifier={})
+        session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), check=Mock(), record=Mock(),
+                                  call=Mock(side_effect=Blocked("REQUEST_UNKNOWN")))
+        with (patch.object(rc, "Catalog"), patch.object(rc, "read_frozen_requirements", return_value=[]),
+              self.assertRaisesRegex(Blocked, "REQUEST_UNKNOWN")):
+            rc._cycles(session)
+        self.assertEqual(["manager-planning"], [entry.args[1] for entry in session.call.call_args_list])
+        self.assertFalse(any(entry.args[0] == "native_inspection_plan_accepted"
+                             for entry in session.record.call_args_list))
+
+    def test_locked_verifier_does_not_run_or_promote_other_checks(self):
+        rc = registered_cycle
+        approved, other = "C1", "C2"
+        scope = {"approved_criterion": approved,
+                 "criteria": {key: {"text": key, "checks": [{"title": key}]} for key in (approved, other)},
+                 "verifier": {"mode": rc.BASELINE_VERIFIER, "checks": {other: {}}}}
+        session = SimpleNamespace(scope=scope, signoff_state={"criterion": approved, "review": "ACCEPT"}, record=Mock(), phases=[],
+                                  check=Mock(), check_image=Mock(), logs=Mock(), source=lambda: "candidate")
+        self.assertEqual([], rc.RegisteredSession.verify_registered(session, 1)["observations"])
+        session.logs.assert_not_called()
+        session.verify_registered = Mock(return_value={
+            "phase": "verifier", "outcome": "COMPLETED", "owned_tree": "DRAINED", "verdict": "PASS",
+            "observations": [{"title": other, "actual": "same", "expected": "same"}],
+        })
+        _, comparison = rc._verify_signoff(session, 1, approved, {approved: "NOT_STARTED", other: "NOT_STARTED"})
+        self.assertEqual("NOT_STARTED", comparison["criteria"][other])
+        self.assertEqual([], comparison["newly_verified"])
+
     def test_packaged_verifier_approval_pins_inputs_and_limits_coverage(self):
         rc = registered_cycle
         with TemporaryDirectory() as folder:

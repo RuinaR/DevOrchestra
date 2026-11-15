@@ -211,6 +211,16 @@ def _session_layout(panel, state):
     return body, footer
 
 
+AUTOMATIC_CRITERION = "자동 선택"
+
+
+def _criterion_approval(scope):
+    key = scope.get("approved_criterion")
+    if key is None:
+        return ""
+    return f"\n\n고정 완료 기준 · {key}\n{scope['criteria'][key]['text']}\n다른 기준이면 Developer 호출 전에 중단합니다.\n"
+
+
 def show(center, project, *, resume_only=False, continue_progress=False):
     runner = center.controller
     panel = center.panel()
@@ -238,6 +248,11 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         content.configure(state="disabled")
 
     ttk.Button(body, text="목표와 완료 기준 보기", command=show_criteria).pack(anchor="w", pady=(0, 4))
+    approved_criterion = tk.StringVar(panel, value=AUTOMATIC_CRITERION)
+    if not resume_only:
+        ttk.Label(body, text="완료 기준 고정 (선택)").pack(anchor="w")
+        ttk.Combobox(body, textvariable=approved_criterion, state="readonly",
+                     values=(AUTOMATIC_CRITERION, *criteria)).pack(fill="x")
     baseline = None
     try:
         original, replica, baseline, _ = replica_readiness.baseline(runner.ledger, project)
@@ -306,7 +321,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                         variable=use_images).pack(anchor="w", pady=(0, 6))
         state.set("게임 개발 · 실행 범위 검토 또는 오프라인 검증")
         play_option()
-        _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button, draft)
+        _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button,
+                        draft, approved_criterion)
         return
     ttk.Button(body, text="등록 목표·기준 편집",
                command=lambda: save_budget() and (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
@@ -573,7 +589,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             panel.destroy()
 
     def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False,
-               direct_branch=None, reboot=None):
+               direct_branch=None, reboot=None, criterion=None):
         nonlocal future, active
         future = Future()
         active = True
@@ -583,7 +599,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         state.set("승인 범위 확인 중")
         options = ({"graceful": graceful} if resume else
                    {"soft_limits": soft_limits, "visual_review": visual_review, "play": play,
-                    "direct_branch": direct_branch, "reboot": reboot})
+                    "direct_branch": direct_branch, "reboot": reboot, "approved_criterion": criterion})
         review_fn = registered_cycle.review_resume if resume else registered_cycle.review
         run_fn = registered_cycle.run_resume if resume else registered_cycle.run
 
@@ -642,7 +658,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                     + ", ".join({"global": "전역", "verifier": "독립 Verifier"}.get(
                                         role, ROLE_LABELS.get(role, role)) for role in updated_roles)
                                     if updated_roles else "")
-                instruction_note += _play_approval(result)
+                instruction_note += _criterion_approval(result) + _play_approval(result)
                 if checkpoint.get("mode") == "partial-candidate":
                     git = result["direct_git"]
                     evidence = checkpoint["staging_evidence"]
@@ -826,7 +842,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                             f"\n체크아웃 {boundary['checkout']} · {boundary['direct_git']['ref']}"
                             f"\nGit 시작 HEAD {boundary['direct_git']['head']}"
                             f"\n승인 만료 {boundary['expires']} (Unix 초)")
-            if center.confirm("등록 프로젝트 Codex 세션 승인", summary + _play_approval(result), parent=panel):
+            if center.confirm("등록 프로젝트 Codex 세션 승인",
+                              _criterion_approval(result) + summary + _play_approval(result), parent=panel):
                 launch(result)
             else:
                 state.set("실행 승인 취소됨")
@@ -896,8 +913,10 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             return
         cancelled.clear()
         reboot = reboot_request.get().strip()
+        criterion = approved_criterion.get()
         submit(args, soft_limits=limits, visual_review=use_images.get(), play=play,
-               direct_branch=direct_branch.get().strip() or None, reboot=(reboot, int(time()) + 900) if reboot else None)
+               direct_branch=direct_branch.get().strip() or None, reboot=(reboot, int(time()) + 900) if reboot else None,
+               criterion=None if criterion == AUTOMATIC_CRITERION else criterion)
 
     def resume():
         try:
@@ -1032,7 +1051,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         panel.after_idle(resume)
 
 
-def _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button, draft):
+def _game_preflight(center, panel, body, footer, runner, state, grants, use_images, use_play, restart_button, draft,
+                    approved_criterion):
     cancelled = Event()
     future = None
 
@@ -1059,6 +1079,8 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
 
     def start(export_windows=False, *, online=False, resume=False):
         nonlocal future
+        selected = approved_criterion.get()
+        criterion = None if selected == AUTOMATIC_CRITERION else selected
         visual_review = online and not resume and use_images.get()
         play = online and not resume and use_play.get()
         limits = None
@@ -1115,7 +1137,8 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                         result = registered_cycle.review_resume(runner, *resume_args, graceful=graceful)
                     else:
                         result = registered_cycle.review_game(runner, archive, expires, limits,
-                                                             visual_review=visual_review, play=play)
+                                                             visual_review=visual_review, play=play,
+                                                             approved_criterion=criterion)
                     future.set_result(result)
                 except Exception as error:
                     future.set_exception(error)
@@ -1180,7 +1203,8 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                                 "전역" if role == "global" else ROLE_LABELS[role] for role in updated_roles)
                         if result.get("visual_review") and (not resume or not result["resume"].get("review")):
                             summary += "\n소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다."
-                        if center.confirm(title, summary + _play_approval(result), parent=panel):
+                        if center.confirm(title, _criterion_approval(result) + summary + _play_approval(result),
+                                          parent=panel):
                             if not save():
                                 return
                             def run(activity, pause):
@@ -1191,7 +1215,7 @@ def _game_preflight(center, panel, body, footer, runner, state, grants, use_imag
                                 return registered_cycle.run_game(
                                     runner, archive, expires, limits, approval=digest(result),
                                     cancelled=cancelled.is_set, visual_review=visual_review, activity=activity,
-                                    pause=pause, play=play)
+                                    pause=pause, play=play, approved_criterion=criterion)
 
                             if center.start_registered_run(result, run, cancelled):
                                 panel.destroy()
