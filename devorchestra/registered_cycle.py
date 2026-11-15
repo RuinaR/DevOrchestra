@@ -2155,18 +2155,27 @@ def _documentation_path(name):
             or (path.parts[0].casefold() in {"docs", "documentation"} and path.suffix.lower() == ".txt"))
 
 
+def _test_path(name):
+    path = Path(name)
+    return (any(part.casefold() in {"test", "tests", "qa", "__tests__"} for part in path.parts[:-1])
+            or bool(re.search(r"(^qa$|^(test|qa)[_.-]|[_.-](test|tests|spec)$)", path.stem.casefold())))
+
+
 def _cycle_stagnation(scope, key, review, checked, comparison, accepted, changed, stagnant, *, documentation=False):
     """Count each accepted, changed criterion once without promoting it to functional VERIFIED."""
     integrity = (scope["verifier"].get("mode") == BASELINE_VERIFIER and not scope["criteria"][key]["checks"]
                  and checked.get("runtime") == BASELINE_VERIFIER and checked.get("integrity") == "PASS"
                  and comparison["criteria"][key] == "USER_TEST_REQUIRED")
     only_docs = bool(changed) and all(_documentation_path(name) for name in changed)
+    test_changes = bool(changed) and not only_docs and all(
+        _documentation_path(name) or _test_path(name) for name in changed)
     planned_docs = (documentation and only_docs
                     and checked.get("outcome") == "COMPLETED"
                     and checked.get("verdict") in {"PASS", "FAIL", "NOT_VALIDATED"})
+    reviewed_candidate = (integrity and not test_changes
+                          and (not scope.get("project_evidence_contract") or not only_docs))
     if (review == "ACCEPT" and not comparison["regressed"] and changed and checked.get("owned_tree") == "DRAINED"
-            and key not in accepted and (planned_docs or (integrity and (
-                not scope.get("project_evidence_contract") or not only_docs)))):
+            and key not in accepted and (planned_docs or reviewed_candidate)):
         accepted.add(key)
         comparison["newly_reviewed_without_functional_check"] = [key]
         if planned_docs:
@@ -2174,11 +2183,12 @@ def _cycle_stagnation(scope, key, review, checked, comparison, accepted, changed
     progress = comparison["newly_verified"] or comparison.get("newly_reviewed_without_functional_check")
     comparison["progress_basis"] = ("INDEPENDENT_CHECK" if comparison["newly_verified"]
                                     else "PLANNED_DOCUMENTATION" if comparison.get("documentation_progress")
+                                    else "TEST_CHANGES_ONLY" if test_changes
                                     else "REVIEW_AND_INTEGRITY" if progress else "NONE")
     if scope.get("project_evidence_contract"):
         level = scope["verifier"].get("checks", {}).get(key, {}).get("level")
         comparison["delivery"] = {
-            "artifact_changed": bool(changed), "document_only": only_docs,
+            "artifact_changed": bool(changed), "document_only": only_docs, "test_changes_only": test_changes,
             "criterion": key, "verification": comparison.get("criterion_evidence", {}).get(key, "MISSING"),
             "independent_criterion_improvement": key in comparison["newly_verified"],
             "verification_level": level,
@@ -2192,7 +2202,7 @@ def _bounded_rework(criteria, feedback):
         result = {"next": "REWORK", "target": feedback["target"], "review": feedback["review"][:8000]}
         if isinstance(facts := feedback.get("verification"), dict):
             result["verification"] = {key: facts[key] for key in (
-                "artifact_changed", "document_only", "criterion", "verification",
+                "artifact_changed", "document_only", "test_changes_only", "criterion", "verification",
                 "independent_criterion_improvement", "verification_level") if key in facts}
         return result
     return None
@@ -2470,6 +2480,12 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    "Set mode to edit for implementation. For a planned document-only milestone, "
                                    "set mode to documentation and use only "
                                    "unprotected document paths. Document progress does not satisfy functional checks. "
+                                   "When implementation already exists and only execution evidence is missing, "
+                                   "prefer running the existing checks through approved verification, preparing the "
+                                   "smallest missing execution or preview prerequisite, or reporting the missing grant. "
+                                   "Add test code only if an existing entry point cannot measure the required behavior. "
+                                   "Identify the actual check and expected result. Test-only changes and review with "
+                                   "integrity checks do not establish user-visible improvement. "
                                    "Use mode needs-input only if this criterion cannot advance within the approved inputs, "
                                    "files or capabilities. State the specific missing prerequisite in plan. Never fabricate "
                                    "external evidence or plan repeated edits that cannot resolve the prerequisite. "

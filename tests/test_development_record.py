@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import posixpath
 import re
 import shutil
@@ -15,6 +16,7 @@ from devorchestra.runtime import Runner
 
 
 CRITERION = "C1-aabbccdd"
+NATIVE_COMMAND = direct_git._command
 
 
 def report_for(image, head, run, *, final="REWORK", state="NOT_VERIFIED", branch="refs/heads/main"):
@@ -159,6 +161,21 @@ class RecordGitTests(unittest.TestCase):
         self.assertEqual(old_report, self.git("show", "main:" + old_path, cwd=self.remote))
         with self.assertRaisesRegex(Blocked, "already exists"):
             self.publish("duplicate")
+
+    @unittest.skipUnless(os.name == "nt", "Controller's native Windows Job required")
+    def test_native_windows_commit_includes_code_and_controller_records(self):
+        def command(root, scratch, check, *args, **kwargs):
+            # Only the fixture transport uses a local bare remote.
+            if args[0] in {"ls-remote", "push"}:
+                return self.command(root, scratch, check, *args, **kwargs)
+            return NATIVE_COMMAND(root, scratch, check, *args, **kwargs)
+
+        with patch.object(direct_git, "_command", command):
+            commit = self.publish("native candidate")
+        self.assertEqual(commit, self.git("rev-parse", "main", cwd=self.remote).strip())
+        changed = self.git("diff-tree", "--no-commit-id", "--name-only", "-r", commit, cwd=self.remote)
+        self.assertEqual({"code.txt", records.CURRENT, records.LOG,
+                          f"{records.ROOT}cycles/cycle-0001-{self.run_id}.md"}, set(changed.splitlines()))
 
     def test_commit_failure_rolls_back_only_generated_files_and_staging(self):
         self.git_failure = "update-ref"

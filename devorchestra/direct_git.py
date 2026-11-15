@@ -30,6 +30,10 @@ def _command(root, scratch, check, *args, codes=(0,), raw=False):
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
     env.update(GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never", GIT_OPTIONAL_LOCKS="0",
                GIT_NO_LAZY_FETCH="1", GIT_LITERAL_PATHSPECS="1")
+    ignore_check = args[0] == "check-ignore"
+    if ignore_check:
+        # check-ignore accepts the Controller's generated filenames, but rejects literal pathspec magic.
+        env.pop("GIT_LITERAL_PATHSPECS")
     with TemporaryDirectory(prefix="direct-git-", dir=scratch) as logs:
         result = _observe(git, ["--no-replace-objects", "-c", "core.hooksPath=NUL",
                                "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false",
@@ -39,9 +43,22 @@ def _command(root, scratch, check, *args, codes=(0,), raw=False):
                                *args], root, Path(logs), env, seconds=60, check=check,
                           memory=512 * 1024**2, output_limit=1024**2, encoding="utf-8")
         data = (Path(logs) / "probe.stdout").read_bytes() if raw else None
+        diagnostic = ""
+        if ignore_check and result["stderr"]:
+            with (Path(logs) / "probe.stderr").open("rb") as error:
+                stderr = error.read(4096).lower()
+            if b"pathspec magic not supported" in stderr:
+                diagnostic = "unsupported pathspec magic"
+            elif b"bad config line" in stderr or b"unable to read config file" in stderr:
+                diagnostic = "Git configuration error"
+            elif b"not a git repository" in stderr:
+                diagnostic = "working directory is not a Git repository"
+            else:
+                diagnostic = "Git reported an error (details redacted)"
     check()
-    if result["job_active"] or result["exitCode"] not in codes:
-        raise Blocked(f"Git {args[0]} failed (exit {result['exitCode']})")
+    if result["job_active"] or result["exitCode"] not in codes or diagnostic:
+        detail = f": {diagnostic}" if diagnostic else ""
+        raise Blocked(f"Git {args[0]} failed (exit {result['exitCode']}){detail}")
     return data if raw else result["stdout"]
 
 

@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 from hashlib import sha256
 import shlex
 import shutil
@@ -16,6 +17,26 @@ from devorchestra.replica_evidence import snapshot
 
 @unittest.skipUnless(shutil.which("git"), "Git required")
 class DirectGitTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Controller's native Windows Job required")
+    def test_generated_record_ignore_check_uses_windows_controller_git(self):
+        with TemporaryDirectory() as folder:
+            scratch = Path(folder)
+            work = scratch / "work"
+            work.mkdir()
+            git = lambda *args, **kwargs: direct_git._command(work, scratch, lambda: None, *args, **kwargs)
+            path = "docs/development/CURRENT.md"
+            args = ("check-ignore", "--no-index", "--", path)
+            with self.assertRaisesRegex(Blocked, r"exit 128.*not a Git repository"):
+                git(*args, codes=(0, 1))
+            git("init")
+            self.assertEqual("", git(*args, codes=(0, 1)))
+            (work / ".gitignore").write_text("docs/development/\n", encoding="ascii")
+            self.assertEqual(path, git(*args, codes=(0, 1)).strip())
+            with (work / ".git" / "config").open("ab") as config:
+                config.write(b"\n[broken\n")
+            with self.assertRaisesRegex(Blocked, r"exit 128.*configuration error"):
+                git(*args, codes=(0, 1))
+
     def test_cycle_publication_pending_retry_and_conflict(self):
         with TemporaryDirectory() as folder:
             base = Path(folder)

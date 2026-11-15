@@ -631,6 +631,17 @@ class RegisteredTrustTests(unittest.TestCase):
         self.assertEqual(comparison["criteria"][key], "BLOCKED")
         self.assertEqual(session.record.call_args.args[0], "native_inspection_progress_checkpoint")
 
+    def test_test_only_delivery_does_not_count_as_reviewed_implementation(self):
+        scope = {"criteria": {"C1": {"checks": []}}, "verifier": {"mode": "replica-integrity"}}
+        checked = {"runtime": "replica-integrity", "integrity": "PASS", "owned_tree": "DRAINED"}
+        comparison = {"criteria": {"C1": "USER_TEST_REQUIRED"}, "newly_verified": [], "regressed": []}
+        accepted = set()
+        stagnant = registered_cycle._cycle_stagnation(
+            scope, "C1", "ACCEPT", checked, comparison, accepted, ["src/qa.gd", "docs/notes.md"], 1)
+        self.assertEqual(2, stagnant)
+        self.assertEqual("TEST_CHANGES_ONLY", comparison["progress_basis"])
+        self.assertEqual(set(), accepted)
+
     def test_graceful_budget_stop_saves_settled_candidate_before_new_role(self):
         scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Work", "checks": []}},
                  "cycles": None, "graceful_stop": {}, "verifier": {}}
