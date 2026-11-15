@@ -648,11 +648,13 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     foreground = play_limits.pop("foreground", False) if play_limits is not None else False
     capture_fps = play_limits.pop("capture_fps", None) if play_limits is not None else None
     evidence_mib = play_limits.pop("evidence_mib", None) if play_limits is not None else None
+    desktop_hold_ms = play_limits.pop("desktop_hold_ms", None) if play_limits is not None else None
     if type(foreground) is not bool:
         raise Blocked("Invalid foreground play approval")
     play_policy = (adaptive_play.approval(godot=verifier["mode"] in ("godot-game", game_pilot.REGISTERED_GUI),
                                          limits=play_limits, control_actions=True, foreground=foreground,
-                                         capture_fps=capture_fps, evidence_mib=evidence_mib)
+                                         capture_fps=capture_fps, evidence_mib=evidence_mib,
+                                         desktop_hold_ms=desktop_hold_ms)
                    if play is not False else None)
     scope = {"project_id": project, "project_revision": row["revision"], "goal": data["goal"],
             "criteria": criteria, "requirements": refs, "original": str(source), "replica": str(replica),

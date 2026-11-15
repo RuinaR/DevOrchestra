@@ -169,6 +169,13 @@ def _play_approval(scope):
                       "마지막 소유 창 프레임 하나만 사용합니다. ")
         if "evidence_mib" in play:
             extra += f"플레이 증거 상한은 사이클당 {play['evidence_mib']} MiB입니다. "
+        if "desktop_hold_ms" in play:
+            return (f"\n실제 Windows 입력 · 현재 실행의 소유 프리뷰 게임 창. 최대 {play['seconds']}초. {inputs}{extra}"
+                    f"WASD·방향키·Space 중 최대 두 키를 {play['desktop_hold_ms']}ms 유지하고 왼쪽 클릭을 보냅니다. "
+                    "전용 시험 환경을 권장합니다. 공유 데스크톱에서는 포커스가 바뀌는 순간 입력과 긴급 해제가 "
+                    "다른 창으로 전달될 수 있으며 이미 전달된 입력은 취소할 수 없습니다. "
+                    "포커스 상실·다른 입력 감지 또는 운영실의 ‘중단’ 요청 시 추가 입력을 멈추고 해제를 시도합니다. "
+                    "Controller 자체가 강제 종료되면 해제를 보장하지 않습니다. 관찰 이미지는 Codex로 전송합니다.")
         foreground = ("전경 QA · 소유 HWND에 직접 클릭과 키 메시지를 보냅니다. "
                       "창이 전경에서 벗어나면 입력을 중단합니다. "
                       if play.get("foreground") else "")
@@ -309,6 +316,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     use_images = tk.BooleanVar(panel, value=draft.get("use_images") is True)
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
     play_foreground = tk.BooleanVar(panel, value=draft.get("play_foreground") is True)
+    desktop_input = tk.BooleanVar(panel)
+    desktop_hold = tk.StringVar(panel, value="1000")
     capture_fps = tk.StringVar(panel, value=draft.get("capture_fps", ""))
     evidence_mib = tk.StringVar(panel, value=draft.get("evidence_mib", ""))
     direct_branch = tk.StringVar(panel, value="" if local else draft.get("direct_branch", ""))
@@ -329,6 +338,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             return
         ttk.Checkbutton(body, text="전경 QA · 승인된 소유 창에 클릭·키 메시지 직접 전달",
                         variable=play_foreground).pack(anchor="w")
+        ttk.Checkbutton(body, text="이번 실행에 실제 키보드·마우스 입력 허용 (공유 화면의 오입력 위험에 동의)",
+                        variable=desktop_input,
+                        command=lambda: play_foreground.set(True) if desktop_input.get() else None).pack(anchor="w")
         limits = ttk.Frame(body)
         limits.pack(fill="x")
         for field, title in (("play_inputs", "사이클당 AI 입력 상한 (1~64회)"),
@@ -345,6 +357,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                      state="readonly", width=12).grid(row=3, column=1, sticky="w")
         ttk.Label(limits, text="사이클당 플레이 증거 상한 (4~64 MiB)").grid(row=4, column=0, sticky="w")
         ttk.Entry(limits, textvariable=evidence_mib, width=12).grid(row=4, column=1, sticky="w")
+        ttk.Label(limits, text="실제 키 최대 유지 시간 (30~1,000ms)").grid(row=5, column=0, sticky="w")
+        ttk.Entry(limits, textvariable=desktop_hold, width=12).grid(row=5, column=1, sticky="w")
     ttk.Button(body, text="시각 검토 결과와 캡처 보기",
                command=lambda: _open_visual_report(center, runner, project)).pack(anchor="w")
     if is_godot and project == game_pilot.PROJECT and not resume_only:
@@ -982,7 +996,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     files, permissions, verifier, role_tokens["manager-planning"])
             play = use_play.get()
-            if play and (play_foreground.get() or capture_fps.get() or evidence_mib.get().strip()
+            if desktop_input.get() and not play:
+                raise ValueError("실제 입력을 허용하려면 AI 플레이를 선택하세요.")
+            if play and (play_foreground.get() or desktop_input.get() or capture_fps.get() or evidence_mib.get().strip()
                          or any(entry.get().strip() for entry in play_entries.values())):
                 from . import adaptive_play
                 default = adaptive_play.approval(godot=registered_cycle.godot_verifier_spec(verifier))
@@ -994,14 +1010,17 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                 rate = int(capture_fps.get()) if capture_fps.get() else None
                 try:
                     cap = int(evidence_mib.get().strip()) if evidence_mib.get().strip() else None
+                    desktop_max = int(desktop_hold.get().strip()) if desktop_input.get() else None
                 except ValueError as error:
-                    raise ValueError("플레이 증거 상한은 MiB 정수로 입력하세요.") from error
+                    raise ValueError("플레이 증거 상한과 키 유지 시간은 정수로 입력하세요.") from error
                 adaptive_play.approval(limits=play, foreground=play_foreground.get(), capture_fps=rate,
-                                       evidence_mib=cap)
+                                       evidence_mib=cap, desktop_hold_ms=desktop_max)
                 if rate is not None:
                     play["capture_fps"] = rate
                 if cap is not None:
                     play["evidence_mib"] = cap
+                if desktop_max is not None:
+                    play["desktop_hold_ms"] = desktop_max
                 if play_foreground.get():
                     play["foreground"] = True
         except (RuntimeError, ValueError) as error:

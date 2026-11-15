@@ -18,6 +18,7 @@ from .job_probe import _require
 from .lease import Blocked
 from .role_contract import _unique_object
 from .system_powershell import _api as signature
+from .windows_key_input import Keyboard
 
 CAPTURE_DIMENSIONS = "Owned capture dimensions exceed the bound"
 CAPTURE_BYTES = "Owned capture PNG exceeds the byte bound"
@@ -273,7 +274,7 @@ def _capture(window, path, workers, *, fps=None):
 
 
 def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None,
-                         play=None, executable=None, capture_fps=None):
+                         play=None, executable=None, capture_fps=None, desktop_hold_ms=None):
     process = _require(signature(api, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)(0x101000, False, pid))
     member = signature(api, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
     try:
@@ -293,15 +294,30 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
                 if Path(name.value).resolve() != executable.resolve():
                     raise Blocked("Owned GUI process is not the approved executable")
             times = signature(api, "GetProcessTimes", w.BOOL, w.HANDLE, *([c.POINTER(w.FILETIME)] * 4))
-            values = [w.FILETIME() for _ in range(4)]
-            _require(times(process, *(c.byref(value) for value in values)))
-            identity = digest([int(job), pid, hwnd, window.thread,
-                               values[0].dwHighDateTime, values[0].dwLowDateTime])
+            def created():
+                values = [w.FILETIME() for _ in range(4)]
+                _require(times(process, *(c.byref(value) for value in values)))
+                return values[0].dwHighDateTime, values[0].dwLowDateTime
+
+            birth = created()
+            identity = digest([int(job), pid, hwnd, window.thread, *birth])
+
+            def verify_execution():
+                if not alive() or created() != birth:
+                    raise Blocked("Desktop input target process identity changed")
 
             def capture(path):
                 return {**_capture(window, path, workers, fps=capture_fps), "window_identity": identity}
 
             if play is not None:
+                if desktop_hold_ms is not None:
+                    if executable is None:
+                        raise Blocked("Desktop input requires an approved executable")
+                    input_adapter = Keyboard(window, verify_execution, max_hold_ms=desktop_hold_ms)
+                    try:
+                        return play(window, capture, input_adapter)
+                    finally:
+                        input_adapter.release()
                 return play(window, capture)
             if input_probe:
                 initial = window.dimensions()
@@ -337,7 +353,7 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
 
 
 def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None, input_probe=True,
-                         play=None, executable=None, capture_fps=None):
+                         play=None, executable=None, capture_fps=None, desktop_hold_ms=None):
     user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
     callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
     enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
@@ -370,7 +386,7 @@ def inspect_owned_window(api, job, deadline, check, image_path, workers, *, befo
             sleep(0.4)
             return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=input_probe,
                                         before_input=before_input, play=play, executable=executable,
-                                        capture_fps=capture_fps)
+                                        capture_fps=capture_fps, desktop_hold_ms=desktop_hold_ms)
         sleep(0.05)
 
 
