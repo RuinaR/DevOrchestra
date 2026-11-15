@@ -5,6 +5,7 @@ import re
 
 from .lease import Blocked
 from .ledger import check_path
+from .local_folder import git_entry
 
 
 def inspect_folder(folder):
@@ -34,7 +35,7 @@ def inspect_folder(folder):
     git = root / ".git"
     check_path(git)
     if not git.exists():
-        return "folder", "", "", hints
+        return ("git" if git_entry(root) else "folder"), "", "", hints
     if not git.is_dir():
         return "git", "", "", hints
     try:

@@ -29,10 +29,11 @@ from .native_developer_trial import (
     _diagnostic, _read_observation, trial_flags,
 )
 from .owned_artifacts import _remove_owned_tree
-from .project_onboarding import _git, _protected, _relative, _scan
+from .project_onboarding import _protected, _relative
+from .local_folder import MODE as LOCAL_MODE, protected as local_protected, require_candidate
 from .project_evidence import discovery, preview_entry
 from .replica_evidence import EVIDENCE_SIZE_LIMIT, EvidenceSizeLimit, fingerprint, snapshot
-from .replica_readiness import baseline, original_matches
+from .replica_readiness import baseline, original_matches, require_original_inventory
 from .role_contract import _unique_object
 
 
@@ -472,7 +473,7 @@ def _settled_integrity_candidate(events, project, replica, onboarding, image, *,
 
 def _contract(runner, events, head, project, archive, expires, seconds, tokens, cycles, files, permissions, spec,
               manager_tokens=ROLE_TOKENS["manager-planning"], *, game=False, game_limits=None, visual_review=False,
-              play=False, tools=None, direct_branch=None, approved_criterion=None):
+              play=False, tools=None, direct_branch=None, approved_criterion=None, auto_apply=False):
     now = time()
     if (type(play) not in (bool, dict) or
             (play is not False and (not visual_review or game_limits is None))):
@@ -508,6 +509,15 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     source, replica, frozen, onboarding = baseline(ledger, project)
     if source == replica or source.is_relative_to(replica) or replica.is_relative_to(source):
         raise Blocked("The onboarded replica and original must be separate")
+    local = frozen.get("mode") == LOCAL_MODE
+    if type(auto_apply) is not bool or (auto_apply and (not local or not files)):
+        raise Blocked("원본 자동 반영은 일반 폴더에서 승인한 개별 파일 경로에만 적용할 수 있습니다.")
+    if local and (direct_branch is not None or game):
+        raise Blocked("일반 폴더는 직접 Git 또는 기존 Git 게임 계약을 사용할 수 없습니다.")
+    if local and not subscription:
+        raise Blocked("일반 폴더 자동 개발에는 공식 구독 잔여량 확인이 필요합니다.")
+    if local and install:
+        raise Blocked("일반 폴더에는 자동 GitHub 도구 설치가 포함되지 않습니다. 준비된 검증 도구를 선택하세요.")
     direct = None
     if direct_branch is not None:
         from . import direct_git
@@ -521,6 +531,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
                                   lambda: runner._check_diagnostic_fence(len(events), head), direct_branch)
         replica = source
     image = snapshot(replica)
+    if local:
+        require_candidate(frozen, image)
     migration = next((item for item in reversed(events) if direct and item["kind"] == "direct_git_migrated"
                       and item.get("project_id") == project and item.get("commit") == direct["head"]
                       and item.get("source_sha256") == digest(image)), None)
@@ -549,9 +561,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         else:
             candidate_base = _verified_game_base(ledger, events, replica, image, frozen, onboarding, files)
     if direct is None:
-        with _git(ledger, source) as (git, _):
-            if _scan(source, git, frozen["local_examples"]) != frozen:
-                raise Blocked("Original Git inventory changed after onboarding")
+        require_original_inventory(ledger, source, frozen, "Original Git inventory changed after onboarding")
     if not project_edit:
         _editable_paths(files)
     catalog = Catalog(ledger).read()
@@ -610,6 +620,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             raise Blocked("미확정 후보에 현재 보호된 요구사항 또는 검증 파일의 변경이 있습니다.")
     if not project_edit:
         _editable_paths(files, protected)
+        if local and any(local_protected(name) for name in files):
+            raise Blocked("일반 폴더의 보호 경로는 수정할 수 없습니다.")
     archive = Path(archive).absolute()
     check_path(archive)
     if not archive.is_file():
@@ -647,6 +659,8 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             "onboarding_sha256": digest(onboarding), "original_head": direct["head"] if direct else frozen["head"],
             "original_git": image["git"] if direct else frozen["git"],
             **({"development_mode": direct_git.MODE, "direct_git": direct, "project_name": data["name"]} if direct else {}),
+            **({"development_mode": LOCAL_MODE} if local else {}),
+            **({"auto_apply_original": True} if auto_apply else {}),
             **({"direct_git_migration": migration["scope"]} if migration else {}),
             "original_changes": {key: frozen[key] for key in ("staged", "raw_worktree_changed", "local_examples")},
             "replica_sha256": digest(image), "files": sorted(files),
@@ -708,7 +722,7 @@ def _reboot_review(runner, abandoned, project, reboot):
 
 
 def review(runner, *args, soft_limits=None, visual_review=False, play=False, tools=None, direct_branch=None,
-           reboot=None, approved_criterion=None):
+           reboot=None, approved_criterion=None, auto_apply=False):
     from .registered_recovery import bind_reboot
 
     with execution_slot() as abandoned:
@@ -717,7 +731,8 @@ def review(runner, *args, soft_limits=None, visual_review=False, play=False, too
         else:
             events, head = runner._idle_diagnostic(abandoned)
         scope = _contract(runner, events, head, *args, game_limits=soft_limits, visual_review=visual_review,
-                          play=play, tools=tools, direct_branch=direct_branch, approved_criterion=approved_criterion)
+                          play=play, tools=tools, direct_branch=direct_branch, approved_criterion=approved_criterion,
+                          auto_apply=auto_apply)
         return bind_reboot(scope, boundary) if reboot else scope
 
 
@@ -1020,7 +1035,9 @@ class RegisteredSession(_FixtureSession):
                     events, project=self.scope["project_id"], run=self.fields["run_id"], cycle=cycle,
                     branch=None, head=self.scope.get("original_head"), candidate=self.source(), criterion=criterion,
                     final=verdict, criteria=comparison["criteria"], requirements=len(self.scope["requirements"]),
-                    paths=self.signoff_state["changed"])
+                    paths=self.signoff_state["changed"],
+                    local_target=self.scope["criteria"][criterion]["text"]
+                    if self.scope.get("development_mode") == LOCAL_MODE else None)
                 self.record("native_inspection_development_record", cycle=cycle, criterion=criterion, path=path,
                             current=current, detail=detail, publication="LOCAL_ONLY")
             return
@@ -1180,6 +1197,9 @@ class RegisteredSession(_FixtureSession):
             prompt += ("\nUse the approved Codex file and offline command tools to inspect the current replica. "
                        "Read existing approved files relative to the working directory. "
                        "If inspection fails, report the attempted operation and the observed error.")
+        if phase == "developer" and self.scope.get("development_mode") == LOCAL_MODE:
+            prompt += ("\nThis is an ordinary folder. Do not invoke Git or initialize a repository. "
+                       "Preserve existing files. Only approved modifications and additions are allowed.")
         tool = self.scope["verifier"]
         game = tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI)
         scratch_root = None
@@ -1256,7 +1276,7 @@ class RegisteredSession(_FixtureSession):
                                                     response_schema=response_schema,
                                                     decision_parser=(_final_decision if phase == "manager-final" else None),
                                                     raw_decision=True,
-                                                    context="Work on this registered Git replica using the approved scope.")
+                                                    context="Work on the registered project using the approved scope.")
         except Blocked as error:
             last = self.phases[-1] if self.phases else {}
             if (tool.get("mode") == "godot-game" and phase == "developer" and str(error) == "TOKEN_LIMIT"
@@ -1291,6 +1311,9 @@ class RegisteredSession(_FixtureSession):
                 or (not self.scope.get("direct_git") and not original_matches(self.original, self.original_image))
                 or (not whole and any(name not in before or name not in new for name in changed))):
             raise Blocked("Developer changed Git identity, original or an unapproved path")
+        if self.scope.get("development_mode") == LOCAL_MODE and any(
+                name not in new or local_protected(name) for name in changed):
+            raise Blocked("일반 폴더의 파일 삭제 또는 보호 경로 변경은 승인되지 않았습니다.")
         if not changed:
             raise NoDeveloperChange("Developer completed without changing the approved files")
         if whole:
@@ -2771,9 +2794,7 @@ def _resume_interrupted_preview(runner, events, head, rows, expires, seconds):
             or digest({**image, "files": frozen["files"]}) != onboarding["replica_sha256"]):
         raise Blocked("원본 또는 개발 후보의 Git·파일 상태가 일치하지 않습니다.")
     read_frozen_requirements(catalog, prior["project_id"], prior["requirements"], ledger.state_boundary)
-    with _git(ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
+    require_original_inventory(ledger, source, frozen, "원본 Git 상태가 온보딩 기준과 다릅니다.")
     changed = sorted(name for name in frozen["files"].keys() | image["files"].keys()
                      if frozen["files"].get(name) != image["files"].get(name))
     _editable_paths(changed, prior["protected_edit_paths"], limit=4096)
@@ -2966,9 +2987,7 @@ def _resume_contract(runner, events, head, project, expires, seconds, tokens, re
     if (str(source) != prior["original"] or str(replica) != prior["replica"]
             or digest(onboarding) != prior["onboarding_sha256"] or not original_matches(source, frozen)):
         raise Blocked("Original or onboarding changed since the stopped session")
-    with _git(runner.ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("Original Git inventory changed after onboarding")
+    require_original_inventory(runner.ledger, source, frozen, "Original Git inventory changed after onboarding")
     image = snapshot(replica)
     current_hash = digest(image)
     if game:
@@ -3073,9 +3092,7 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
             or digest(onboarding) != prior["onboarding_sha256"] or not original_matches(source, frozen)
             or image != checkpoint["source_sha256"] or image != end["replica_sha256"]):
         raise Blocked("The original or signoff candidate has changed")
-    with _git(runner.ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("Original Git inventory changed after onboarding")
+    require_original_inventory(runner.ledger, source, frozen, "Original Git inventory changed after onboarding")
     path = runner.ledger.local_directory("recovery") / f"registered-signoff-{start['run_id']}.diff"
     diff = _read_observation(path, MAX_DIFF * 4 + 1).decode("utf-8")
     if len(diff) > MAX_DIFF or digest(diff) != checkpoint["diff_sha256"]:
@@ -3228,9 +3245,7 @@ def _resume_size_stopped_candidate(runner, events, head, rows, expires, seconds,
             or digest({**image, "files": frozen["files"]}) != onboarding["replica_sha256"]):
         raise Blocked("원본, 프로젝트 설정 또는 복제본의 Git 기준이 변경됐습니다.")
     read_frozen_requirements(catalog, prior["project_id"], prior["requirements"], ledger.state_boundary)
-    with _git(ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
+    require_original_inventory(ledger, source, frozen, "원본 Git 상태가 온보딩 기준과 다릅니다.")
     changed = sorted(name for name in image["files"].keys() | frozen["files"].keys()
                      if image["files"].get(name) != frozen["files"].get(name))
     if (not changed or any(name not in prior["files"] or name not in image["files"] for name in changed)):
@@ -3361,9 +3376,7 @@ def _resume_tool_preparation(runner, events, head, rows, expires, seconds, token
             or Catalog(ledger).read()["projects"][prior["project_id"]]["revision"] != prior["project_revision"]
             or not original_matches(source, frozen)):
         raise Blocked("저장된 계획 이후 원본, 복제본 또는 프로젝트 설정이 바뀌었습니다.")
-    with _git(ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("원본 Git 상태가 온보딩과 일치하지 않습니다.")
+    require_original_inventory(ledger, source, frozen, "원본 Git 상태가 온보딩과 일치하지 않습니다.")
     intent = next(row for row in reversed(rows) if row["kind"] == "native_inspection_role_intent")
     role = next(row for row in reversed(rows) if row["kind"] == "native_inspection_role_result")
     accepted = next((row for row in reversed(rows) if row["kind"] == "native_inspection_plan_accepted"), {})
@@ -3471,9 +3484,7 @@ def _resume_registered_plan_contract(runner, events, head, rows, expires, second
             or not original_matches(source, frozen)):
         raise Blocked("계획 이후 원본, 프로젝트 설정 또는 복제본이 변경됐습니다.")
     read_frozen_requirements(catalog, prior["project_id"], prior["requirements"], ledger.state_boundary)
-    with _git(ledger, source) as (git, _):
-        if _scan(source, git, frozen["local_examples"]) != frozen:
-            raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
+    require_original_inventory(ledger, source, frozen, "원본 Git 상태가 온보딩 기준과 다릅니다.")
 
     intents = [row for row in rows if row["kind"] == "native_inspection_role_intent" and "role_call" in row]
     results = [row for row in rows if row["kind"] == "native_inspection_role_result" and "provider_usage" in row]
@@ -3568,9 +3579,7 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
             or (not direct and not original_matches(source, frozen)) or digest(image) != end["replica_sha256"]):
         raise Blocked("원본, 프로젝트 승인 또는 작업 복제본이 변경됐습니다.")
     if not direct:
-        with _git(ledger, source) as (git, _):
-            if _scan(source, git, frozen["local_examples"]) != frozen:
-                raise Blocked("원본 Git 상태가 온보딩 기준과 다릅니다.")
+        require_original_inventory(ledger, source, frozen, "원본 Git 상태가 온보딩 기준과 다릅니다.")
     intents = [row for row in rows if row["kind"] == "native_inspection_role_intent" and "role_call" in row]
     results = [row for row in rows if row["kind"] == "native_inspection_role_result" and "provider_usage" in row]
     if (not intents or len(intents) != len(results) or len(results) != end["model_turns_dispatched"]
@@ -3710,9 +3719,7 @@ def _resume_manual_contract(runner, events, head, rows, expires, seconds, tokens
             or image != checkpoint["source_sha256"] or image != end["replica_sha256"]):
         raise Blocked("The original, project configuration or checkpoint replica has changed")
     if not direct:
-        with _git(runner.ledger, source) as (git, _):
-            if _scan(source, git, frozen["local_examples"]) != frozen:
-                raise Blocked("Original Git inventory changed after onboarding")
+        require_original_inventory(runner.ledger, source, frozen, "Original Git inventory changed after onboarding")
     resume = {key: checkpoint[key] for key in ("cycle", "criteria_status", "changed", "stagnant",
                                                "known", "reviewed", "failures", "feedback")}
     if checkpoint.get("deferred_criteria"):
@@ -3778,6 +3785,8 @@ def _resume_game_plan_contract(runner, events, head, rows, expires, seconds, tok
 
 def _approved_resume_contract(runner, events, head, args, graceful):
     scope, diff = _resume_contract(runner, events, head, *args, graceful=graceful)
+    if scope.get("development_mode") == LOCAL_MODE:
+        _check_local_resume(runner.ledger, scope)
     if "criterion" in scope["resume"]:
         _require_criterion(scope, scope["resume"]["criterion"])
     if isinstance(diff, dict) and "criterion" in diff:
@@ -3796,6 +3805,14 @@ def review_resume(runner, *args, graceful=False):
         return _approved_resume_contract(runner, events, head, args, graceful)[0]
 
 
+def _check_local_resume(ledger, scope):
+    _, replica, frozen, _ = baseline(ledger, scope["project_id"])
+    image = snapshot(replica)
+    if digest(image) != scope["replica_sha256"]:
+        raise Blocked("재개할 일반 폴더 후보의 해시가 변경됐습니다.")
+    require_candidate(frozen, image)
+
+
 def verify_resume_candidate(runner, project, *, cancelled=lambda: False):
     """Run the stopped session's frozen checks only; no authentication or model call."""
     from .runtime import require_admission
@@ -3805,6 +3822,8 @@ def verify_resume_candidate(runner, project, *, cancelled=lambda: False):
         events, head = runner._idle_diagnostic(abandoned)
         scope, _ = _resume_contract(runner, events, head, project, int(time()) + 180, 120, 400000,
                                     require_proof=False)
+        if scope.get("development_mode") == LOCAL_MODE:
+            _check_local_resume(ledger, scope)
         checkpoint = scope["resume"]
         _require_criterion(scope, checkpoint.get("criterion"))
         if checkpoint["proof_run_id"]:
@@ -3951,10 +3970,10 @@ def run_resume(runner, *args, approval, cancelled=lambda: False, graceful=False,
 
 
 def run(runner, *args, approval, cancelled=lambda: False, soft_limits=None, visual_review=False, activity=None,
-        pause=None, play=False, tools=None, direct_branch=None, reboot=None, approved_criterion=None):
+        pause=None, play=False, tools=None, direct_branch=None, reboot=None, approved_criterion=None, auto_apply=False):
     return _run(runner, args, approval, cancelled, resume=False, game_limits=soft_limits,
                 visual_review=visual_review, activity=activity, pause=pause, play=play, tools=tools,
-                direct_branch=direct_branch, reboot=reboot, approved_criterion=approved_criterion)
+                direct_branch=direct_branch, reboot=reboot, approved_criterion=approved_criterion, auto_apply=auto_apply)
 
 
 def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambda: False, visual_review=False,
@@ -3968,7 +3987,7 @@ def run_game(runner, archive, expires, limits=None, *, approval, cancelled=lambd
 
 def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=None, graceful=False,
          visual_review=False, activity=None, pause=None, play=False, tools=None, direct_branch=None, reboot=None,
-         approved_criterion=None):
+         approved_criterion=None, auto_apply=False):
     from .registered_recovery import bind_reboot, reboot_admission, reboot_target, windows_boot_boundary
     from .runtime import require_admission
 
@@ -3980,7 +3999,8 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
         scope, diff = (_approved_resume_contract(runner, events, head, args, graceful) if resume
                        else (_contract(runner, events, head, *args, game=game, game_limits=game_limits,
                                        visual_review=visual_review, play=play, tools=tools,
-                                       direct_branch=direct_branch, approved_criterion=approved_criterion), None))
+                                       direct_branch=direct_branch, approved_criterion=approved_criterion,
+                                       auto_apply=auto_apply), None))
         if reboot:
             scope = bind_reboot(scope, boundary)
         if cancelled() or digest(scope) != approval:
@@ -4106,6 +4126,21 @@ def _run(runner, args, approval, cancelled, *, resume, game=False, game_limits=N
             session.record(DRAINED_MARKER, cycle=phase["cycle"], owned_tree="DRAINED",
                            staged_evidence_retained=preserve)
         ledger.append(session.count, session.fence, receipt, allow_shutdown=True)
+        if (not resume and scope.get("auto_apply_original") and receipt["outcome"] == "COMPLETED"
+                and receipt["owned_tree"] == "DRAINED" and receipt["usage_complete"] and not cancelled()):
+            from . import original_apply
+
+            expiry = min(int(time()) + 240, scope["expires"])
+            try:
+                write_scope, _ = original_apply.review(runner, scope["project_id"], expiry)
+                if (write_scope["session_sha256"] != digest(receipt)
+                        or not set(write_scope["paths"]) <= set(scope["files"])):
+                    raise Blocked("원본 반영 후보가 이 세션의 승인 범위를 벗어납니다.")
+                applied = original_apply.run(runner, scope["project_id"], expiry, digest(write_scope),
+                                             cancelled=cancelled, held=True)
+            except (Blocked, OSError, ValueError) as error:
+                return {**receipt, "original_apply": {"result": "BLOCKED", "reason": str(error)}}
+            return {**receipt, "original_apply": {"result": applied["result"], "reason": applied["reason"]}}
         return receipt
 
 

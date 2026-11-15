@@ -42,7 +42,8 @@ def _path(value):
     return f"`{value}`" if re.fullmatch(r"[\w .@+/-]+", value) and len(value) <= 240 else "(path withheld)"
 
 
-def render(events, *, project, run, cycle, branch, head, candidate, criterion, final, criteria, requirements, paths):
+def render(events, *, project, run, cycle, branch, head, candidate, criterion, final, criteria, requirements, paths,
+           local_target=None):
     if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", project) or not re.fullmatch(r"[a-f0-9]{32}", run)
             or type(cycle) is not int or not 1 <= cycle <= 999999
             or (branch is not None and not re.fullmatch(r"refs/heads/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+", branch))
@@ -113,6 +114,10 @@ def render(events, *, project, run, cycle, branch, head, candidate, criterion, f
                f"Windows GUI review {visual_status} · observed input transitions {_count(progress.get('adaptive_play_actions'))}",
                f"Remaining issue {cause}" if cause != "UNKNOWN" else "Remaining issues are recorded in the cycle evidence.",
                next_step]
+    if local_target is not None:
+        summary[0:2] = [f"Project `{project}` · Local folder",
+                        f"Target: {' '.join(local_target.split())[:300]}",
+                        "Original application: pending a verified candidate and write approval."]
     published = next((row for row in reversed(events) if row.get("kind") == "direct_git_pushed"
                       and row.get("project_id") == project and row.get("branch") == branch
                       and row.get("commit") == row.get("remote_head") == head), {})
@@ -138,7 +143,8 @@ def render(events, *, project, run, cycle, branch, head, candidate, criterion, f
               + f"- Candidate changes {len(paths)} · Developer diff Seq {edit_seq or 'UNKNOWN'} · `{_sha(edit.get('cycle_diff_sha256'))}`\n"
               + f"- Developer result {developer_status} · Seq {developer_seq or 'UNKNOWN'} · command receipts {len(commands)}."
                 " Developer command receipts do not establish independent verification.\n"
-              + path_lines + ("\n- Additional paths are listed in the commit diff." if len(paths) > 120 else "")
+              + path_lines + ("\n- Additional paths are listed in the Controller candidate evidence."
+                              if len(paths) > 120 else "")
               + "\n\n## Review and independent verification\n\n"
               + f"- Reviewer Seq {review_seq or 'UNKNOWN'} · finding reference `{_sha(review.get('finding_sha256'))}`\n"
               + f"- Verifier Seq {verify_seq or 'UNKNOWN'} · receipt `{_sha(progress.get('verifier_sha256'))}`\n"

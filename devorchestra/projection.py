@@ -140,8 +140,13 @@ def registered_progress(events, project, *, onboarding_sequence=0):
     counts = dict.fromkeys(("VERIFIED", "IMPLEMENTED", "NOT_VERIFIED", "REWORK", "BLOCKED", "NEEDS_INPUT"), 0)
     for status in statuses.values():
         counts[status] += 1
+    local_apply = None
+    if scope.get("development_mode") == "LOCAL_FOLDER" and end:
+        session_hash = digest({key: value for key, value in end.items() if key != "sequence"})
+        local_apply = next((row for row in reversed(events) if row["kind"] == "original_apply_result"
+                            and row.get("project_id") == project and row.get("session_sha256") == session_hash), None)
     return {"scope": scope, "approval": start.get("approval_sha256"), "sequence": start["sequence"],
-            "direct_git": git,
+            "direct_git": git, "original_apply": local_apply,
             "run_id": start["run_id"], "latest_sequence": rows[-1].get("sequence", start["sequence"]),
             "started_at": start.get("started_at"),
             "criterion_statuses": statuses, "criterion_counts": counts,
@@ -163,7 +168,7 @@ def registered_progress(events, project, *, onboarding_sequence=0):
                 "native_inspection_manual_checkpoint", "native_inspection_progress_checkpoint",
                 "native_inspection_replan", "native_inspection_criterion_deferred",
                 "native_inspection_project_tools_intent", "native_inspection_project_tool_ready",
-                "native_inspection_project_tools_cleanup"}],
+                "native_inspection_project_tools_cleanup", "native_inspection_development_record"}],
             "changed": end.get("changed", []) if end else sorted(changed),
             "criteria": criteria,
             "tokens": end.get("known_reported_tokens", tokens) if end else tokens,

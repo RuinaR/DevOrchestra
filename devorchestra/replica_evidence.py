@@ -81,7 +81,7 @@ def _git_identity(root):
     return result
 
 
-def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2, long_local=False):
+def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2, long_local=False, excluded=None):
     """Capture files without following links or invoking Git or a build tool."""
     if owned_staging is not None:
         check_path(owned_staging)
@@ -111,8 +111,11 @@ def snapshot(root, *, owned_staging=None, max_file_bytes=64 * 1024**2, long_loca
                 if relative == ".git":
                     continue
                 if item.name.casefold() in (".git", ".ai-local"):
-                    raise Blocked("Nested Git or private data in the replica")
+                    if item.name.casefold() == ".git" or excluded is None:
+                        raise Blocked("Nested Git or private data in the replica")
                 check_path(path, long_local=long_local)
+                if excluded is not None and excluded(relative):
+                    continue
                 if item.is_dir(follow_symlinks=False):
                     directories.append(path)
                     continue

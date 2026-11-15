@@ -5,10 +5,11 @@ from pathlib import Path
 from time import time
 from uuid import uuid4
 
-from .chatgpt_subscription import write_protected
+from .chatgpt_subscription import read_protected, write_protected
 from .developer_batch import BATCH_LIMIT, _encode, _matches, diff_text
-from .lease import Blocked, execution_slot
+from .lease import Blocked, execution_slot, held_execution_slot
 from .ledger import check_path, digest
+from .local_folder import MODE as LOCAL_MODE, inventory
 from .owned_artifacts import _remove_owned_tree
 from .project_onboarding import _git, _protected, _relative, _scan
 from .replica_evidence import _git_identity, changes, fingerprint, snapshot
@@ -169,6 +170,8 @@ def _prepare_registered(events, head, project, expires, source, replica, frozen,
         raise Blocked("Registered review, verification or source evidence changed")
     allowed = set(end["changed"] if scope.get("project_edit") else scope["files"])
     paths = changes({**image, "files": frozen["files"]}, image, allowed)
+    if not paths:
+        raise Blocked("원본에 반영할 변경이 없습니다.")
     if any(value["after"] is None for value in paths.values()):
         raise Blocked("Registered result exceeds the original write scope")
     if sum(part["bytes"] for row in paths.values() for part in row.values() if part) > REGISTERED_APPLY_BYTES:
@@ -192,6 +195,7 @@ def _prepare_registered(events, head, project, expires, source, replica, frozen,
             raise Blocked("Original or registered replica bytes changed")
     return {"project_id": project, "original": str(source), "replica": str(replica), "expires": expires,
             "original_head": frozen["head"], "original_git": frozen["git"],
+            **({"development_mode": LOCAL_MODE} if frozen.get("mode") == LOCAL_MODE else {}),
             "original_directory_id": list(_identity(source)), "paths": paths, "ledger_head": head,
             "session_sha256": session_sha, "verifier_sha256": digest(verified),
             "onboarding_sha256": digest(onboarding)}, frozen, before, after
@@ -217,20 +221,24 @@ def review(runner, project, expires):
     return scope, diff_text(before, after, after)
 
 
-def run(runner, project, expires, approved, cancelled=lambda: False):
+def run(runner, project, expires, approved, cancelled=lambda: False, *, held=False):
     from .runtime import require_admission
 
-    with execution_slot() as abandoned:
+    with (held_execution_slot() if held else execution_slot()) as abandoned:
         events, head = runner._idle_diagnostic(abandoned)
         scope, frozen, before, after = _prepare(runner, project, expires)
         if cancelled() or digest(scope) != approved or head != scope["ledger_head"]:
             raise Blocked("Original write approval is stale")
         source = Path(scope["original"])
-        with _git(runner.ledger, source) as (git, _):
-            inventory = _scan(source, git, frozen["local_examples"])
-            ignored = any(data is None and git("check-ignore", "--no-index", "--", name, allowed=(0, 1)).strip()
-                          for name, data in before.items())
-        if inventory != frozen or ignored:
+        local = scope.get("development_mode") == LOCAL_MODE
+        if local:
+            matches = inventory(source) == frozen
+        else:
+            with _git(runner.ledger, source) as (git, _):
+                matches = _scan(source, git, frozen["local_examples"]) == frozen and not any(
+                    data is None and git("check-ignore", "--no-index", "--", name, allowed=(0, 1)).strip()
+                    for name, data in before.items())
+        if not matches:
             raise Blocked("Original Git inventory changed or an approved new path is ignored")
         identifier = uuid4().hex
         stage = source / f".devorchestra-apply-{identifier}"
@@ -242,7 +250,6 @@ def run(runner, project, expires, approved, cancelled=lambda: False):
         }, admission=require_admission)
         stage.mkdir()
         stage_id = stage.stat().st_ino
-        write_protected(journal, {"scope": scope, "before": {name: _encode(data) for name, data in before.items()}})
 
         def check():
             runner._check_diagnostic_fence(count, fence)
@@ -258,47 +265,89 @@ def run(runner, project, expires, approved, cancelled=lambda: False):
 
         def final_check():
             admit()
-            if any(fingerprint(source / name) != info for name, info in frozen["files"].items()
-                   if name not in after):
+            if local:
+                expected = {**frozen["files"], **{name: row["after"] for name, row in scope["paths"].items()}}
+                exact = inventory(source)["files"] == expected
+            else:
+                exact = all(fingerprint(source / name) == info for name, info in frozen["files"].items()
+                            if name not in after)
+            if not exact:
                 raise Blocked("Unrelated original files changed during the write")
 
-        result, reason = _write(source, stage, before, after, check, admit, final_check)
+        payload = {"scope": scope, "before": {name: _encode(data) for name, data in before.items()}}
+        try:
+            if local:
+                rows = {}
+                for index, (name, data) in enumerate(after.items()):
+                    admit()
+                    pending = stage / f"next-{index}"
+                    _stage_bytes(pending, data)
+                    target = source / name
+                    if not _matches(target, before[name]):
+                        raise Blocked("원본 파일이 반영 준비 중 변경됐습니다.")
+                    rows[name] = {"before_id": list(_identity(target)) if before[name] is not None else None,
+                                  "next_id": list(_identity(pending))}
+                payload.update(stage_id=list(_identity(stage)), files=rows,
+                               order=list(after), baseline_sha256=digest(frozen))
+            write_protected(journal, payload)
+        except (Blocked, OSError, ValueError, KeyboardInterrupt):
+            if not local:
+                raise
+            result, reason = "BLOCKED", "ORIGINAL_WRITE_PREPARATION_FAILED"
+        else:
+            result, reason = _write(source, stage, before, after, check, admit, final_check,
+                                    prepared=payload.get("files"))
         cleanup = _remove_owned_tree(stage, stage_id)
         if cleanup["status"] != "REMOVED":
             raise Blocked("Original write cleanup is unconfirmed; preserve recovery journal")
         receipt = {**binding, "kind": "original_apply_result", "result": result, "reason": reason,
                    "paths": scope["paths"], "original_head": frozen["head"], "cleanup": cleanup,
                    "verifier_sha256": scope["verifier_sha256"], "session_sha256": scope["session_sha256"]}
+        if local and result == "APPLIED":
+            receipt["previous_bytes_ref"] = journal.name
         runner.ledger.append(count, fence, receipt, allow_shutdown=True)
-        journal.unlink()
+        if "previous_bytes_ref" not in receipt:
+            journal.unlink(missing_ok=local)
         return receipt
 
 
-def _write(source, stage, before, after, check, admit, final_check):
+def _stage_bytes(path, data):
+    with path.open("xb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _write(source, stage, before, after, check, admit, final_check, *, prepared=None):
     if os.name != "nt":
         raise Blocked("Original write requires Windows no-overwrite rename semantics")
     moved, installed = [], []
     try:
         for index, (name, data) in enumerate(after.items()):
             admit()
-            with (stage / f"next-{index}").open("xb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
+            pending = stage / f"next-{index}"
+            if prepared is None:
+                _stage_bytes(pending, data)
+            elif (not _matches(pending, data) or list(_identity(pending)) != prepared[name]["next_id"]):
+                raise Blocked("반영 준비 파일이 변경됐습니다.")
             target = source / name
             check_path(target)
-            if not _matches(target, before[name]):
+            if (not _matches(target, before[name]) or (prepared and before[name] is not None
+                    and list(_identity(target)) != prepared[name]["before_id"])):
                 raise Blocked("Original target changed")
             if before[name] is not None:
                 backup = stage / f"old-{index}"
                 os.rename(target, backup)
                 moved.append((name, backup))
-                if not _matches(backup, before[name]):
+                if (not _matches(backup, before[name])
+                        or (prepared and list(_identity(backup)) != prepared[name]["before_id"])):
                     raise Blocked("Original bytes changed during the write")
-            os.rename(stage / f"next-{index}", target)
+            os.rename(pending, target)
             installed.append(name)
         final_check()
-        if not all(_matches(source / name, data) for name, data in after.items()):
+        if not all(_matches(source / name, data)
+                   and (not prepared or list(_identity(source / name)) == prepared[name]["next_id"])
+                   for name, data in after.items()):
             raise Blocked("Original result hash did not match verification")
     except (Exception, KeyboardInterrupt) as error:
         reason = "CANCELLED" if isinstance(error, KeyboardInterrupt) else str(error)
@@ -307,14 +356,161 @@ def _write(source, stage, before, after, check, admit, final_check):
         check()
         for name in reversed(installed):
             target = source / name
-            if not _matches(target, after[name]):
+            if (not _matches(target, after[name])
+                    or (prepared and list(_identity(target)) != prepared[name]["next_id"])):
                 raise Blocked("Rollback ownership is unknown; preserve recovery files") from error
             target.unlink()
         for name, backup in reversed(moved):
             check_path(source / name)
+            if (not _matches(backup, before[name])
+                    or (prepared and list(_identity(backup)) != prepared[name]["before_id"])):
+                raise Blocked("Rollback backup changed; preserve recovery files") from error
             os.rename(backup, source / name)
         touched = set(installed) | {name for name, _ in moved}
         if not all(_matches(source / name, before[name]) for name in touched):
             raise Blocked("Rollback outcome is unknown; preserve recovery files") from error
         return "ROLLED_BACK", reason
     return "APPLIED", None
+
+
+def _recovery_plan(runner, project):
+    from .runtime import _native_pending
+
+    ledger = runner.ledger
+    events, tail = ledger.snapshot()
+    pending = _native_pending(events)
+    intent = next((row for row in reversed(events) if row.get("project_id") == project
+                   and row["kind"] == "original_apply_intent"
+                   and ("original-apply", row["run_id"]) in pending), None)
+    if (not intent or pending != {("original-apply", intent["run_id"])}
+            or intent["scope"].get("development_mode") != LOCAL_MODE
+            or digest(intent["scope"]) != intent["scope_sha256"]):
+        raise Blocked("복구할 일반 폴더 원본 반영 기록이 없습니다.")
+    # This transaction spawns no processes. Allow recovery only for this exact
+    # unclosed intent while all other admission gates still pass.
+    runner._check_idle_diagnostic([row for row in events if row is not intent], False)
+    scope = intent["scope"]
+    source, _, frozen, receipt = baseline(ledger, project)
+    if str(source) != scope["original"] or digest(receipt) != scope["onboarding_sha256"]:
+        raise Blocked("원본 반영의 등록 기준점이 변경됐습니다.")
+    run_id = intent["run_id"]
+    if (intent["stage"] != f".devorchestra-apply-{run_id}"
+            or intent["journal_ref"] != f"original-apply-{run_id}.dpapi"):
+        raise Blocked("원본 반영 저널 경계가 변경됐습니다.")
+    journal = ledger.local_directory("recovery") / intent["journal_ref"]
+    data = read_protected(journal)
+    if (data.get("scope") != scope or data.get("baseline_sha256") != digest(frozen)
+            or list(_identity(source)) != scope["original_directory_id"]
+            or set(data["order"]) != set(data["files"]) or set(data["order"]) != set(scope["paths"])
+            or len(data["order"]) != len(scope["paths"])):
+        raise Blocked("원본 반영 저널과 승인된 매니페스트가 다릅니다.")
+    stage = source / intent["stage"]
+    check_path(stage)
+    stage_present = stage.exists()
+    if stage_present and list(_identity(stage)) != data["stage_id"]:
+        raise Blocked("원본 반영 임시 폴더의 소유권을 확인할 수 없습니다.")
+    expected = dict(frozen["files"])
+    states, owned_names = {}, set()
+    for index, name in enumerate(data["order"]):
+        pair = scope["paths"][name]
+        identities = data["files"][name]
+        target = source / _relative(name)
+        backup = stage / f"old-{index}"
+        staged = stage / f"next-{index}"
+        old_id, new_id = identities["before_id"], identities["next_id"]
+        check_path(target)
+        check_path(backup)
+        check_path(staged)
+        if staged.exists():
+            if fingerprint(staged) != pair["after"] or list(_identity(staged)) != new_id:
+                raise Blocked("복구 후보 파일이 변경됐습니다.")
+            owned_names.add(staged.name)
+        if backup.exists():
+            if fingerprint(backup) != pair["before"] or list(_identity(backup)) != old_id:
+                raise Blocked("복구용 원본 백업이 변경됐습니다.")
+            owned_names.add(backup.name)
+        if target.exists():
+            observed = (fingerprint(target), list(_identity(target)))
+            if observed == (pair["before"], old_id) and not backup.exists():
+                state = "OLD"
+            elif observed == (pair["after"], new_id) and not staged.exists() and (
+                    old_id is None or backup.exists() or not stage_present):
+                state = "NEW"
+                expected[name] = pair["after"]
+            else:
+                raise Blocked("반영 중 사용자가 수정한 파일이 있습니다.")
+        elif old_id is None or backup.exists():
+            state = "MOVED" if backup.exists() else "OLD"
+            expected.pop(name, None)
+        else:
+            raise Blocked("복구에 필요한 원본 파일이 없습니다.")
+        states[name] = state
+    if (stage_present and {path.name for path in stage.iterdir()} != owned_names
+            or inventory(source)["files"] != expected):
+        raise Blocked("반영 대상 외의 파일 또는 임시 폴더가 변경됐습니다.")
+    completed = set(states.values()) == {"NEW"}
+    if not completed and not stage_present and set(states.values()) != {"OLD"}:
+        raise Blocked("부분 반영 복구에 필요한 백업이 없습니다.")
+    review = {"project_id": project, "run_id": run_id, "ledger_head": tail, "states": states,
+              "stage_present": stage_present, "journal_sha256": digest(data),
+              "action": "CONFIRM_APPLIED" if completed else "ROLL_BACK"}
+    return review, len(events), intent, source, frozen, stage, journal, data
+
+
+def review_recovery(runner, project):
+    with execution_slot():
+        return _recovery_plan(runner, project)[0]
+
+
+def recover(runner, project, approval):
+    with execution_slot():
+        review, count, intent, source, frozen, stage, journal, data = _recovery_plan(runner, project)
+        if digest(review) != approval:
+            raise Blocked("원본 반영 복구 검토가 변경됐습니다.")
+        scope = intent["scope"]
+        result = "APPLIED" if review["action"] == "CONFIRM_APPLIED" else "ROLLED_BACK"
+        if result == "ROLLED_BACK":
+            for index, name in reversed(list(enumerate(data["order"]))):
+                runner._check_diagnostic_fence(count, review["ledger_head"])
+                current = review["states"][name]
+                if current == "OLD":
+                    continue
+                target = source / _relative(name)
+                pair = scope["paths"][name]
+                identities = data["files"][name]
+                if list(_identity(stage)) != data["stage_id"]:
+                    raise Blocked("원본 반영 임시 폴더의 소유권이 변경됐습니다.")
+                check_path(target)
+                if current == "NEW":
+                    if (fingerprint(target) != pair["after"]
+                            or list(_identity(target)) != identities["next_id"]):
+                        raise Blocked("반영 중 사용자가 수정한 파일이 있습니다.")
+                    pending = stage / f"next-{index}"
+                    check_path(pending)
+                    os.rename(target, pending)
+                if current in {"NEW", "MOVED"} and pair["before"] is not None:
+                    backup = stage / f"old-{index}"
+                    if (fingerprint(backup) != pair["before"]
+                            or list(_identity(backup)) != identities["before_id"]):
+                        raise Blocked("복구용 원본 백업이 변경됐습니다.")
+                    os.rename(backup, target)
+        runner._check_diagnostic_fence(count, review["ledger_head"])
+        expected = dict(frozen["files"])
+        if result == "APPLIED":
+            expected.update((name, pair["after"]) for name, pair in scope["paths"].items())
+        if inventory(source)["files"] != expected:
+            raise Blocked("복구 후 원본 매니페스트가 예상과 다릅니다.")
+        cleanup = (_remove_owned_tree(stage, data["stage_id"][1]) if stage.exists()
+                   else {"status": "REMOVED"})
+        if cleanup["status"] != "REMOVED":
+            raise Blocked("복구 준비 폴더의 정리가 확인되지 않았습니다.")
+        event = {key: intent[key] for key in ("project_id", "run_id", "state", "scope_sha256")}
+        event.update(kind="original_apply_result", result=result, reason="RECOVERED_AFTER_INTERRUPTION",
+                     paths=scope["paths"], original_head=None, cleanup=cleanup, recovery_approval=approval,
+                     verifier_sha256=scope["verifier_sha256"], session_sha256=scope["session_sha256"])
+        if result == "APPLIED":
+            event["previous_bytes_ref"] = journal.name
+        runner.ledger.append(count, review["ledger_head"], event, allow_shutdown=True)
+        if "previous_bytes_ref" not in event:
+            journal.unlink()
+        return event

@@ -59,8 +59,9 @@ class CatalogContracts(unittest.TestCase):
         self.assertEqual("Old evidence", external.read_text(encoding="utf-8"))
 
     def test_folder_hints_do_not_contact_remote_or_accept_conflicting_config(self):
-        root = self.ledger.path.parent / "original"
-        root.mkdir()
+        folder = TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
         (root / "pyproject.toml").touch()
         self.assertEqual(("folder", "", "", ["Python · pyproject.toml"]), inspect_folder(root))
         git = root / ".git"
@@ -73,6 +74,9 @@ class CatalogContracts(unittest.TestCase):
         self.assertEqual(("github", url, "work/pilot"), inspect_folder(root)[:3])
         local.write_text(remote + "\tpushurl = https://example.org/test.git\n", encoding="utf-8")
         self.assertEqual(("git", "", ""), inspect_folder(root)[:3])
+        nested = root / "child"
+        nested.mkdir()
+        self.assertEqual("git", inspect_folder(nested)[0])
 
     def command(self, action):
         return self.runner.command(action, expected_run=self.run_id)

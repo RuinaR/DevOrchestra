@@ -19,6 +19,8 @@ def baseline(ledger, project):
                  and e["kind"] in {"onboarding_result", "onboarding_intent"}), None)
     if not last or last["kind"] != "onboarding_result":
         raise Blocked("An established Git onboarding baseline is required")
+    if last["status"] != "REPLICA_READY":
+        raise Blocked("개발 사본 준비가 완료되지 않았습니다.")
     intent = next((e for e in reversed(events) if e["kind"] == "onboarding_intent"
                    and e["run_id"] == last["run_id"] and e.get("project_id") == project), None)
     if (not intent or digest(intent["scope"]) != last["scope_sha256"]
@@ -31,14 +33,37 @@ def baseline(ledger, project):
     if not replica.is_dir():
         raise Blocked("등록된 복제본 폴더가 없습니다. ‘처음부터 다시 시작’으로 복제본을 만드세요.")
     check_path(replica / ".git")
-    if not (replica / ".git").is_dir():
+    frozen = intent["scope"]["baseline"]
+    if frozen.get("mode") == "LOCAL_FOLDER":
+        from .local_folder import MODE, git_entry
+
+        if (last.get("mode") != MODE or intent["scope"]["contract"] != MODE
+                or git_entry(replica) is not None or git_entry(source) is not None):
+            raise Blocked("일반 폴더 개발 사본의 실행 경계가 변경됐습니다.")
+    elif not (replica / ".git").is_dir():
         raise Blocked("등록된 복제본의 Git 기준이 없습니다. ‘처음부터 다시 시작’으로 복제본을 만드세요.")
-    return source, replica, intent["scope"]["baseline"], last
+    return source, replica, frozen, last
 
 
 def original_matches(source, frozen):
+    if frozen.get("mode") == "LOCAL_FOLDER":
+        from .local_folder import inventory
+
+        return inventory(source) == frozen
     return (_git_identity(source) == frozen["git"]
             and all(fingerprint(source / _relative(name)) == info for name, info in frozen["files"].items()))
+
+
+def require_original_inventory(ledger, source, frozen, message):
+    if frozen.get("mode") == "LOCAL_FOLDER":
+        matches = original_matches(source, frozen)
+    else:
+        from .project_onboarding import _git, _scan
+
+        with _git(ledger, source) as (git, _):
+            matches = _scan(source, git, frozen["local_examples"]) == frozen
+    if not matches:
+        raise Blocked(message)
 
 
 def bind(ledger, project, scope):

@@ -14,6 +14,7 @@ from . import visual_review as visual
 from .ai_usage import SUBSCRIPTION_MODE
 from .catalog import Catalog
 from .ledger import digest
+from .local_folder import MODE as LOCAL_MODE
 
 
 LABELS = {
@@ -59,13 +60,15 @@ def _scope_preferences(scope):
     return values
 
 
-def _permission_checkboxes(panel, draft):
+def _permission_checkboxes(panel, draft, *, local=False):
     options = ttk.LabelFrame(panel, text="자동 개발 사전 권한", padding=6)
     options.pack(fill="x", pady=(4, 6))
     ttk.Label(options, text="일반 개발 권한은 기본 선택됩니다. 세션 시작 전 승인 화면에서 확인하세요.",
               wraplength=580).grid(row=0, column=0, columnspan=2, sticky="w")
     grants = {}
     for index, key in enumerate((*registered_cycle.PERMISSIONS, *registered_cycle.OPTIONAL_PERMISSIONS)):
+        if local and key == "portable-tools":
+            continue
         grants[key] = tk.BooleanVar(panel, value=draft.get(key, True) is True)
         ttk.Checkbutton(options, text=LABELS[key], variable=grants[key]).grid(
             row=1 + index // 2, column=index % 2, sticky="w")
@@ -256,10 +259,13 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     baseline = None
     try:
         original, replica, baseline, _ = replica_readiness.baseline(runner.ledger, project)
-        original_head = baseline["head"][:12] if baseline["head"] else "첫 커밋 전"
-        ttk.Label(body, text=f"원본 {original}\n복제본 {replica}\n"
-                  f"원본 Git {original_head} · 스테이징 {len(baseline['staged'])} · "
-                  f"작업 트리 변경 {len(baseline['raw_worktree_changed'])}", wraplength=580).pack(fill="x")
+        if baseline.get("mode") == LOCAL_MODE:
+            description = f"일반 폴더 · 원본 {original}\n개발 결과 저장 위치 {replica}\n원본 반영은 별도 승인"
+        else:
+            original_head = baseline["head"][:12] if baseline["head"] else "첫 커밋 전"
+            description = (f"원본 {original}\n복제본 {replica}\n원본 Git {original_head} · "
+                           f"스테이징 {len(baseline['staged'])} · 작업 트리 변경 {len(baseline['raw_worktree_changed'])}")
+        ttk.Label(body, text=description, wraplength=580).pack(fill="x")
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
         state.set("작업 복제본이 없습니다. Git 온보딩에서 복제본을 먼저 준비하세요."
                   if str(error) == "An established Git onboarding baseline is required" else
@@ -272,6 +278,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     restart_button = ttk.Button(body, text="처음부터 다시 시작 · 새 복제본", command=restart)
     if baseline is not None:
         restart_button.pack(anchor="w", pady=(0, 4))
+    local = bool(baseline and baseline.get("mode") == LOCAL_MODE)
     is_godot = baseline is not None and any(name.casefold() == "project.godot" for name in baseline["files"])
     progress = (center.view or {}).get("registered_progress") if (center.view or {}).get("project_id") == project else None
     prior = _scope_preferences(progress["scope"]) if progress else {}
@@ -281,17 +288,21 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         restored = None
         state.set("저장한 개발 설정을 읽지 못했습니다. 화면의 권한과 검증 설정을 다시 확인하세요.")
     draft = restored if restored is not None else prior.copy()
+    if local:
+        draft = {"web-research": False, "portable-tools": False, "cycles": "1", **draft}
     if draft:
         ttk.Label(body, text="저장한 설정을 불러왔습니다. 이미 승인한 실행의 권한은 그대로 유지됩니다.",
                   wraplength=580).pack(anchor="w")
-    grants = _permission_checkboxes(body, draft)
-    ttk.Label(body, text="자동 설치를 허용하면 필요한 공개 GitHub 도구나 소스를 작업 중 찾아 복제본에 준비합니다.",
-              wraplength=580).pack(anchor="w")
+    grants = _permission_checkboxes(body, draft, local=local)
+    if not local:
+        ttk.Label(body, text="자동 설치를 허용하면 필요한 공개 GitHub 도구나 소스를 작업 중 찾아 복제본에 준비합니다.",
+                  wraplength=580).pack(anchor="w")
     use_images = tk.BooleanVar(panel, value=draft.get("use_images") is True)
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
     play_foreground = tk.BooleanVar(panel, value=draft.get("play_foreground") is True)
-    direct_branch = tk.StringVar(panel, value=draft.get("direct_branch", ""))
+    direct_branch = tk.StringVar(panel, value="" if local else draft.get("direct_branch", ""))
     reboot_request = tk.StringVar(panel)
+    auto_apply = tk.BooleanVar(panel)
     spec = None
     play_entries = {}
 
@@ -326,20 +337,21 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         return
     ttk.Button(body, text="등록 목표·기준 편집",
                command=lambda: save_budget() and (panel.destroy(), center.register_project(edit=True))).pack(anchor="w")
-    from .gui_workspace import inspect_folder
+    if not local:
+        from .gui_workspace import inspect_folder
 
-    try:
-        _, _, detected_branch, _ = inspect_folder(data["local_path"])
-    except (OSError, ValueError, RuntimeError):
-        detected_branch = ""
-    ttk.Label(body, text="Git 자동 게시 · 비워 두면 작업 사본에 개발").pack(anchor="w")
-    ttk.Entry(body, textvariable=direct_branch).pack(fill="x")
-    if detected_branch:
-        ttk.Button(body, text=f"현재 GitHub 브랜치 사용 · {detected_branch}",
-                   command=lambda: direct_branch.set(detected_branch)).pack(anchor="w")
-    elif not direct_branch.get():
-        ttk.Label(body, text="지원되는 GitHub 원격과 브랜치를 자동으로 찾지 못했습니다. 작업 사본을 사용할 수 있습니다.",
-                  wraplength=580).pack(fill="x")
+        try:
+            _, _, detected_branch, _ = inspect_folder(data["local_path"])
+        except (OSError, ValueError, RuntimeError):
+            detected_branch = ""
+        ttk.Label(body, text="Git 자동 게시 · 비워 두면 작업 사본에 개발").pack(anchor="w")
+        ttk.Entry(body, textvariable=direct_branch).pack(fill="x")
+        if detected_branch:
+            ttk.Button(body, text=f"현재 GitHub 브랜치 사용 · {detected_branch}",
+                       command=lambda: direct_branch.set(detected_branch)).pack(anchor="w")
+        elif not direct_branch.get():
+            ttk.Label(body, text="지원되는 GitHub 원격과 브랜치를 자동으로 찾지 못했습니다. 작업 사본을 사용할 수 있습니다.",
+                      wraplength=580).pack(fill="x")
     recovery = ttk.LabelFrame(body, text="실행 복구", padding=8)
 
     def toggle_section(frame, button, title):
@@ -352,7 +364,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
 
     recovery_button = ttk.Button(body, text="실행 복구 보기",
                                  command=lambda: toggle_section(recovery, recovery_button, "실행 복구"))
-    recovery_button.pack(anchor="w", pady=(4, 6))
+    if not local:
+        recovery_button.pack(anchor="w", pady=(4, 6))
     ttk.Label(recovery, text="전체 재부팅 후 새 1사이클 · 미종결 계획 요청 ID").pack(anchor="w")
     ttk.Entry(recovery, textvariable=reboot_request).pack(fill="x", pady=(0, 4))
 
@@ -373,7 +386,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     inputs.pack(fill="x")
     entries = {}
     whole = tk.BooleanVar(panel, value=draft.get("whole_replica", True) is True)
-    subscription = tk.BooleanVar(panel, value=draft.get("token_mode") == SUBSCRIPTION_MODE)
+    subscription = tk.BooleanVar(panel, value=local or draft.get("token_mode") == SUBSCRIPTION_MODE)
     defaults = registered_cycle.recommended_limits()
     for index, (key, label, default) in enumerate((
             ("archive", "공식 Codex ZIP", ""), ("files", "지정 경로만 수정 (선택)", ""),
@@ -397,16 +410,22 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     ttk.Label(inputs, text="복제본 전체 개발을 끄면 쉼표로 지정한 파일만 수정합니다. "
               "등록 요구사항과 독립 검증 입력, 원본 프로젝트는 보호됩니다.",
               wraplength=570).grid(row=len(entries) + 1, column=0, columnspan=2, sticky="w")
+    if local:
+        ttk.Checkbutton(inputs, text="독립 검증 완료 후 지정한 파일을 원본에 자동 반영",
+                        variable=auto_apply).grid(row=len(entries) + 2, column=0, columnspan=2, sticky="w")
     def token_mode():
         for key in ("tokens", *ROLE_TOKEN_FIELDS.values()):
             entries[key].configure(state="disabled" if subscription.get() else "normal")
 
     modes = ttk.Frame(body)
     modes.pack(fill="x")
-    ttk.Radiobutton(modes, text="토큰 한도 지정", variable=subscription, value=False,
-                    command=token_mode).pack(side="left")
-    ttk.Radiobutton(modes, text="구독 잔여량 기반 개발", variable=subscription, value=True,
-                    command=token_mode).pack(side="left", padx=8)
+    if local:
+        ttk.Label(modes, text="공식 Codex 구독 · 잔여량 10% 초과에서만 신규 작업 시작").pack(side="left")
+    else:
+        ttk.Radiobutton(modes, text="토큰 한도 지정", variable=subscription, value=False,
+                        command=token_mode).pack(side="left")
+        ttk.Radiobutton(modes, text="구독 잔여량 기반 개발", variable=subscription, value=True,
+                        command=token_mode).pack(side="left", padx=8)
     token_mode()
     ttk.Label(body, text="시간과 토큰은 새 작업 시작을 멈추는 기준입니다. 세션 승인 전에 적용값을 확인할 수 있습니다.",
               wraplength=580).pack(anchor="w", pady=4)
@@ -615,7 +634,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             panel.destroy()
 
     def submit(args, *, resume=False, soft_limits=None, graceful=False, visual_review=False, play=False,
-               direct_branch=None, reboot=None, criterion=None):
+               direct_branch=None, reboot=None, criterion=None, apply_original=False):
         nonlocal future, active
         future = Future()
         active = True
@@ -625,7 +644,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         state.set("승인 범위 확인 중")
         options = ({"graceful": graceful} if resume else
                    {"soft_limits": soft_limits, "visual_review": visual_review, "play": play,
-                    "direct_branch": direct_branch, "reboot": reboot, "approved_criterion": criterion})
+                    "direct_branch": direct_branch, "reboot": reboot, "approved_criterion": criterion,
+                    "auto_apply": apply_original})
         review_fn = registered_cycle.review_resume if resume else registered_cycle.review
         run_fn = registered_cycle.run_resume if resume else registered_cycle.run
 
@@ -685,6 +705,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                         role, ROLE_LABELS.get(role, role)) for role in updated_roles)
                                     if updated_roles else "")
                 instruction_note += _criterion_approval(result) + _play_approval(result)
+                if result.get("development_mode") == LOCAL_MODE:
+                    instruction_note += "\n재개 결과는 개발 사본에 저장합니다. 원본 반영은 다시 승인하세요."
                 if checkpoint.get("mode") == "partial-candidate":
                     git = result["direct_git"]
                     evidence = checkpoint["staging_evidence"]
@@ -816,6 +838,13 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                             f"{git['url']} · {git['ref']} · 현재 HEAD {git['head'] or '첫 커밋 전'}\n"
                             "사이클마다 Controller가 확정 변경을 커밋·푸시합니다. "
                             "미검증 판정도 기록하며 원격 동기화 실패 시 다음 작업을 보류합니다.")
+            if result.get("development_mode") == LOCAL_MODE:
+                summary += "\n일반 폴더 자동 개발 · 결과와 체크포인트를 로컬에 보관합니다. 파일 삭제는 금지합니다."
+                if result.get("auto_apply_original"):
+                    summary += ("\n원본 쓰기 승인 포함 · 모든 기준의 독립 검증 완료와 정확한 원본 기준선이 "
+                                "확인된 경우에만 지정 경로를 자동 반영합니다.")
+                else:
+                    summary += "\n원본 반영은 별도 승인합니다."
             if "developer_memory" in result:
                 summary += f"\nDeveloper Windows Job 커밋 한도 {result['developer_memory'] // 1024**2:,} MiB"
             if result.get("portable_source_policy"):
@@ -920,6 +949,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             files = [] if whole.get() else [name.strip() for name in values["files"].split(",") if name.strip()]
             if not whole.get() and not files:
                 raise ValueError("수정할 파일을 입력하거나 ‘복제본 전체 개발’을 선택하세요.")
+            if auto_apply.get() and not files:
+                raise ValueError("원본에 자동 반영하려면 수정할 파일의 경로를 지정하세요.")
             args = (project, values["archive"], int(time()) + seconds + 2940, seconds, tokens, cycles,
                     files, permissions, verifier, role_tokens["manager-planning"])
             play = use_play.get()
@@ -942,7 +973,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         criterion = approved_criterion.get()
         submit(args, soft_limits=limits, visual_review=use_images.get(), play=play,
                direct_branch=direct_branch.get().strip() or None, reboot=(reboot, int(time()) + 900) if reboot else None,
-               criterion=None if criterion == AUTOMATIC_CRITERION else criterion)
+               criterion=None if criterion == AUTOMATIC_CRITERION else criterion, apply_original=auto_apply.get())
 
     def resume():
         try:

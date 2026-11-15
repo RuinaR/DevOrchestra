@@ -1246,6 +1246,11 @@ class CommandCenter:
                            f"로컬 HEAD {git['local'] or '—'} · 원격 HEAD {git['remote'] or '—'}"))
             if git["error"]:
                 review_summary.append(git["error"])
+        elif scope.get("development_mode") == "LOCAL_FOLDER":
+            applied = (progress or {}).get("original_apply") or ((local or {}).get("result") or {}).get("original_apply")
+            review_summary.append("일반 폴더 · 개발 사본에 보관")
+            review_summary.append("원본 반영 · " + (applied["result"] if applied else "대기"))
+            detail.append(f"개발 결과 저장 위치 · {scope['replica']}")
         if play := (progress or {}).get("play"):
             play_state = {"FOREGROUND_UNSAFE": "전경 창 감지 · 입력 차단",
                           "WINDOW_OR_CAPTURE_UNAVAILABLE": "사용 가능한 게임 화면 없음",
@@ -1436,6 +1441,8 @@ class CommandCenter:
                 lines.append(f"{cycle}사이클 · 체크포인트 기록")
             elif kind == "native_inspection_progress_checkpoint":
                 lines.append(f"{cycle}사이클 · 새 승인으로 이어갈 후보 저장")
+            elif kind == "native_inspection_development_record":
+                lines.append(f"{cycle}사이클 · 로컬 개발 기록 저장 · 영수증을 선택해 기록 보기")
             elif kind == "native_inspection_plan_format_failed":
                 lines.append(f"{cycle}사이클 · 계획 응답 완료 · {row['reason']}")
             elif kind == "native_inspection_replan":
@@ -1470,6 +1477,9 @@ class CommandCenter:
             row = references.get(line)
             if row is None:
                 receipt.configure(text="원장 영수증을 보려면 기록 항목을 선택하세요.")
+                return
+            if row["kind"] == "native_inspection_development_record":
+                self.registered_readout("로컬 사이클 기록", row["detail"])
                 return
             facts = [f"원장 Seq {row['sequence']}"]
             for field, caption in (("verdict", "판정"), ("exit_code", "종료 코드"), ("owned_tree", "소유 자원"),
@@ -2033,7 +2043,7 @@ class CommandCenter:
                 folder_status.configure(text="프로젝트 폴더를 선택하면 개발 방식과 구성 파일을 확인합니다.")
                 return
             summary = {
-                "folder": "일반 폴더 · GitHub 없이 감독형 작업과 로컬 기록을 사용할 수 있습니다.",
+                "folder": "일반 폴더 · GitHub 연결 없이 개발 사본에서 자동 개발합니다.",
                 "git": "Git 폴더 · 게시 대상 자동 확인 불가. 복제본 준비에서 자세히 확인하세요.",
                 "github": f"GitHub HTTPS 후보 · {branch} · 원격과 게시 권한은 실행 전에 검토합니다.",
             }[kind]
@@ -2162,9 +2172,69 @@ class CommandCenter:
         self.onboarding_panel(project=project, restart=True)
 
     def onboarding_panel(self, initial="", *, project=None, restart=False):
+        from . import local_folder, project_onboarding
+        from .catalog import FIXTURE_IDS
+
+        if project is None and self.project.current() >= 0:
+            project = self.project_ids[self.project.current()]
+        if project is not None and project not in FIXTURE_IDS:
+            row = Catalog(self.controller.ledger).read()["projects"].get(project)
+            root = row["data"]["local_path"] if row else None
+            if root and local_folder.git_entry(Path(root)) is None:
+                self.local_folder_panel(project, initial or project_onboarding.restart_destination(
+                    self.controller.ledger, project))
+                return
         from .gui_onboarding import show_panel
 
         show_panel(self, initial, project=project, restart=restart)
+
+    def local_folder_panel(self, project, initial):
+        from . import local_folder
+
+        panel = self.panel()
+        panel.title("일반 폴더 · 개발 사본 준비")
+        label(panel, "개발 사본 준비", size=16, bold=True, bg=BG).pack(anchor="w")
+        label(panel, "원본에서 보호 자료를 제외한 파일 목록과 SHA-256을 계산합니다. "
+                     "자동 개발은 새 사본에서 진행하며, 검증된 변경의 원본 반영은 별도 승인합니다.",
+              bg=BG, wraplength=525).pack(fill="x", pady=8)
+        destination = ttk.Entry(panel, width=64)
+        destination.insert(0, initial)
+        destination.pack(fill="x")
+
+        def choose():
+            parent = filedialog.askdirectory(parent=panel, mustexist=True)
+            if parent:
+                destination.delete(0, "end")
+                destination.insert(0, str(Path(parent) / Path(initial).name))
+
+        ttk.Button(panel, text="사본의 상위 폴더 선택", command=choose).pack(anchor="w", pady=4)
+        status = ttk.Label(panel, wraplength=525)
+        status.pack(fill="x", pady=4)
+
+        def prepare():
+            try:
+                target = destination.get().strip()
+                scope = local_folder.review(self.controller, project, target)
+                files = scope["baseline"]["files"]
+                summary = (f"원본 {scope['source']}\n개발 사본 {target}\n"
+                           f"파일 {len(files)}개 · 매니페스트 SHA-256 {digest(scope['baseline'])}\n"
+                           "원본에는 쓰지 않습니다.\n\n"
+                           + "\n".join(f"{name} · {info['sha256']}" for name, info in list(files.items())[:40]))
+                if len(files) > 40:
+                    summary += f"\n외 {len(files) - 40}개 · 전체 목록은 원장에 기록됩니다."
+                if not self.confirm("개발 사본 복사 승인", summary, parent=panel):
+                    return
+                local_folder.create(self.controller, project, target, digest(scope))
+            except (Blocked, OSError, ValueError, sqlite3.Error) as error:
+                status.configure(text=str(error))
+                return
+            panel.destroy()
+            self.refresh()
+            from .gui_registered_cycle import show
+
+            show(self, project)
+
+        ttk.Button(panel, text="파일 목록 검토", style="Primary.TButton", command=prepare).pack(anchor="e")
 
     def original_apply_panel(self, project=None):
         from . import original_apply
@@ -2185,6 +2255,33 @@ class CommandCenter:
         except (Blocked, OSError, ValueError, sqlite3.Error) as error:
             status.configure(text=f"반영 차단 · {error}")
             try:
+                recovery = original_apply.review_recovery(self.controller, project)
+            except (Blocked, OSError, ValueError, sqlite3.Error):
+                recovery = None
+            if recovery:
+                action = ("이미 적용된 변경 확인" if recovery["action"] == "CONFIRM_APPLIED"
+                          else "부분 반영을 이전 상태로 되돌리기")
+                status.configure(text=f"중단된 반영 · {action}")
+                preview.configure(state="normal")
+                preview.insert("1.0", "\n".join(f"{path} · {state}" for path, state in recovery["states"].items()))
+                preview.configure(state="disabled")
+
+                def recover():
+                    if not self.confirm("원본 반영 복구 승인", action, parent=panel):
+                        return
+                    try:
+                        receipt = original_apply.recover(self.controller, project, digest(recovery))
+                    except (Blocked, OSError, ValueError, sqlite3.Error) as failure:
+                        status.configure(text=f"복구 중단 · {failure}")
+                        return
+                    status.configure(text=f"복구 완료 · {receipt['result']}")
+                    recovery_button.configure(state="disabled")
+                    self.refresh()
+
+                recovery_button = ttk.Button(panel, text="복구 승인", command=recover, style="Primary.TButton")
+                recovery_button.pack(anchor="e")
+                return
+            try:
                 latest = next((row for row in reversed(self.controller.ledger.read())
                                if row["kind"] == "original_apply_result" and row["project_id"] == project), None)
             except (Blocked, OSError, ValueError, sqlite3.Error):
@@ -2194,6 +2291,18 @@ class CommandCenter:
                 preview.insert("1.0", f"최근 반영 · {latest['result']}\n"
                                + "\n".join(latest["paths"]))
                 preview.configure(state="disabled")
+            else:
+                from .replica_readiness import changes_review
+
+                try:
+                    candidate = changes_review(self.controller.ledger, project)
+                except (Blocked, OSError, ValueError, sqlite3.Error):
+                    pass
+                else:
+                    preview.configure(state="normal")
+                    preview.insert("1.0", "\n".join(
+                        f"{row['change']} · {row['path']}" for row in candidate["paths"]) or "변경 없음")
+                    preview.configure(state="disabled")
             return
         checksum = digest(scope)
         status.configure(text=f"변경 {len(scope['paths'])}개 · 별도 원본 쓰기 승인 필요\n"
@@ -2674,13 +2783,14 @@ class CommandCenter:
             return
         try:
             kind, _, _, _ = inspect_folder(root)
-            if kind != "folder":
-                try:
-                    replica_readiness.baseline(self.reader.ledger, project)
-                except Blocked:
-                    destination = project_onboarding.restart_destination(self.reader.ledger, project)
-                    self.onboarding_panel(destination, project=project)
-                    return
+            try:
+                source, _, frozen, _ = replica_readiness.baseline(self.reader.ledger, project)
+                if kind == "folder" and not replica_readiness.original_matches(source, frozen):
+                    raise Blocked("원본이 변경되어 새 사본 기준점이 필요합니다.")
+            except Blocked:
+                destination = project_onboarding.restart_destination(self.reader.ledger, project)
+                self.onboarding_panel(destination, project=project)
+                return
         except (Blocked, OSError, ValueError, sqlite3.Error) as error:
             self.registered_readout("작업 폴더 확인", str(error))
             return
@@ -2700,16 +2810,13 @@ class CommandCenter:
                 self.registered_readout("작업 폴더 확인", str(error))
                 return
             if kind == "folder":
-                panel = self.panel()
-                panel.title("개발 준비 · 일반 폴더")
-                label(panel, "일반 폴더", bg=BG, bold=True, size=16).pack(anchor="w")
-                label(panel, "요구사항과 작업 기록을 로컬에 보관할 수 있습니다. 현재 자동 개발 Controller는 "
-                             "Git 기준점이 있는 작업 사본이 필요합니다. 감독형 작업에서 구현을 요청할 때는 "
-                             "원본과 별도의 폴더를 준비하세요.",
-                      bg=BG, wraplength=480).pack(fill="x", pady=8)
-                ttk.Button(panel, text="감독형 작업 열기", style="Primary.TButton",
-                           command=lambda: (panel.destroy(), self.supervised_work())).pack(anchor="e")
-                return
+                from .replica_readiness import baseline
+
+                try:
+                    baseline(self.reader.ledger, self.view["project_id"])
+                except Blocked:
+                    self.prepare_selected_project()
+                    return
             from .gui_registered_cycle import show
 
             show(self, self.view["project_id"])

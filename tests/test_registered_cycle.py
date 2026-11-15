@@ -12,7 +12,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from devorchestra import codex_setup, cycle_progress, game_pilot, native_cycle, original_apply, project_onboarding, registered_cycle
+from devorchestra import (codex_setup, cycle_progress, game_pilot, local_folder, native_cycle, original_apply,
+                           project_onboarding, registered_cycle)
 from devorchestra.catalog import Catalog, new_project
 from devorchestra.ledger import Ledger, digest
 from devorchestra.lease import Blocked
@@ -884,6 +885,147 @@ class RegisteredTrustTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"), "Requires signed local Windows tools")
 class RegisteredCycleTests(unittest.TestCase):
+
+    def test_local_folder_cycle_and_interrupted_original_apply(self):
+        self._local_folder_cycle(auto_apply=False)
+
+    def test_local_folder_auto_applies_only_after_verified_cycle(self):
+        self._local_folder_cycle(auto_apply=True)
+
+    def _local_folder_cycle(self, *, auto_apply):
+        class SimulatedExit(BaseException):
+            pass
+
+        with TemporaryDirectory(prefix="devorchestra-local-") as folder:
+            directory = Path(folder)
+            original, replica, state = [directory / name for name in ("source", "replica", ".ai-local")]
+            original.mkdir()
+            (original / "greeting.txt").write_bytes(b"draft\n")
+            if not auto_apply:
+                (original / "other.txt").write_bytes(b"old\n")
+            (original / ".env").write_bytes(b"synthetic secret fixture")
+            ledger = Ledger(state / "state" / "p1.sqlite3", local_root=state)
+            ledger.initialize()
+            (ledger.local_directory("state") / "codex-developer-home").mkdir()
+            archive = codex_setup.archive_path(ledger)
+            copyfile(os.environ["DEVORCHESTRA_NATIVE_FIXTURE_ARCHIVE"], archive)
+            project = new_project("folder-fixture", "Local greeting", "Make the greeting read hello.")
+            project.update(local_path=str(original), acceptance=["Greeting says hello"])
+            catalog = Catalog(ledger)
+            catalog.save_project(project)
+            catalog.write_local_requirement("folder-fixture", "requirements/greeting.md", "Say hello.", "FEATURE")
+            runner = Runner(ledger)
+            with (patch.object(project_onboarding, "_git", side_effect=AssertionError("Git used")),
+                  patch("devorchestra.direct_git._command", side_effect=AssertionError("Git publication used"))):
+                frozen = local_folder.review(runner, "folder-fixture", replica)
+                self.assertNotIn(".env", frozen["baseline"]["files"])
+                (original / "extra.txt").write_bytes(b"owner")
+                with self.assertRaisesRegex(Blocked, "변경"):
+                    local_folder.create(runner, "folder-fixture", replica, digest(frozen))
+                (original / "extra.txt").unlink()
+                local_folder.create(runner, "folder-fixture", replica, digest(frozen))
+                key = next(iter(cycle_progress.freeze(project["acceptance"], None)))
+                verifier = {"executable": str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe"),
+                            "checks": {key: {"args": ["/d", "/q", "/c", "type", "greeting.txt"],
+                                             "stdout": "hello", "inputs": []}}}
+                limits = registered_cycle.recommended_limits()
+                limits.update(cycles=1, tokens=None, role_tokens=dict.fromkeys(limits["role_tokens"]),
+                              token_mode=registered_cycle.SUBSCRIPTION_MODE)
+                args = ("folder-fixture", str(archive), int(time()) + limits["seconds"] + 2940, limits["seconds"],
+                        None, 1, ["greeting.txt", "other.txt"], list(registered_cycle.PERMISSIONS), verifier, None)
+                calls = []
+
+                def transport(binary, argv, work, logs, env, **kwargs):
+                    (logs / "probe.stderr").write_bytes(b"")
+                    if "login" in argv:
+                        return {"stdout": "Logged in using ChatGPT\n", "exitCode": 0, "job_active": 0}
+                    phase = logs.name.split("-", 1)[1]
+                    calls.append(phase)
+                    self.assertIn("permissions.developer-trial.network.enabled=false", argv)
+                    if phase == "developer":
+                        (work / "greeting.txt").write_bytes(b"hello\n")
+                        (work / "other.txt").write_bytes(b"new\n")
+                    plan = {"criterion": key, "mode": "edit", "plan": "Update local output",
+                            "deliverable": "implementation", "components": "Text output",
+                            "verification": "Check greeting", "evidence": "Exact output"}
+                    message = {"manager-planning": json.dumps(plan), "developer": "Edited",
+                               "reviewer": "ACCEPT — the diff meets the criterion.",
+                               "manager-final": "COMPLETED — the independent check passed."}[phase]
+                    rows = [{"type": "thread.started", "thread_id": "offline"}, {"type": "turn.started"},
+                            {"type": "item.completed", "item": {"type": "agent_message", "text": message}},
+                            {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 5}}]
+                    return {"stdout": "\n".join(map(json.dumps, rows)), "exitCode": 0, "job_active": 0}
+
+                quota = {"status": "AVAILABLE", "remaining": 60, "checked_at": time(), "windows": []}
+                with (patch.object(native_cycle, "_observe", side_effect=transport),
+                      patch.object(registered_cycle, "_diagnostic", return_value={"request_id": "offline"}),
+                      patch.object(codex_setup, "read_subscription_quota", return_value=quota)):
+                    scope = registered_cycle.review(runner, *args, soft_limits=limits, auto_apply=auto_apply)
+                    self.assertEqual("LOCAL_FOLDER", scope["development_mode"])
+                    with self.assertRaisesRegex(Blocked, "직접 Git"):
+                        registered_cycle.review(runner, *args, soft_limits=limits, direct_branch="main")
+                    result = registered_cycle.run(runner, *args, soft_limits=limits, approval=digest(scope),
+                                                  auto_apply=auto_apply)
+                    self.assertEqual("COMPLETED", result["outcome"], result)
+                self.assertEqual(["manager-planning", "developer", "reviewer", "manager-final"], calls)
+                self.assertEqual({key: "VERIFIED"}, result["criteria_status"])
+                self.assertEqual(b"hello\n" if auto_apply else b"draft\n",
+                                 (original / "greeting.txt").read_bytes())
+                self.assertEqual(b"hello\n", (replica / "greeting.txt").read_bytes())
+                self.assertFalse((original / ".git").exists())
+                self.assertFalse((replica / ".git").exists())
+                events = ledger.read()
+                report = next(row for row in events if row["kind"] == "native_inspection_development_record")
+                self.assertIn("Verifier PASS", report["current"])
+                self.assertIn("Target: Greeting says hello", report["current"])
+                self.assertEqual("LOCAL_ONLY", report["publication"])
+                self.assertFalse(any(row["kind"].startswith("direct_git") for row in events))
+                expires = int(time()) + 200
+                if auto_apply:
+                    self.assertEqual("APPLIED", result["original_apply"]["result"])
+                    self.assertEqual("original_apply_result", events[-1]["kind"])
+                    self.assertIsNone(events[-1]["paths"]["other.txt"]["before"])
+                    self.assertTrue((ledger.local_directory("recovery") / events[-1]["previous_bytes_ref"]).is_file())
+                    self.assertEqual(b"new\n", (original / "other.txt").read_bytes())
+                    with self.assertRaises(Blocked):
+                        original_apply.review(runner, "folder-fixture", expires)
+                    return
+                (original / "unrelated.txt").write_bytes(b"owner edit")
+                with self.assertRaises(Blocked):
+                    original_apply.review(runner, "folder-fixture", expires)
+                (original / "unrelated.txt").unlink()
+                write_scope, _ = original_apply.review(runner, "folder-fixture", expires)
+
+                def partial(source, stage, before, after, *checks, prepared):
+                    name = next(iter(after))
+                    os.rename(source / name, stage / "old-0")
+                    os.rename(stage / "next-0", source / name)
+                    raise SimulatedExit()
+
+                with patch.object(original_apply, "_write", side_effect=partial), self.assertRaises(SimulatedExit):
+                    original_apply.run(runner, "folder-fixture", expires, digest(write_scope))
+                runner = Runner(Ledger(ledger.path, local_root=state))
+                plan = original_apply.review_recovery(runner, "folder-fixture")
+                self.assertEqual("ROLL_BACK", plan["action"])
+                modified = next(name for name, status in plan["states"].items() if status == "NEW")
+                target = original / modified
+                observed = target.read_bytes()
+                target.write_bytes(b"user edit")
+                with self.assertRaisesRegex(Blocked, "사용자가 수정"):
+                    original_apply.review_recovery(runner, "folder-fixture")
+                target.write_bytes(observed)
+                with self.assertRaisesRegex(Blocked, "검토가 변경"):
+                    original_apply.recover(runner, "folder-fixture", "stale")
+                applied = original_apply.recover(runner, "folder-fixture", digest(plan))
+                self.assertEqual("ROLLED_BACK", applied["result"])
+                self.assertEqual(b"draft\n", (original / "greeting.txt").read_bytes())
+                with self.assertRaises(Blocked):
+                    original_apply.recover(runner, "folder-fixture", digest(plan))
+                write_scope, _ = original_apply.review(runner, "folder-fixture", expires)
+                self.assertEqual("APPLIED", original_apply.run(
+                    runner, "folder-fixture", expires, digest(write_scope))["result"])
+                self.assertEqual(b"hello\n", (original / "greeting.txt").read_bytes())
+                self.assertEqual(b"new\n", (original / "other.txt").read_bytes())
 
     def test_onboard_run_verify_and_review_original_write(self):
         self._exercise(False)
