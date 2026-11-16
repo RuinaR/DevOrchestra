@@ -121,10 +121,12 @@ class Keyboard:
             raise Blocked("Windows input activity could not be checked")
         return info.tick
 
-    def _check(self):
+    def _check(self, phase="before next action or observation"):
         self._target()
-        if self._last_input() != self._stamp:
-            raise Blocked("Scan-code input stopped after another input event")
+        observed = self._last_input()
+        if observed != self._stamp:
+            raise Blocked(f"Scan-code input stopped after another input event "
+                          f"({phase}; expected {self._stamp}, observed {observed})")
 
     def _emit(self, scans, *, up, stamp=0):
         flags = 0x0008 | (0x0002 if up else 0)
@@ -168,16 +170,18 @@ class Keyboard:
         if span > round(INPUT_ACK_SECONDS * 1000) + TICK_RESOLUTION_MS:
             raise Blocked("Windows scan-code submission exceeded its confirmation window")
         deadline = monotonic() + INPUT_ACK_SECONDS
+        edge = "press" if down else "release"
         while True:
             observed = self._last_input()
             in_submission = ((observed - first_tick) & 0xFFFFFFFF) <= span
             if observed != previous and not in_submission:
-                raise Blocked("Scan-code input stopped after another input event")
+                raise Blocked(f"Scan-code input stopped after another input event "
+                              f"(confirming {edge}; previous {previous}, submitted {first_tick}–{last_tick}, "
+                              f"observed {observed})")
             if in_submission and all(bool(self._state(code) & 0x8000) == down for code in virtual_keys):
                 self._stamp = observed
                 return
             if monotonic() >= deadline:
-                edge = "press" if down else "release"
                 raise Blocked(f"Windows did not confirm scan-code {edge} and key state "
                               f"(submitted {first_tick}–{last_tick}; observed {observed})")
             self._target()
@@ -189,14 +193,14 @@ class Keyboard:
                 or self._pressed or not self._usable):
             raise Blocked("Invalid guarded scan-code input")
         scans = [SCAN_CODES[key] for key in keys]
-        self._check()
+        self._check("before preparing the key hold")
         layout = self._layout(self._window.thread)
         virtual_keys = [self._map(scan, 3, layout) for scan in scans]
         if not all(virtual_keys) or any(self._state(code) & 0x8000 for code in (
                 *virtual_keys, 0x10, 0x11, 0x12, 0x5B, 0x5C)):
             raise Blocked("A physical key or system modifier is already held")
 
-        self._check()
+        self._check("before arming the key hold")
         self._usable = False
         finished, expired, watchdog_failed = Event(), Event(), Event()
 
@@ -211,7 +215,7 @@ class Keyboard:
         watchdog = Thread(target=watch, name="owned-key-release-watchdog", daemon=True)
         try:
             with self._release_lock:
-                self._check()
+                self._check("before submitting the key press")
                 previous = self._stamp
                 started = monotonic()
                 until = started + milliseconds / 1000
@@ -230,7 +234,7 @@ class Keyboard:
             while True:
                 if expired.is_set():
                     raise Blocked("Input watchdog stopped an overdue hold")
-                self._check()
+                self._check("during the key hold")
                 if not all(self._state(code) & 0x8000 for code in virtual_keys):
                     raise Blocked("An approved scan-code key was released during the hold")
                 remaining = until - monotonic()
