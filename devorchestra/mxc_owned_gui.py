@@ -274,7 +274,8 @@ def _capture(window, path, workers, *, fps=None):
 
 
 def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None,
-                         play=None, executable=None, capture_fps=None, desktop_hold_ms=None):
+                         play=None, executable=None, capture_fps=None, desktop_hold_ms=None,
+                         activate_foreground=False):
     process = _require(signature(api, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)(0x101000, False, pid))
     member = signature(api, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
     try:
@@ -313,6 +314,16 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
                 if desktop_hold_ms is not None:
                     if executable is None:
                         raise Blocked("Desktop input requires an approved executable")
+                    if activate_foreground:
+                        if not window.is_foreground():
+                            verify_execution()
+                            window.request_foreground()
+                        until = monotonic() + 5
+                        while not window.is_foreground():
+                            window.check()
+                            if monotonic() >= until:
+                                raise Blocked("Approved game did not become foreground")
+                            sleep(0.05)
                     input_adapter = Keyboard(window, verify_execution, max_hold_ms=desktop_hold_ms)
                     try:
                         return play(window, capture, input_adapter)
@@ -353,7 +364,8 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
 
 
 def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None, input_probe=True,
-                         play=None, executable=None, capture_fps=None, desktop_hold_ms=None):
+                         play=None, executable=None, capture_fps=None, desktop_hold_ms=None,
+                         activate_foreground=False):
     user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
     callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
     enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
@@ -386,7 +398,8 @@ def inspect_owned_window(api, job, deadline, check, image_path, workers, *, befo
             sleep(0.4)
             return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=input_probe,
                                         before_input=before_input, play=play, executable=executable,
-                                        capture_fps=capture_fps, desktop_hold_ms=desktop_hold_ms)
+                                        capture_fps=capture_fps, desktop_hold_ms=desktop_hold_ms,
+                                        activate_foreground=activate_foreground)
         sleep(0.05)
 
 

@@ -60,13 +60,14 @@ class Keyboard:
         self._open_desktop = signature(user, "OpenInputDesktop", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)
         self._close_desktop = signature(user, "CloseDesktop", w.BOOL, w.HANDLE)
         self._get_desktop = signature(user, "GetThreadDesktop", w.HANDLE, w.DWORD)
+        self._current_thread = signature(kernel, "GetCurrentThreadId", w.DWORD)
         self._get_object = signature(user, "GetUserObjectInformationW", w.BOOL, w.HANDLE, c.c_int,
                                      c.c_void_p, w.DWORD, c.POINTER(w.DWORD))
         self._hit = signature(user, "WindowFromPoint", w.HWND, w.POINT)
         self._metrics = signature(user, "GetSystemMetrics", c.c_int, c.c_int)
         self.max_hold_ms = max_hold_ms
         self._release_lock = Lock()
-        self._desktop = self._desktop_name(self._get_desktop(window.thread))
+        self._desktop = self._active_controller_desktop()
         self._pressed = []
         self._usable = True
         self.cleanup = "NO_INPUT"
@@ -89,15 +90,25 @@ class Keyboard:
             if not self._close_desktop(desktop):
                 raise Blocked("Windows input desktop handle could not be released")
 
+    def _active_controller_desktop(self):
+        # MXC denies querying another process's thread desktop. Verify the
+        # actual input desktop here and bind the focused window separately.
+        desktop = self._get_desktop(self._current_thread())
+        active = w.BOOL()
+        if (not desktop or not self._get_object(desktop, 6, c.byref(active), c.sizeof(active), None)
+                or not active.value):
+            raise Blocked("Controller is not on the active Windows input desktop")
+        return self._desktop_name(desktop)
+
     def _target(self):
         window = self._window
         window.check()
         self._verify_execution()
         root = window.owned("root")
-        if self._input_desktop() != self._desktop or self._desktop_name(self._get_desktop(window.thread)) != self._desktop:
+        if self._input_desktop() != self._desktop or self._active_controller_desktop() != self._desktop:
             raise Blocked("Owned game is not on the Windows input desktop")
         info = _ThreadInfo(size=c.sizeof(_ThreadInfo))
-        if (window.foreground() != root or not self._focus(window.thread, c.byref(info))
+        if (window.foreground() != root or not self._focus(0, c.byref(info))
                 or info.active != root or info.focus != root or info.flags & 0x1F
                 or window.foreground() != root):
             raise Blocked("Scan-code input requires the focused owned game window")

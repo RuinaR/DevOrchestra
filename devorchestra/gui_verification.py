@@ -110,6 +110,7 @@ class _Window:
         self.client_to_screen = signature(user, "ClientToScreen", w.BOOL, w.HWND, c.POINTER(w.POINT))
         self.scan_code = signature(user, "MapVirtualKeyW", w.UINT, w.UINT, w.UINT)
         self.foreground = signature(user, "GetForegroundWindow", w.HWND)
+        self.set_foreground = signature(user, "SetForegroundWindow", w.BOOL, w.HWND)
         self.place = signature(user, "SetWindowPos", w.BOOL, w.HWND, w.HWND, c.c_int, c.c_int,
                                c.c_int, c.c_int, w.UINT)
         self.menu = signature(user, "GetMenu", w.HMENU, w.HWND)
@@ -159,6 +160,10 @@ class _Window:
 
     def is_foreground(self):
         return self.owned("root") == self.foreground()
+
+    def request_foreground(self):
+        self.check()
+        self.set_foreground(self.owned("root"))
 
     def click(self, name):
         self.message(name, 0x00F5)  # BM_CLICK, no desktop input

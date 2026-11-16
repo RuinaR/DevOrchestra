@@ -59,6 +59,11 @@ def _scope_preferences(scope):
             values["capture_fps"] = str(policy["capture_fps"])
         if "evidence_mib" in policy:
             values["evidence_mib"] = str(policy["evidence_mib"])
+        if "desktop_hold_ms" in policy:
+            values["desktop_preference"] = True
+            values["desktop_hold"] = str(policy["desktop_hold_ms"])
+    values["approved_criterion"] = scope.get("approved_criterion")
+    values["allow_documentation"] = scope.get("allow_documentation") is True
     if git := scope.get("direct_git"):
         values["direct_branch"] = git["ref"].removeprefix("refs/heads/")
     return values
@@ -304,6 +309,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         restored = None
         state.set("저장한 개발 설정을 읽지 못했습니다. 화면의 권한과 검증 설정을 다시 확인하세요.")
     draft = restored if restored is not None else prior.copy()
+    saved_criterion = draft.get("approved_criterion")
+    if isinstance(saved_criterion, str) and saved_criterion in criteria:
+        approved_criterion.set(saved_criterion)
     if local:
         draft = {"web-research": False, "portable-tools": False, "cycles": "1", **draft}
     if restored is not None or prior:
@@ -317,15 +325,16 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     use_play = tk.BooleanVar(panel, value=draft.get("use_play") is True)
     play_foreground = tk.BooleanVar(panel, value=draft.get("play_foreground") is True)
     desktop_input = tk.BooleanVar(panel)
-    desktop_hold = tk.StringVar(panel, value="1000")
+    desktop_preference = tk.BooleanVar(panel, value=draft.get("desktop_preference") is True)
+    desktop_hold = tk.StringVar(panel, value=draft.get("desktop_hold", "1000"))
     capture_fps = tk.StringVar(panel, value=draft.get("capture_fps", ""))
     evidence_mib = tk.StringVar(panel, value=draft.get("evidence_mib", ""))
     direct_branch = tk.StringVar(panel, value="" if local else draft.get("direct_branch", ""))
     reboot_request = tk.StringVar(panel)
     auto_apply = tk.BooleanVar(panel)
-    allow_documentation = tk.BooleanVar(panel)
+    allow_documentation = tk.BooleanVar(panel, value=draft.get("allow_documentation") is True)
     if not resume_only:
-        ttk.Checkbutton(body, text="이번 승인에서 문서 전용 개발 허용",
+        ttk.Checkbutton(body, text="문서 전용 개발 허용 선호 (실행 승인에서 확인)",
                         variable=allow_documentation).pack(anchor="w")
     spec = None
     play_entries = {}
@@ -338,6 +347,8 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             return
         ttk.Checkbutton(body, text="전경 QA · 승인된 소유 창에 클릭·키 메시지 직접 전달",
                         variable=play_foreground).pack(anchor="w")
+        ttk.Checkbutton(body, text="실제 키보드·마우스 입력 선호 저장 (실행별 동의 필요)",
+                        variable=desktop_preference).pack(anchor="w")
         ttk.Checkbutton(body, text="이번 실행에 실제 키보드·마우스 입력 허용 (공유 화면의 오입력 위험에 동의)",
                         variable=desktop_input,
                         command=lambda: play_foreground.set(True) if desktop_input.get() else None).pack(anchor="w")
@@ -475,14 +486,17 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         preferences.update(whole_replica=whole.get(), token_mode=SUBSCRIPTION_MODE if subscription.get() else "fixed",
                            use_images=use_images.get(), use_play=use_play.get(),
                            play_foreground=play_foreground.get(), direct_branch=direct_branch.get().strip(),
-                           capture_fps=capture_fps.get(), evidence_mib=evidence_mib.get())
+                           capture_fps=capture_fps.get(), evidence_mib=evidence_mib.get(),
+                           desktop_preference=desktop_preference.get(), desktop_hold=desktop_hold.get().strip(),
+                           approved_criterion=approved_criterion.get(),
+                           allow_documentation=allow_documentation.get())
         preferences.update((field, entry.get().strip()) for field, entry in play_entries.items())
         if spec is not None:
             try:
                 preferences["verifier"] = read_spec()
             except (ValueError, RecursionError):
-                if isinstance(draft.get("verifier"), dict):
-                    preferences["verifier"] = draft["verifier"]
+                state.set("검증 설정이 올바르지 않아 저장하지 않았습니다.")
+                return False
         elif isinstance(draft.get("verifier"), dict):
             preferences["verifier"] = draft["verifier"]
         try:
@@ -1155,6 +1169,19 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                command=resume)
     close_button = ttk.Button(buttons, text="닫기 / 중단", command=close)
     apply_button = ttk.Button(buttons, text="원본 반영 검토", command=lambda: center.original_apply_panel(project))
+    if not resume_only:
+        def independent_play():
+            from .gui_preview_play import show as show_preview_play
+
+            show_preview_play(center, project, {
+                "capture_fps": capture_fps.get(), "evidence_mib": evidence_mib.get(),
+                "play_seconds": play_entries["play_seconds"].get() if play_entries else "",
+                "play_inputs": play_entries["play_inputs"].get() if play_entries else "",
+                "desktop_hold": desktop_hold.get(), "desktop_preference": desktop_preference.get(),
+            })
+
+        ttk.Button(footer, text="독립 GUI 입력 검증 · 모델 호출 없음",
+                   command=independent_play).pack(fill="x", pady=(4, 0))
     for index, control in enumerate((button, resume_button, apply_button, close_button)):
         control.grid(row=index // 2, column=index % 2, sticky="ew", padx=2, pady=2)
     for column in range(2):
