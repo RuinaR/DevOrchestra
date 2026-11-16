@@ -46,10 +46,11 @@ class GuardedKeyboardTests(unittest.TestCase):
                     if now[0] >= 1.15 and interruption == "worker exception":
                         raise RuntimeError(interruption)
 
-                def emit(scans, *, up, stamp):
+                def emit(scans, *, up, stamp=0):
+                    self.assertEqual(0, stamp)
                     (down.difference_update if up else down.update)(scans)
                     events.append((list(scans), up))
-                    last[0] = stamp
+                    last[0] = round(now[0] * 1000) + 7
                     return len(scans)
 
                 def sleep(seconds):
@@ -78,3 +79,13 @@ class GuardedKeyboardTests(unittest.TestCase):
         with self.assertRaises(keyboard.ReleaseUnconfirmed):
             driver.release()
         self.assertEqual([0x39], driver._pressed)
+
+    def test_submission_rejects_activity_outside_own_batch_and_handles_tick_wrap(self):
+        driver = object.__new__(keyboard.Keyboard)
+        driver._state = lambda _: 0x8000
+        driver._last_input = lambda: 2
+        driver._confirm_keyboard(0xFFFFFFFE, 0xFFFFFFFF, 1, [68], down=True)
+        self.assertEqual(2, driver._stamp)
+        driver._last_input = lambda: 500
+        with self.assertRaisesRegex(Blocked, "another input event"):
+            driver._confirm_keyboard(2, 100, 100, [68], down=True)

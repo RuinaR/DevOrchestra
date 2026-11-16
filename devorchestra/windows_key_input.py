@@ -11,6 +11,8 @@ SCAN_CODES = {"W": 0x11, "A": 0x1E, "S": 0x1F, "D": 0x20, "SPACE": 0x39,
               "LEFT": 0xE04B, "UP": 0xE048, "RIGHT": 0xE04D, "DOWN": 0xE050}
 MAX_HOLD_MS = 1000
 POLL_SECONDS = 0.01
+INPUT_ACK_SECONDS = 0.05
+TICK_RESOLUTION_MS = 16
 
 
 class ReleaseUnconfirmed(Blocked):
@@ -159,6 +161,28 @@ class Keyboard:
             pass
         raise ReleaseUnconfirmed("Windows input release state could not be verified")
 
+    def _confirm_keyboard(self, previous, first_tick, last_tick, virtual_keys, *, down):
+        # Only during our submission boundary can the session's input tick
+        # advance. Compare modulo DWORD, including one Windows timer quantum.
+        span = ((last_tick - first_tick) & 0xFFFFFFFF) + TICK_RESOLUTION_MS
+        if span > round(INPUT_ACK_SECONDS * 1000) + TICK_RESOLUTION_MS:
+            raise Blocked("Windows scan-code submission exceeded its confirmation window")
+        deadline = monotonic() + INPUT_ACK_SECONDS
+        while True:
+            observed = self._last_input()
+            in_submission = ((observed - first_tick) & 0xFFFFFFFF) <= span
+            if observed != previous and not in_submission:
+                raise Blocked("Scan-code input stopped after another input event")
+            if in_submission and all(bool(self._state(code) & 0x8000) == down for code in virtual_keys):
+                self._stamp = observed
+                return
+            if monotonic() >= deadline:
+                edge = "press" if down else "release"
+                raise Blocked(f"Windows did not confirm scan-code {edge} and key state "
+                              f"(submitted {first_tick}–{last_tick}; observed {observed})")
+            self._target()
+            sleep(POLL_SECONDS)
+
     def hold(self, keys, milliseconds):
         if (not 1 <= len(keys) <= 2 or len(set(keys)) != len(keys) or any(key not in SCAN_CODES for key in keys)
                 or type(milliseconds) is not int or not 30 <= milliseconds <= self.max_hold_ms
@@ -172,22 +196,12 @@ class Keyboard:
                 *virtual_keys, 0x10, 0x11, 0x12, 0x5B, 0x5C)):
             raise Blocked("A physical key or system modifier is already held")
 
-        stamp = self._ticks()
-        until = monotonic() + 0.06
-        while not stamp or stamp == self._stamp:
-            if monotonic() >= until:
-                raise Blocked("Windows input timestamp is ambiguous")
-            sleep(POLL_SECONDS)
-            self._check()
-            stamp = self._ticks()
         self._check()
-        started = monotonic()
         self._usable = False
         finished, expired, watchdog_failed = Event(), Event(), Event()
-        hard_deadline = started + milliseconds / 1000 + 0.075
 
         def watch():
-            if not finished.wait(max(0, hard_deadline - monotonic())):
+            if not finished.wait(max(0, until + 0.075 - monotonic())):
                 expired.set()
                 try:
                     self.release()
@@ -195,60 +209,54 @@ class Keyboard:
                     watchdog_failed.set()
 
         watchdog = Thread(target=watch, name="owned-key-release-watchdog", daemon=True)
-        watchdog.start()
-        settled = False
         try:
             with self._release_lock:
                 self._check()
-                if expired.is_set():
-                    raise Blocked("Input watchdog deadline elapsed before press")
+                previous = self._stamp
+                started = monotonic()
+                until = started + milliseconds / 1000
+                watchdog.start()
+                first_tick = self._ticks()
                 c.set_last_error(0)
-                count = self._emit(scans, up=False, stamp=stamp)
+                count = self._emit(scans, up=False)
                 winerror = c.get_last_error()
+                last_tick = self._ticks()
                 self._pressed.extend(scans[:count])
                 if count:
                     self.cleanup = "RELEASE_UNCONFIRMED"
             if count != len(scans):
                 raise Blocked(f"SendInput press accepted {count}/{len(scans)} events (Win32 error {winerror})")
-            previous = self._stamp
-            until = started + milliseconds / 1000
+            self._confirm_keyboard(previous, first_tick, last_tick, virtual_keys, down=True)
             while True:
                 if expired.is_set():
                     raise Blocked("Input watchdog stopped an overdue hold")
-                self._target()
-                last = self._last_input()
-                if last == stamp:
-                    self._stamp = stamp
-                elif self._stamp == stamp or last != previous or monotonic() - started >= 0.05:
-                    down = sum(bool(self._state(code) & 0x8000) for code in virtual_keys)
-                    raise Blocked(
-                        f"Scan-code timestamp not confirmed after SendInput accepted {count} events "
-                        f"(Win32 error {winerror}; supplied {stamp}, previous {previous}, observed {last}, "
-                        f"confirmed earlier {self._stamp == stamp}, keys down {down}/{len(virtual_keys)})")
+                self._check()
+                if not all(self._state(code) & 0x8000 for code in virtual_keys):
+                    raise Blocked("An approved scan-code key was released during the hold")
                 remaining = until - monotonic()
                 if remaining <= 0:
-                    if self._stamp != stamp:
-                        raise Blocked("Windows did not confirm the scan-code input stamp")
-                    self._check()
-                    settled = True
                     break
                 sleep(min(POLL_SECONDS, remaining))
         finally:
             # Emergency key-up is necessarily session-wide, even after focus or cancellation changes.
             # Attempt each accepted key independently so a failure does not skip the other release.
-            released_at = self._ticks() if settled else 0
+            release_before = self._ticks()
             try:
-                self.release(stamp=released_at)
+                self.release()
+                release_after = self._ticks()
             finally:
                 finished.set()
-                watchdog.join(0.2)
+                if watchdog.ident is not None:
+                    watchdog.join(0.2)
                 if watchdog.is_alive() or watchdog_failed.is_set() or self._pressed:
                     raise ReleaseUnconfirmed("Input watchdog or key release is unresolved")
             if self.cleanup == "RELEASE_UNCONFIRMED":
                 self._verify_up(virtual_keys)
         if expired.is_set():
             raise Blocked("Input watchdog stopped an overdue hold")
-        self._confirm_release(released_at, stamp, virtual_keys)
+        self._target()
+        self._confirm_keyboard(self._stamp, release_before, release_after, virtual_keys, down=False)
+        self._usable = True
         return round((monotonic() - started) * 1000)
 
     def click(self, x, y):
