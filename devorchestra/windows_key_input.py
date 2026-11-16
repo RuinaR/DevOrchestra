@@ -202,12 +202,14 @@ class Keyboard:
                 self._check()
                 if expired.is_set():
                     raise Blocked("Input watchdog deadline elapsed before press")
+                c.set_last_error(0)
                 count = self._emit(scans, up=False, stamp=stamp)
+                winerror = c.get_last_error()
                 self._pressed.extend(scans[:count])
                 if count:
                     self.cleanup = "RELEASE_UNCONFIRMED"
             if count != len(scans):
-                raise Blocked("Windows did not accept the complete scan-code press")
+                raise Blocked(f"SendInput press accepted {count}/{len(scans)} events (Win32 error {winerror})")
             previous = self._stamp
             until = started + milliseconds / 1000
             while True:
@@ -218,7 +220,11 @@ class Keyboard:
                 if last == stamp:
                     self._stamp = stamp
                 elif self._stamp == stamp or last != previous or monotonic() - started >= 0.05:
-                    raise Blocked("Scan-code input activity changed or was not confirmed")
+                    down = sum(bool(self._state(code) & 0x8000) for code in virtual_keys)
+                    raise Blocked(
+                        f"Scan-code timestamp not confirmed after SendInput accepted {count} events "
+                        f"(Win32 error {winerror}; supplied {stamp}, previous {previous}, observed {last}, "
+                        f"confirmed earlier {self._stamp == stamp}, keys down {down}/{len(virtual_keys)})")
                 remaining = until - monotonic()
                 if remaining <= 0:
                     if self._stamp != stamp:
