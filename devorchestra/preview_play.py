@@ -147,10 +147,10 @@ def run(runner, scope, approval, *, cancelled):
                 nonlocal next_fence_check
                 if cancelled() or time() >= scope["expires"]:
                     raise Blocked("Preview cancelled or approval expired")
-                now = monotonic()
-                if now >= next_fence_check:
+                if monotonic() >= next_fence_check:
                     runner._check_diagnostic_fence(count, fence)
-                    next_fence_check = now + 0.15
+                    # A large ledger can take longer than the minimum poll interval to verify.
+                    next_fence_check = monotonic() + 0.15
 
             def interact(api, job, deadline):
                 def play(window, capture, keyboard):

@@ -234,7 +234,16 @@ class Keyboard:
             while True:
                 if expired.is_set():
                     raise Blocked("Input watchdog stopped an overdue hold")
-                self._check("during the key hold")
+                if monotonic() >= until:
+                    break
+                try:
+                    self._check("during the key hold")
+                except Blocked as error:
+                    if expired.is_set():
+                        raise Blocked("Input watchdog released the held key during a slow guard check") from error
+                    raise
+                if expired.is_set():
+                    raise Blocked("Input watchdog released the held key during a slow guard check")
                 if not all(self._state(code) & 0x8000 for code in virtual_keys):
                     raise Blocked("An approved scan-code key was released during the hold")
                 remaining = until - monotonic()
