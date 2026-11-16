@@ -48,10 +48,11 @@ class _ThreadInfo(c.Structure):
 
 
 class Keyboard:
-    def __init__(self, window, verify_execution, *, max_hold_ms=MAX_HOLD_MS):
+    def __init__(self, window, verify_execution, *, max_hold_ms=MAX_HOLD_MS, hold_check=None):
         user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
         kernel = c.WinDLL("kernel32", winmode=0x800, use_last_error=True)
         self._window, self._verify_execution = window, verify_execution
+        self._hold_check = hold_check or window.check
         self._send = signature(user, "SendInput", w.UINT, w.UINT, c.POINTER(_Input), c.c_int)
         self._last = signature(user, "GetLastInputInfo", w.BOOL, c.POINTER(_LastInput))
         self._focus = signature(user, "GetGUIThreadInfo", w.BOOL, w.DWORD, c.POINTER(_ThreadInfo))
@@ -102,9 +103,12 @@ class Keyboard:
             raise Blocked("Controller is not on the active Windows input desktop")
         return self._desktop_name(desktop)
 
-    def _target(self):
+    def _target(self, *, holding=False):
         window = self._window
-        window.check()
+        if holding:
+            self._hold_check()
+        else:
+            window.check()
         self._verify_execution()
         root = window.owned("root")
         if self._input_desktop() != self._desktop or self._active_controller_desktop() != self._desktop:
@@ -121,8 +125,8 @@ class Keyboard:
             raise Blocked("Windows input activity could not be checked")
         return info.tick
 
-    def _check(self, phase="before next action or observation"):
-        self._target()
+    def _check(self, phase="before next action or observation", *, holding=False):
+        self._target(holding=holding)
         observed = self._last_input()
         if observed != self._stamp:
             raise Blocked(f"Scan-code input stopped after another input event "
@@ -184,7 +188,7 @@ class Keyboard:
             if monotonic() >= deadline:
                 raise Blocked(f"Windows did not confirm scan-code {edge} and key state "
                               f"(submitted {first_tick}–{last_tick}; observed {observed})")
-            self._target()
+            self._target(holding=True)
             sleep(POLL_SECONDS)
 
     def hold(self, keys, milliseconds):
@@ -216,6 +220,7 @@ class Keyboard:
         try:
             with self._release_lock:
                 self._check("before submitting the key press")
+                self._check("arming the timed key press", holding=True)
                 previous = self._stamp
                 started = monotonic()
                 until = started + milliseconds / 1000
@@ -237,7 +242,7 @@ class Keyboard:
                 if monotonic() >= until:
                     break
                 try:
-                    self._check("during the key hold")
+                    self._check("during the key hold", holding=True)
                 except Blocked as error:
                     if expired.is_set():
                         raise Blocked("Input watchdog released the held key during a slow guard check") from error
@@ -256,6 +261,7 @@ class Keyboard:
             release_before = self._ticks()
             try:
                 self.release()
+                released = monotonic()
                 release_after = self._ticks()
             finally:
                 finished.set()
@@ -267,10 +273,11 @@ class Keyboard:
                 self._verify_up(virtual_keys)
         if expired.is_set():
             raise Blocked("Input watchdog stopped an overdue hold")
-        self._target()
+        self._target(holding=True)
         self._confirm_keyboard(self._stamp, release_before, release_after, virtual_keys, down=False)
+        self._target()
         self._usable = True
-        return round((monotonic() - started) * 1000)
+        return round((released - started) * 1000)
 
     def click(self, x, y):
         if not self._usable:

@@ -142,17 +142,23 @@ def run(runner, scope, approval, *, cancelled):
             evidence_dir.mkdir()
             used_bytes = 0
             next_fence_check = 0
+            unconfirmed_release = None
 
-            def check():
-                nonlocal next_fence_check
+            def check_hold():
                 if cancelled() or time() >= scope["expires"]:
                     raise Blocked("Preview cancelled or approval expired")
-                if monotonic() >= next_fence_check:
+
+            def check(*, force=False):
+                nonlocal next_fence_check
+                check_hold()
+                if force or monotonic() >= next_fence_check:
                     runner._check_diagnostic_fence(count, fence)
                     # A large ledger can take longer than the minimum poll interval to verify.
                     next_fence_check = monotonic() + 0.15
+                    check_hold()
 
             def interact(api, job, deadline):
+                nonlocal unconfirmed_release
                 def play(window, capture, keyboard):
                     nonlocal used_bytes
                     client = window.client_in_image()
@@ -183,8 +189,10 @@ def run(runner, scope, approval, *, cancelled):
                             raise Blocked("Preview client geometry changed before input")
                         row = {"action": action, "before": frames[-1]["client_sha256"]}
                         if action["action"] == "keys":
+                            check(force=True)
                             row["held_ms"] = keyboard.hold(action["keys"], action["ms"])
                             row["release"] = keyboard.cleanup
+                            check(force=True)
                         elif action["action"] == "click":
                             keyboard.click(action["x"], action["y"])
                             row["release"] = keyboard.cleanup
@@ -197,9 +205,14 @@ def run(runner, scope, approval, *, cancelled):
                         observe()
                         row["after"] = frames[-1]["client_sha256"]
 
-                inspect_owned_window(api, job, deadline, check, None, workers, play=play,
-                                     executable=executable, capture_fps=scope["fps"],
-                                     desktop_hold_ms=scope["hold_ms"], activate_foreground=True)
+                try:
+                    inspect_owned_window(api, job, deadline, check, None, workers, play=play,
+                                         executable=executable, capture_fps=scope["fps"],
+                                         desktop_hold_ms=scope["hold_ms"], activate_foreground=True,
+                                         hold_check=check_hold)
+                except ReleaseUnconfirmed as error:
+                    unconfirmed_release = error
+                    raise
 
             exit_code = None
             try:
@@ -210,11 +223,10 @@ def run(runner, scope, approval, *, cancelled):
                 exit_code = result["exitCode"]
                 outcome, reason = ("OBSERVED", None) if exit_code == 0 else ("NOT_VALIDATED", "Preview exit failed")
             except OwnedMxcStopped as error:
-                # The launcher reports this only after verifying that its owned Job drained.
+                # The launcher drains the Job before reporting Blocked. That does not verify key-up.
+                if unconfirmed_release is not None:
+                    raise unconfirmed_release from error
                 outcome, reason = "NOT_VALIDATED", str(error)
-            except ReleaseUnconfirmed:
-                # Keep the intent unresolved when the desktop input release could not be verified.
-                raise
             finally:
                 for worker in workers:
                     worker.join(1)

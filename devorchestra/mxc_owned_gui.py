@@ -275,7 +275,7 @@ def _capture(window, path, workers, *, fps=None):
 
 def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, input_probe=False, before_input=None,
                          play=None, executable=None, capture_fps=None, desktop_hold_ms=None,
-                         activate_foreground=False):
+                         activate_foreground=False, hold_check=None):
     process = _require(signature(api, "OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)(0x101000, False, pid))
     member = signature(api, "IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
     try:
@@ -324,7 +324,8 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
                             if monotonic() >= until:
                                 raise Blocked("Approved game did not become foreground")
                             sleep(0.05)
-                    input_adapter = Keyboard(window, verify_execution, max_hold_ms=desktop_hold_ms)
+                    input_adapter = Keyboard(window, verify_execution, max_hold_ms=desktop_hold_ms,
+                                             hold_check=hold_check)
                     try:
                         return play(window, capture, input_adapter)
                     finally:
@@ -365,7 +366,7 @@ def capture_owned_window(api, job, pid, hwnd, check, image_path, workers, *, inp
 
 def inspect_owned_window(api, job, deadline, check, image_path, workers, *, before_input=None, input_probe=True,
                          play=None, executable=None, capture_fps=None, desktop_hold_ms=None,
-                         activate_foreground=False):
+                         activate_foreground=False, hold_check=None):
     user = c.WinDLL("user32", winmode=0x800, use_last_error=True)
     callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
     enum = signature(user, "EnumWindows", w.BOOL, callback, w.LPARAM)
@@ -376,6 +377,11 @@ def inspect_owned_window(api, job, deadline, check, image_path, workers, *, befo
         check()
         if monotonic() >= deadline:
             raise Blocked("Owned verification window did not appear")
+
+    def check_hold():
+        hold_check()
+        if monotonic() >= deadline:
+            raise Blocked("Owned GUI execution deadline reached during input")
 
     while True:
         current()
@@ -399,7 +405,8 @@ def inspect_owned_window(api, job, deadline, check, image_path, workers, *, befo
             return capture_owned_window(api, job, pid, hwnd, current, image_path, workers, input_probe=input_probe,
                                         before_input=before_input, play=play, executable=executable,
                                         capture_fps=capture_fps, desktop_hold_ms=desktop_hold_ms,
-                                        activate_foreground=activate_foreground)
+                                        activate_foreground=activate_foreground,
+                                        hold_check=check_hold if hold_check is not None else None)
         sleep(0.05)
 
 

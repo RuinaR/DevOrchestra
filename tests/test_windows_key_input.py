@@ -40,7 +40,11 @@ class GuardedKeyboardTests(unittest.TestCase):
                 driver._last_input = lambda: last[0]
                 now, last, down, events = [1.0], [1], set(), []
 
-                def target():
+                def target(*, holding=False):
+                    if down:
+                        self.assertTrue(holding, "A held key must never wait for the full execution guard")
+                    elif events and not holding:
+                        now[0] += 0.25  # Post-release audit may be slower than the watchdog grace period.
                     if now[0] >= 1.15 and interruption in {"focus lost", "cancelled"}:
                         raise Blocked(interruption)
                     if now[0] >= 1.15 and interruption == "worker exception":
