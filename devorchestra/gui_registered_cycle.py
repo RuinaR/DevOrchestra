@@ -611,9 +611,20 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     else:
         write_spec(default_verifier)
 
-    def select_godot():
+    def select_godot(*, render_only=False):
+        if render_only:
+            try:
+                value = read_spec()
+            except ValueError as error:
+                state.set(str(error))
+                return
         directory = filedialog.askdirectory(parent=panel, mustexist=True, title="검증된 Godot 엔진과 템플릿의 상위 tools 폴더")
         if not directory:
+            return
+        if render_only:
+            write_spec({**value, "renderer": {**godot_verifier, "tools_root": str(Path(directory))}})
+            use_images.set(True)
+            state.set("독립 검증은 유지하고 별도 Godot 렌더 도구를 검토합니다.")
             return
         write_spec({**godot_verifier, "tools_root": str(Path(directory))})
         if not is_godot and entries["files"].get().strip() == "docs/PROJECT-PLAN.md":
@@ -634,6 +645,9 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                              godot_verifier if is_godot else default_verifier)),
                                          ("Godot GUI 검증", select_godot),
                                          ("Windows 텍스트 검사 예제", windows_text_check)))
+    if is_godot:
+        ttk.Button(advanced, text="별도 Godot 렌더 도구 선택",
+                   command=lambda: select_godot(render_only=True)).pack(anchor="w")
     detail = center.editor_box(body, height=8, state="disabled")
     cancelled = Event()
     future = None
@@ -919,9 +933,13 @@ def show(center, project, *, resume_only=False, continue_progress=False):
             if result.get("visual_review"):
                 summary += ("\n캡처에 성공하면 소유 테스트 창의 PNG 최대 4장을 Codex Reviewer에 전송합니다. "
                             "검토는 Reviewer 토큰 기준에 포함됩니다.")
+                if renderer := result.get("renderer"):
+                    summary += (f"\n별도 Godot 렌더 · {renderer['executable']}\n"
+                                f"렌더 도구 승인 SHA-256 · {digest(renderer)}\n"
+                                "독립 기능 검사는 기존 검증 계약을 사용합니다. GUI 변경은 전후 화면이 필요합니다.")
                 if result.get("visual_preview"):
                     summary += ("\nDeveloper가 세션 임시 폴더에 빌드한 Windows 앱을 오프라인 샌드박스에서 실행해 "
-                                "시작 화면을 캡처합니다. 화면이 준비되기 전에는 코드 검토를 계속합니다.")
+                                "시작 화면을 캡처합니다. 화면이 필요한 GUI 작업에는 전후 캡처가 필요합니다.")
             if candidate := result.get("prior_replica_candidate"):
                 summary += "\n보존할 기존 복제본 변경 · " + ", ".join(candidate["changed"])
                 if candidate.get("unsettled_candidate"):

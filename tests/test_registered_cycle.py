@@ -684,6 +684,20 @@ class RegisteredTrustTests(unittest.TestCase):
             self.assertEqual("USER_TEST_REQUIRED", registered_cycle._expected_final(
                 {"render_review_gate": 1}, "C1", comparison, "ACCEPT"))
 
+    def test_separate_godot_renderer_does_not_replace_deterministic_verifier(self):
+        rc = registered_cycle
+        session = SimpleNamespace(scope={"verifier": {"mode": rc.BASELINE_VERIFIER}, "renderer": {"mode": "test"},
+                                         "criteria": {"C1": {}}, "approved_criterion": "C1"},
+                                  source=lambda: "candidate", check=Mock(), check_image=Mock(), phases=[], record=Mock())
+        with patch.object(rc.game_pilot, "verify_development", return_value={"captured": True}) as render:
+            self.assertEqual({"captured": True}, rc.RegisteredSession.verify_registered(
+                session, "1-baseline", capture_only=True, criterion="C1"))
+            render.assert_called_once_with(session, "1-baseline", capture_only=True)
+            receipt = rc.RegisteredSession.verify_registered(session, 1, criterion="C1")
+            self.assertEqual("PASS", receipt["integrity"])
+            self.assertEqual("NOT_VALIDATED", receipt["verdict"])
+            self.assertEqual(1, render.call_count)
+
     def test_graceful_budget_stop_saves_settled_candidate_before_new_role(self):
         scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Work", "checks": []}},
                  "cycles": None, "graceful_stop": {}, "verifier": {}}

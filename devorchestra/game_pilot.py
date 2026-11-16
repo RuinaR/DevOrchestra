@@ -524,7 +524,7 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
 def verify_development(session, cycle, *, capture_only=False):
     """Build the reviewed candidate under the session fence and preserve independent EXE evidence."""
     scope = session.scope
-    tool = scope["verifier"]
+    tool = (scope.get("renderer") if capture_only else None) or scope["verifier"]
     approved = scope.get("approved_criterion")
     # The legacy game check is bound only to its Windows-launch criterion.
     generic = tool["mode"] == REGISTERED_GUI or approved not in (None, CRITERIA[0])

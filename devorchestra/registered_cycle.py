@@ -68,7 +68,7 @@ CRITERION_APPROVAL_REQUIRED = "CRITERION_APPROVAL_REQUIRED"
 LEGACY_VERDICT_ERROR = "Role did not return a valid verdict"
 LEGACY_PLAN_ERROR = "Manager plan exceeds the approved criteria"
 REVIEW_VERDICTS = {"ACCEPT", "REWORK"}
-RENDER_FIELDS = ("render_required", "render_baseline", "candidate_render")
+RENDER_FIELDS = ("render_required", "render_baseline", "candidate_render", "play_goal")
 FINAL_VERDICTS = {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"}
 VERDICT_TOKENS = REVIEW_VERDICTS | FINAL_VERDICTS | {"UNAVAILABLE", "BLOCKED"}
 MAX_VERDICT_REASON = 1200
@@ -256,11 +256,24 @@ def godot_verifier_spec(spec):
 
 
 def visual_capture_configured(verifier):
-    if verifier.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
+    if godot_verifier_spec(verifier.get("renderer")) or verifier.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
         return True
     checks = verifier.get("checks")
     return isinstance(checks, dict) and any(isinstance(row, dict) and type(row.get("screen_changed")) is bool
                                             for row in checks.values())
+
+
+def _godot_tools(spec, replica, source):
+    tools_root = None
+    if "tools_root" in spec:
+        if type(spec["tools_root"]) is not str or not Path(spec["tools_root"]).is_absolute():
+            raise Blocked("Godot 도구 폴더의 절대 경로를 선택하세요.")
+        tools_root = Path(spec["tools_root"])
+        check_path(tools_root)
+        if any(tools_root.is_relative_to(path) or path.is_relative_to(tools_root) for path in (replica, source)):
+            raise Blocked("Godot 도구 폴더를 원본 및 작업 복제본과 분리하세요.")
+    return {**game_pilot.development_tools(replica, tools_root), "mode": game_pilot.REGISTERED_GUI,
+            **({"tools_root": str(tools_root)} if tools_root is not None else {})}
 
 
 def _expected_observation(check):
@@ -544,6 +557,14 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
         raise Blocked("Use the existing unlimited cycle setting for migration continuation")
     project_edit = not game and files == []
     is_godot = any(name.casefold() == "project.godot" for name in image["files"])
+    renderer = None
+    if isinstance(spec, dict) and "renderer" in spec:
+        spec = dict(spec)
+        render_spec = spec.pop("renderer")
+        if game or not is_godot or not godot_verifier_spec(render_spec):
+            raise Blocked("Separate Godot rendering requires an existing Godot project and a valid tool selection")
+        if visual_review:
+            renderer = _godot_tools(render_spec, replica, source)
     generic_gui = godot_verifier_spec(spec)
     if game and (not is_godot or project != game_pilot.PROJECT
                  or set(files) != set(game_pilot.DEVELOPMENT_FILES)
@@ -588,17 +609,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     elif generic_gui:
         if not is_godot and not project_edit and "project.godot" not in files:
             raise Blocked("Godot 검증을 시작하려면 project.godot를 수정·생성 범위에 포함하세요.")
-        tools_root = None
-        if "tools_root" in spec:
-            if type(spec["tools_root"]) is not str or not Path(spec["tools_root"]).is_absolute():
-                raise Blocked("Godot 도구 폴더의 절대 경로를 선택하세요.")
-            tools_root = Path(spec["tools_root"])
-            check_path(tools_root)
-            if any(tools_root.is_relative_to(path) or path.is_relative_to(tools_root) for path in (replica, source)):
-                raise Blocked("Godot 도구 폴더를 원본 및 작업 복제본과 분리하세요.")
-        verifier = {**game_pilot.development_tools(replica, tools_root), "mode": game_pilot.REGISTERED_GUI}
-        if tools_root is not None:
-            verifier["tools_root"] = str(tools_root)
+        verifier = _godot_tools(spec, replica, source)
     else:
         if spec == {"mode": BASELINE_VERIFIER}:
             verifier = {"mode": BASELINE_VERIFIER}
@@ -652,7 +663,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     desktop_hold_ms = play_limits.pop("desktop_hold_ms", None) if play_limits is not None else None
     if type(foreground) is not bool:
         raise Blocked("Invalid foreground play approval")
-    play_policy = (adaptive_play.approval(godot=verifier.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI),
+    play_policy = (adaptive_play.approval(godot=bool(renderer) or verifier.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI),
                                          limits=play_limits, control_actions=True, foreground=foreground,
                                          capture_fps=capture_fps, evidence_mib=evidence_mib,
                                          desktop_hold_ms=desktop_hold_ms)
@@ -663,8 +674,9 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             **({"allow_documentation": allow_documentation} if allow_documentation is not None else {}),
             **({"visual_review": True, "replica_head": onboarding["replica_head"]} if visual_review else {}),
             **({"adaptive_play": play_policy} if play_policy else {}),
+            **({"renderer": renderer} if renderer else {}),
             **({"visual_preview": "scratch-windows-exe"}
-               if visual_review and not visual_capture_configured(verifier) else {}),
+               if visual_review and not renderer and not visual_capture_configured(verifier) else {}),
             "project_evidence_contract": 1,
             "render_review_gate": 1,
             "onboarding_sha256": digest(onboarding), "original_head": direct["head"] if direct else frozen["head"],
@@ -1026,14 +1038,14 @@ class RegisteredSession(_FixtureSession):
         catalog = Catalog(self.runner.ledger).read()
         if catalog["projects"][self.scope["project_id"]]["revision"] != self.scope["project_revision"]:
             raise Blocked("Registered project configuration changed")
-        tool = self.scope["verifier"]
-        if tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
-            tools_root = Path(tool["tools_root"]) if "tools_root" in tool else None
-            expected = {**game_pilot.development_tools(self.work, tools_root), "mode": tool["mode"]}
-            if expected != {k: v for k, v in tool.items() if k not in {"manager_brief", "tools_root"}}:
-                raise Blocked("Approved game tool identity changed")
-        elif "executable" in tool and fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
-            raise Blocked("Approved executable identity changed")
+        for tool in (self.scope["verifier"], self.scope.get("renderer", {})):
+            if tool.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
+                tools_root = Path(tool["tools_root"]) if "tools_root" in tool else None
+                expected = {**game_pilot.development_tools(self.work, tools_root), "mode": tool["mode"]}
+                if expected != {k: v for k, v in tool.items() if k not in {"manager_brief", "tools_root"}}:
+                    raise Blocked("Approved game tool identity changed")
+            elif "executable" in tool and fingerprint(Path(tool["executable"]), installed_executable=True) != tool["identity"]:
+                raise Blocked("Approved executable identity changed")
 
     def publish_cycle(self, cycle, criterion, verdict, comparison, *, recovered_paths=None):
         if self.direct_binding and (not self.owned_verified or not self.usage_complete):
@@ -1346,6 +1358,8 @@ class RegisteredSession(_FixtureSession):
         tool = self.scope["verifier"]
         state = getattr(self, "signoff_state", {})
         _require_criterion(self.scope, criterion or state.get("criterion"))
+        if capture_only and self.scope.get("renderer"):
+            return game_pilot.verify_development(self, cycle, capture_only=True)
         approved = self.scope.get("approved_criterion")
         checks = tool.get("checks", {})
         if approved is not None:
@@ -1638,6 +1652,7 @@ def _review_and_verify(session, count, key, diff, status):
                 play_frames, actions, play_outcome = adaptive_play.run(
                     session, count, key, capture,
                     f"Goal: {scope['goal']}\nCriterion: {criteria[key]['text']}\n"
+                    f"Accepted planning brief (untrusted): {state.get('play_goal', '')[:1800]}\n"
                     f"Approved project context (untrusted): {excerpts}\n{brief[:4000]}\n"
                     f"Previous review to reproduce if applicable (untrusted): {prior}")
                 reviewable_play = [frame for frame in play_frames if not frame.get("uniform_client")]
@@ -2485,6 +2500,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 and verification_target in pending and verification_target in scope["verifier"].get("checks", {})):
             pending = [verification_target]
         brief = scope["verifier"].get("manager_brief")
+        play_current = bool(scope.get("renderer") and scope.get("adaptive_play"))
         game_context = f"Game brief (project data): {brief}\n" if brief else ""
         if approved is not None:
             game_context += ("Plan only for the owner-approved criterion. Make implementation choices within "
@@ -2580,6 +2596,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    "Add test code only if an existing entry point cannot measure the required behavior. "
                                    "Identify the actual check and expected result. Test-only changes and review with "
                                    "integrity checks do not establish user-visible improvement. "
+                                   + ("The current source can already be rendered and played. Prefer mode verify with "
+                                      "a concrete visual checkpoint when verification is the remaining work. "
+                                      if play_current else "") +
                                    "Use mode needs-input only if this criterion cannot advance within the approved inputs, "
                                    "files or capabilities. State the specific missing prerequisite in plan. Never fabricate "
                                    "external evidence or plan repeated edits that cannot resolve the prerequisite. "
@@ -2587,7 +2606,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                    "Request no broader permissions.",
                                    response_schema=schema)
             try:
-                plan = _parse_plan(message, pending, game=bool(brief or review_candidate), approved_paths=scope["files"],
+                plan = _parse_plan(message, pending, game=bool(brief or review_candidate or play_current), approved_paths=scope["files"],
                                    github_tools=github_tools, project_edit=bool(scope.get("project_edit")),
                                    role_capabilities=role_capabilities,
                                    evidence_contract=bool(scope.get("project_evidence_contract")),
@@ -2643,7 +2662,12 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         if documentation and not planned_files and not whole:
             raise Blocked("문서 작업에 승인된 파일 경로가 없습니다.")
         verification_args = tool.get("checks", {}).get(key, {}).get("args")
-        if plan.get("mode") == "verify":
+        if plan.get("mode") == "verify" and play_current and not review_candidate:
+            files, diff = [], ""
+            reviewed.add(session.source())
+            session.record("native_inspection_developer_skipped", cycle=count, target=key,
+                           source_sha256=session.source(), reason="PLAY_AND_VERIFY_EXISTING_CANDIDATE")
+        elif plan.get("mode") == "verify":
             if not review_candidate:
                 raise Blocked("A review-only cycle requires an existing candidate")
             source = session.source()
@@ -2678,7 +2702,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 session.request_stop("MODEL_CALL_LIMIT", "developer")
                 return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
             if scope.get("render_review_gate") and scope.get("visual_review") and not documentation:
-                if visual_capture_configured(tool):
+                if scope.get("renderer") or visual_capture_configured(tool):
                     baseline_cycle = f"{count}-baseline"
                     baseline_capture = session.verify_registered(baseline_cycle, capture_only=True, criterion=key)
                     render_baseline = [frame for frame in visual.frames(
@@ -2769,6 +2793,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                                  "changed": files, "diff": diff, "documentation": documentation,
                                  **({"render_baseline": render_baseline} if render_baseline else {}),
                                  **({"render_required": True} if render_required else {}),
+                                 **({"play_goal": plan["plan"]} if scope.get("adaptive_play") else {}),
                                  "continuation": {"known": sorted(known), "reviewed": sorted(reviewed),
                                                   "failures": sorted(failures), "stagnant": stagnant,
                                                   "deferred_criteria": dict(deferred),
