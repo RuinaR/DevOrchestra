@@ -2553,8 +2553,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             outstanding = sum(value != "VERIFIED" for value in status.values())
             _handoff(session, count, "manager-planning",
                      f"{previous_text}미검증 기준 {outstanding}개 · 이번 계획 후보 {len(pending)}개.")
-            modes = ["edit", "needs-input"] + (["verify"] if review_candidate else [])
-            if scope.get("allow_documentation") is not False:
+            modes = (["verify", "needs-input"] if scope.get("gui_preview") else
+                     ["edit", "needs-input"] + (["verify"] if review_candidate or play_current else []))
+            if not scope.get("gui_preview") and scope.get("allow_documentation") is not False:
                 modes.append("documentation")
             schema = _response_schema(criterion=pending, mode=modes, plan=None)
             evidence_prompt = ""
@@ -2641,7 +2642,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 count -= 1
                 save_checkpoint()
                 return MANUAL_CHECKPOINT
-            if role_capabilities:
+            if role_capabilities and not scope.get("gui_preview"):
                 repaired = _repair_planning_handoff(plan, developer_capabilities)
                 if repaired is not plan:
                     session.record("native_inspection_planning_handoff_corrected", cycle=count,

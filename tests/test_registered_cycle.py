@@ -698,6 +698,22 @@ class RegisteredTrustTests(unittest.TestCase):
             self.assertEqual("NOT_VALIDATED", receipt["verdict"])
             self.assertEqual(1, render.call_count)
 
+    def test_prebuilt_preview_manager_schema_offers_only_verification(self):
+        rc = registered_cycle
+        scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Work", "checks": []}},
+                 "approved_criterion": "C1", "goal": "Work", "files": ["src/app.cs"],
+                 "cycles": 1, "requirements": [], "verifier": {}, "gui_preview": {"entry": "app.exe"},
+                 "adaptive_play": {"steps": 3}}
+        session = SimpleNamespace(scope=scope, image={"files": {}}, runner=Mock(), changes=[], record=Mock(),
+                                  source=lambda: "snapshot", owned_verified=True, usage_complete=True,
+                                  check=Mock(), check_image=Mock(), publish_cycle=Mock(),
+                                  call=Mock(return_value=json.dumps({"criterion": "C1", "plan": "Edit", "mode": "edit"})))
+        with (patch.object(rc, "Catalog"), patch.object(rc, "read_frozen_requirements", return_value=[])):
+            self.assertEqual(rc.NEEDS_INPUT, rc._cycles(session))
+        session.call.assert_called_once()
+        modes = session.call.call_args.kwargs["response_schema"]["properties"]["mode"]["enum"]
+        self.assertEqual({"verify", "needs-input"}, set(modes))
+
     def test_graceful_budget_stop_saves_settled_candidate_before_new_role(self):
         scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Work", "checks": []}},
                  "cycles": None, "graceful_stop": {}, "verifier": {}}
