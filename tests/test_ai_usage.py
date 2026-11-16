@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from concurrent.futures import Future
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -11,6 +12,24 @@ from devorchestra.ledger import digest
 
 
 class UsageTests(unittest.TestCase):
+    def test_registered_start_waits_for_own_quota_query_and_blocks_new_badge_queries(self):
+        from devorchestra.gui import CommandCenter
+
+        badge = UsageBadge.__new__(UsageBadge)
+        query = Future()
+        center = Mock(registered_job=None, usage_badge=badge, view=None)
+        badge.center, badge.future, badge.cancelled = center, query, False
+
+        with patch("devorchestra.gui.Thread") as launch:
+            self.assertTrue(CommandCenter.start_registered_run(center, {"project_id": "fixture"}, Mock(), Mock()))
+            launch.assert_not_called()
+            query.set_result({"status": "AVAILABLE"})
+            launch.return_value.start.assert_called_once_with()
+        badge.future = None
+        with patch("devorchestra.gui_usage.Thread") as badge_worker:
+            badge.refresh()
+            badge_worker.assert_not_called()
+
     def test_official_read_uses_only_account_rpcs_and_classifies_failures(self):
         valid = {"rateLimits": {"primary": {"usedPercent": 89},
                                 "credits": {"hasCredits": False, "unlimited": False}},

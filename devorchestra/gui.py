@@ -1081,6 +1081,7 @@ class CommandCenter:
 
         if self.registered_job and not self.registered_job["future"].done():
             return False
+        quota_query = self.usage_badge.future
         future = Future()
         activities = deque(maxlen=400)
         activity_lock = Lock()
@@ -1103,7 +1104,15 @@ class CommandCenter:
             except Exception as error:
                 future.set_exception(error)
 
-        Thread(target=work, daemon=False).start()
+        def start_worker(_query=None):
+            Thread(target=work, daemon=False).start()
+
+        # The informational quota worker releases the same Windows slot before settling.
+        # Queue behind it so the already-reviewed run can acquire and revalidate its contract.
+        if quota_query is None:
+            start_worker()
+        else:
+            quota_query.add_done_callback(start_worker)
         self.request_refresh()
         return True
 

@@ -48,7 +48,8 @@ class UsageBadge:
     def refresh(self):
         from .codex_setup import run
 
-        if self.future is not None or self.cancelled:
+        job = self.center.registered_job
+        if self.future is not None or self.cancelled or (job and not job["future"].done()):
             return
         self.last_query = monotonic()
         future = self.future = Future()
