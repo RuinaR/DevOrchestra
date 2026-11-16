@@ -146,6 +146,7 @@ class ProjectionTests(unittest.TestCase):
         center.project = Mock()
         center.project.current.return_value = 0
         center.view = None
+        center.page = "dashboard"
         center.registered_job = None
         center.registered_history = None
         center.card_frames = {}
@@ -156,7 +157,7 @@ class ProjectionTests(unittest.TestCase):
         center.clear = Mock(wraps=center.clear)
         for attr in ("global_badge", "mission", "goal", "project_states", "development_button", "development_options", "gates",
                      "safety", "resources", "run_filter", "role_filter", "render_audit",
-                     "overview", "verify_overview", "approval_button",
+                     "overview", "verify_overview", "approval_button", "dashboard_result",
                      "registered_status", "registered_detail", "registered_cancel", "registered_history_button",
                      "registered_meter", "registered_metrics", "registered_budget", "registered_task",
                      "registered_issues", "registered_recent", "registered_criteria_button",

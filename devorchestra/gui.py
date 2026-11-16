@@ -255,37 +255,47 @@ class CommandCenter:
         self.project_states = label(projects, fg=MUTED)
         self.project_states.pack(fill="x")
 
-        mission = section(command, "현재 작업")
+        mission = section(command, "현재 개발")
         mission.grid(row=0, column=0, sticky="ew")
         self.mission = label(mission, size=18, bold=True)
         self.mission.pack(fill="x", pady=(4, 0))
         self.goal = label(mission, fg=MUTED)
         self.goal.pack(fill="x")
-        on_width(mission, lambda width: self.goal.configure(wraplength=max(240, width - 40)))
-        self.development_button = ttk.Button(mission, text="개발 시작 준비",
+        def wrap_mission(width):
+            for widget in (self.mission, self.goal):
+                widget.configure(wraplength=max(220, width - 36))
+
+        on_width(mission, wrap_mission)
+        actions = tk.Frame(mission, bg=PANEL)
+        actions.pack(fill="x", pady=(12, 0))
+        self.development_button = ttk.Button(actions, text="개발 시작·재개",
                                              command=self.prepare_selected_project,
                                              style="Primary.TButton", state="disabled")
-        self.development_button.pack(fill="x", pady=(8, 2))
-        self.development_options = ttk.Button(mission, text="감독형 작업과 추가 옵션", command=self.development_start,
+        self.development_button.pack(side="left")
+        ttk.Button(actions, text="진행 상황", command=lambda: self.navigate("operations")).pack(side="left", padx=6)
+        self.development_options = ttk.Button(projects, text="감독형 작업과 추가 옵션", command=self.development_start,
                                               state="disabled")
-        self.development_options.pack(fill="x", pady=(2, 0))
+        self.development_options.pack(anchor="w", pady=(6, 0))
         self.question_button = ttk.Button(mission, text="사용자 응답 대기 없음", state="disabled",
                                           command=self.answer_question)
-        self.question_button.pack(fill="x", pady=(4, 0))
 
-        hero = tk.Frame(body, bg=ui_design.HERO, padx=22, pady=18)
+        hero = tk.Frame(body, bg=BG, padx=2, pady=8)
         hero.grid(row=1, column=0, sticky="ew", padx=18, pady=(10, ui_design.GAP))
-        label(hero, "개발 상황판", size=24, bg=ui_design.HERO, bold=True).pack(anchor="w", pady=(2, 4))
-        self.overview = label(hero, bg=ui_design.HERO, fg=MUTED)
+        label(hero, "개발 상황판", size=22, bg=BG, bold=True).pack(anchor="w", pady=(2, 4))
+        self.overview = label(hero, bg=BG, fg=MUTED)
         self.overview.pack(anchor="w")
-        self.action_grid(hero, (("시작하기", self.setup_wizard), ("AI 사용량", self.ai_usage_panel)),
-                         background=ui_design.HERO)
-
-        briefing = section(body, "다음 행동과 안전 경계")
+        briefing = section(body, "다음 단계")
         briefing.grid(row=5, column=0, sticky="ew", padx=18, pady=(0, ui_design.GAP))
         self.next_brief = label(briefing, size=12, bold=True, fg=CYAN, wraplength=690)
         self.next_brief.pack(fill="x")
-        label(briefing, SAFETY_NOTE, fg=MUTED, wraplength=690).pack(fill="x", pady=(5, 0))
+        self.dashboard_result = label(briefing, fg=MUTED)
+        self.dashboard_result.pack(fill="x", pady=(7, 0))
+        on_width(briefing, lambda width: (
+            self.next_brief.configure(wraplength=max(220, width - 36)),
+            self.dashboard_result.configure(wraplength=max(220, width - 36)),
+        ))
+        self.action_grid(briefing, (("목표와 완료 기준", self.show_project_goals),
+                                    ("실행 결과", lambda: self.navigate("verification"))))
 
         safety = section(body, "안전과 예산")
         safety.grid(row=6, column=0, sticky="ew", padx=16, pady=8)
@@ -326,7 +336,7 @@ class CommandCenter:
         lane = tk.Frame(flow, bg=PANEL)
         lane.pack(fill="x", pady=(5, 0))
         self.phases = []
-        for name in ("PLAN", "DEVELOP", "REVIEW", "VERIFY", "DECIDE"):
+        for name in ("계획", "개발", "검토", "독립 검증", "최종 판정"):
             phase = REGISTERED_PHASES[len(self.phases)]
             role = {"manager-planning": "Manager", "manager-final": "Manager"}.get(phase, phase.capitalize())
             badge = tk.Button(lane, bg=TILE, fg=INK, relief="flat", bd=0, justify="left", anchor="w",
@@ -381,8 +391,10 @@ class CommandCenter:
         ttk.Button(operators, text="GUI 증거", command=self.gui_verification_report).pack(side="left")
         self.cards = {}
         self.card_frames = {}
-        roster = tk.Frame(briefing, bg=PANEL)
-        roster.pack(fill="x", pady=(8, 0))
+        roster_section = section(operations, "역할별 실행 상세")
+        roster_section.pack(fill="x", pady=(8, 0))
+        roster = tk.Frame(roster_section, bg=PANEL)
+        roster.pack(fill="x")
         for role in ROLE_MARKS:
             card = tk.Frame(roster, bg=TILE, padx=8, pady=4, highlightthickness=2,
                             highlightbackground=TILE)
@@ -412,6 +424,7 @@ class CommandCenter:
         permissions.grid(row=3, column=0, sticky="ew", padx=18)
         label(permissions, "프로젝트별 권한과 한도를 저장합니다. 실제 실행 범위는 승인할 때 확정됩니다.",
               fg=MUTED, wraplength=460).pack(fill="x")
+        label(permissions, SAFETY_NOTE, fg=MUTED, wraplength=460).pack(fill="x", pady=(5, 0))
         self.action_grid(permissions, (("권한·시간·사용량 설정", self.registered_development),
                                        ("사용자 승인 대기", lambda: self.navigate("approval"))))
         advanced = section(body, "고급 도구")
@@ -526,6 +539,11 @@ class CommandCenter:
             elif frame not in outgoing:
                 frame.grid()
         self.page = page
+        if self.view:
+            if page == "records":
+                self.observation.grid()
+            else:
+                self.observation.grid_remove()
         self.details_visible = page == "operations"
         if self.details_visible:
             self.operations_header.grid(row=1, column=0, sticky="ew")
@@ -747,6 +765,10 @@ class CommandCenter:
         if _event is None:
             self.refresh()
             return
+        self.mission.configure(text=f"{self.project.get()} · 불러오는 중", fg=MUTED)
+        self.goal.configure(text="")
+        self.next_brief.configure(text="")
+        self.dashboard_result.configure(text="")
         self.development_button.configure(state="disabled")
         self.development_options.configure(state="disabled")
         self.request_refresh()
@@ -847,6 +869,10 @@ class CommandCenter:
                 self.root.after(900, lambda: self.shutdown_command("finalize", expected=key))
         self.observation.configure(text=f"검증 원장  /  Seq {seq} · "
                                    f"{tail[:12] or 'empty'}  /  Verified {view['as_of_utc']}")
+        if self.page == "records":
+            self.observation.grid()
+        else:
+            self.observation.grid_remove()
 
     def clear(self, reason, *, first_run=False):
         self.view = None
@@ -856,6 +882,7 @@ class CommandCenter:
         self.global_badge.configure(text="처음 시작" if first_run else "저장소 확인 필요",
                                     fg=CYAN if first_run else RED)
         self.observation.configure(text=reason)
+        self.observation.grid()
         self.mission.configure(text="첫 실행 안내" if first_run else "저장소 확인 필요",
                                fg=CYAN if first_run else RED)
         self.goal.configure(text=reason, wraplength=350)
@@ -893,6 +920,11 @@ class CommandCenter:
             )
             self.approval_button.configure(text=self.question_button.cget("text"),
                                            state="normal" if pending else "disabled")
+            if pending:
+                if not self.question_button.winfo_manager():
+                    self.question_button.pack(anchor="w", pady=(8, 0))
+            else:
+                self.question_button.pack_forget()
         run, current = view["run"], view["global_run"]
         state = view["global_state"]
         global_project = current["project"]["name"] if current else "No run"
@@ -939,7 +971,8 @@ class CommandCenter:
         active = workflow.get("subscription_session")
         summary = (f'통합 개발 {active["status"]} · 보고 {active["reported_tokens"]} 토큰'
                    if active else "통합 개발 기록 없음")
-        self.overview.configure(text=f"{readable_state}   /   요구사항 {workflow['requirements_count']}개   /   {summary}",
+        self.overview.configure(text=f"{readable_state}  ·  요구사항 {workflow['requirements_count']}개"
+                                + (f"  ·  {summary}" if active else ""),
                                 wraplength=470)
         self.verify_overview.configure(text=cycle_label.lstrip() or "선택 프로젝트의 실행 근거와 이미지를 확인하세요.")
         _, stage_title, stage_next = handoff_stage(handoff)
@@ -947,21 +980,15 @@ class CommandCenter:
             waiting = view.get("user_question")
             self.next_brief.configure(text=("사용자 질문에 답변하세요." if waiting else stage_next if handoff
                                            else next_action))
-        self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}", wraplength=440,
+        self.mission.configure(text=f"{view['project_name']}  /  {view['project_state']}",
                                fg=color(view["project_state"]))
         registration = view["registration"]
         configured = registration["data"] if registration else None
         goal = "프로젝트를 등록하고 첫 요구사항을 추가하세요."
         if configured:
             text = configured["goal"]
-            goal = "개발 목표\n" + text[:380] + ("…" if len(text) > 380 else "")
-            criteria = configured["acceptance"]
-            goal += "\n완료 기준\n" + "\n".join("• " + line[:125] + ("…" if len(line) > 125 else "")
-                                                   for line in criteria[:3])
-            if len(criteria) > 3:
-                goal += f"\n외 {len(criteria) - 3}개 · 목표와 완료 기준 편집에서 확인"
-            if getattr(self, "page", None) == "operations" and view.get("registered_progress"):
-                goal = " ".join(text.split())[:185] + ("…" if len(" ".join(text.split())) > 185 else "")
+            goal = next((line.strip().lstrip("# ").strip() for line in text.splitlines() if line.strip()), "")
+            goal = goal[:170] + ("…" if len(goal) > 170 else "")
         if handoff:
             goal += "\n감독형 작업 · " + stage_title
             if handoff.get("artifacts"):
@@ -1088,6 +1115,7 @@ class CommandCenter:
                 self.render_registered(self.view)
 
     def clear_registered_summary(self):
+        self.dashboard_result.configure(text="최근 자동 개발 기록 없음")
         self.registered_status.configure(text="자동 개발 기록 대기", fg=MUTED)
         if hasattr(self, "operations_heading"):
             self.operations_heading.configure(text="개발 대기", fg=MUTED)
@@ -1108,6 +1136,18 @@ class CommandCenter:
         detail = self.editor_box(panel, height=20)
         detail.insert("1.0", text)
         detail.configure(state="disabled")
+
+    def show_project_goals(self):
+        if self.view is None:
+            return
+        registration = self.view.get("registration")
+        if not registration:
+            self.register_project()
+            return
+        configured = registration["data"]
+        entries = "\n".join(f"{number}. {criterion}"
+                            for number, criterion in enumerate(configured["acceptance"], 1))
+        self.registered_readout("목표와 완료 기준", f"{configured['goal']}\n\n완료 기준\n{entries}")
 
     def show_registered_criteria(self):
         progress = (self.view or {}).get("registered_progress")
@@ -1197,6 +1237,22 @@ class CommandCenter:
         total = len(scope["criteria"])
         verified = counts.get("VERIFIED", 0)
         changed = (progress or {}).get("changed", ())
+        publication = next((event for event in reversed(view["events"])
+                            if event["kind"] == "direct_git_pushed"
+                            and event.get("project_id") == view["project_id"]
+                            and event.get("commit") and event.get("commit") == event.get("remote_head")), None)
+        published_commit = publication["commit"] if publication else None
+        outcome_lines = [f"최근 작업 · {label_text}" if end else heading]
+        if changed:
+            outcome_lines.append(f"변경 파일 {len(changed)}개")
+        if published_commit:
+            outcome_lines.append("최근 게시 완료")
+        if reason:
+            reason_text = " ".join(str(reason).split())
+            outcome_lines.append(reason_text[:135] + ("…" if len(reason_text) > 135 else ""))
+        self.dashboard_result.configure(text="  ·  ".join(outcome_lines))
+        if end and state == "USER_TEST_REQUIRED" and not view.get("user_question"):
+            self.next_brief.configure(text="남은 검증과 다음 작업을 진행 상황에서 확인")
         for widget, value in zip(self.registered_values, (
                 f"{verified} / {total}\n독립 검증 완료", f"{counts.get('IMPLEMENTED', 0)}\n구현 검토 · 검증 대기",
                 f"{counts.get('REWORK', 0)} / {counts.get('BLOCKED', 0) + counts.get('NEEDS_INPUT', 0)}\n재작업 / 차단·입력 대기",
@@ -1249,10 +1305,9 @@ class CommandCenter:
         if delivery.get("independent_criterion_improvement"):
             review_summary.append("완료 기준 독립 검증 확인")
         if git := (progress or {}).get("direct_git"):
-            review_summary.append(f"직접 Git · {git['branch'].removeprefix('refs/heads/')} · {git['status']}")
-            review_summary.append(f"로컬 {(git['local'] or '—')[:12]} · 원격 {(git['remote'] or '—')[:12]}")
+            review_summary.append(f"작업 시점 Git · {git['branch'].removeprefix('refs/heads/')} · {git['status']}")
             detail.extend((f"원본 직접 Git · {scope['original']}",
-                           f"로컬 HEAD {git['local'] or '—'} · 원격 HEAD {git['remote'] or '—'}"))
+                           f"작업 시점 로컬 HEAD {git['local'] or '—'} · 원격 HEAD {git['remote'] or '—'}"))
             if git["error"]:
                 review_summary.append(git["error"])
         elif scope.get("development_mode") == "LOCAL_FOLDER":
@@ -1260,6 +1315,9 @@ class CommandCenter:
             review_summary.append("일반 폴더 · 개발 사본에 보관")
             review_summary.append("원본 반영 · " + (applied["result"] if applied else "대기"))
             detail.append(f"개발 결과 저장 위치 · {scope['replica']}")
+        if published_commit:
+            review_summary.append(f"최근 게시 · {published_commit[:12]}")
+            detail.append(f"최근 Controller 게시 SHA · {published_commit}")
         if play := (progress or {}).get("play"):
             play_state = {"FOREGROUND_UNSAFE": "전경 창 감지 · 입력 차단",
                           "WINDOW_OR_CAPTURE_UNAVAILABLE": "사용 가능한 게임 화면 없음",
@@ -2022,6 +2080,7 @@ class CommandCenter:
         if edit and not existing:
             panel.destroy()
             self.observation.configure(text="편집할 프로젝트를 선택하세요.")
+            self.observation.grid()
             return
         panel.title("프로젝트 편집" if edit else "프로젝트 등록 · 2 / 4" if on_saved else "프로젝트 등록")
         panel.configure(padx=16, pady=12)
@@ -3255,6 +3314,7 @@ class CommandCenter:
     def supervised_work(self):
         if not self.view or not self.view["registration"]:
             self.observation.configure(text="프로젝트를 먼저 등록하세요.")
+            self.observation.grid()
             return
         project_id = self.view["project_id"]
         panel = self.panel()
@@ -3456,6 +3516,7 @@ class CommandCenter:
     def requirement_settings(self):
         if self.view is None or not self.view["registration"]:
             self.observation.configure(text="프로젝트를 먼저 등록하세요.")
+            self.observation.grid()
             return
         project_id = self.view["project_id"]
         panel = self.panel()
@@ -3645,6 +3706,7 @@ class CommandCenter:
         registration = self.view["registration"]
         if mode == "edit" and registration is None:
             self.observation.configure(text="Built-in fixture or missing registration. Use Register for a new project.")
+            self.observation.grid()
             return
         if mode == "reserve":
             value, revision = self.view["token_policy"], self.view["catalog_version"]
