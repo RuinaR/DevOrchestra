@@ -661,6 +661,29 @@ class RegisteredTrustTests(unittest.TestCase):
         self.assertEqual("TEST_CHANGES_ONLY", comparison["progress_basis"])
         self.assertEqual(set(), accepted)
 
+    def test_render_gate_blocks_code_only_gui_acceptance(self):
+        scope = {"render_review_gate": 1, "criteria": {"C1": {"text": "Tutorial"}}}
+        session = SimpleNamespace(scope=scope, signoff_state={"changed": ["scenes/tutorial.tscn"]},
+                                  source=lambda: "candidate", call=Mock(), record=Mock(),
+                                  fields={"run_id": "test"})
+        with patch.object(registered_cycle, "_verify_signoff", return_value=({}, {})):
+            self.assertEqual("REWORK", registered_cycle._review_and_verify(session, 1, "C1", "diff", {})[1])
+        session.call.assert_not_called()
+        self.assertIn("native_inspection_render_gate_blocked", [row.args[0] for row in session.record.call_args_list])
+
+    def test_render_comparison_and_product_completion(self):
+        before = {"id": "F1", "source_sha256": "baseline", "scenario": "hud", "step": "startup", "sha256": "a"}
+        after = {**before, "source_sha256": "candidate", "sha256": "b"}
+        pair = registered_cycle._render_pair
+        self.assertEqual([{**before, "id": "BASELINE"}, after], pair([before], [after], "candidate"))
+        self.assertEqual([], pair([before], [{**after, "scenario": "result"}], "candidate"))
+        self.assertEqual([], pair([after], [after], "candidate"))
+        self.assertEqual([], pair([before], [{**after, "uniform_client": True}], "candidate"))
+        for flag in ("document_only", "test_changes_only"):
+            comparison = {"criteria": {"C1": "VERIFIED"}, "regressed": [], "delivery": {flag: True}}
+            self.assertEqual("USER_TEST_REQUIRED", registered_cycle._expected_final(
+                {"render_review_gate": 1}, "C1", comparison, "ACCEPT"))
+
     def test_graceful_budget_stop_saves_settled_candidate_before_new_role(self):
         scope = {"project_id": "fixture", "criteria": {"C1": {"text": "Work", "checks": []}},
                  "cycles": None, "graceful_stop": {}, "verifier": {}}

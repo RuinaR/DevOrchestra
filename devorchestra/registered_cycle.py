@@ -68,6 +68,7 @@ CRITERION_APPROVAL_REQUIRED = "CRITERION_APPROVAL_REQUIRED"
 LEGACY_VERDICT_ERROR = "Role did not return a valid verdict"
 LEGACY_PLAN_ERROR = "Manager plan exceeds the approved criteria"
 REVIEW_VERDICTS = {"ACCEPT", "REWORK"}
+RENDER_FIELDS = ("render_required", "render_baseline", "candidate_render")
 FINAL_VERDICTS = {"CONTINUE", "REWORK", "COMPLETED", "USER_TEST_REQUIRED"}
 VERDICT_TOKENS = REVIEW_VERDICTS | FINAL_VERDICTS | {"UNAVAILABLE", "BLOCKED"}
 MAX_VERDICT_REASON = 1200
@@ -665,6 +666,7 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             **({"visual_preview": "scratch-windows-exe"}
                if visual_review and not visual_capture_configured(verifier) else {}),
             "project_evidence_contract": 1,
+            "render_review_gate": 1,
             "onboarding_sha256": digest(onboarding), "original_head": direct["head"] if direct else frozen["head"],
             "original_git": image["git"] if direct else frozen["git"],
             **({"development_mode": direct_git.MODE, "direct_git": direct, "project_name": data["name"]} if direct else {}),
@@ -1340,10 +1342,10 @@ class RegisteredSession(_FixtureSession):
         self.changes = sorted(set(self.changes) | set(changed))
         return diff
 
-    def verify_registered(self, cycle, *, capture_only=False):
+    def verify_registered(self, cycle, *, capture_only=False, criterion=None):
         tool = self.scope["verifier"]
         state = getattr(self, "signoff_state", {})
-        _require_criterion(self.scope, state.get("criterion"))
+        _require_criterion(self.scope, criterion or state.get("criterion"))
         approved = self.scope.get("approved_criterion")
         checks = tool.get("checks", {})
         if approved is not None:
@@ -1595,6 +1597,10 @@ def _review_and_verify(session, count, key, diff, status):
     _require_criterion(session.scope, key)
     scope = session.scope
     criteria = scope["criteria"]
+    state = session.signoff_state
+    render_required = bool(scope.get("render_review_gate") and (
+        state.get("render_required") or any(map(_render_path, state.get("changed", ())))))
+    baseline = state.get("render_baseline", ())
     review_base = ("The owner selected the current replica. The diff compares it with the frozen onboarding baseline."
                    if scope.get("resume", {}).get("mode") == "review-size-stopped-candidate"
                    else "The diff compares this cycle with its starting candidate.")
@@ -1621,6 +1627,7 @@ def _review_and_verify(session, count, key, diff, status):
                 capture = {**capture, "visual_preview": {
                     **capture.get("visual_preview", {}), "reason": "NO_VISIBLE_CLIENT"}}
             evidence = [frame for frame in evidence if not frame.get("uniform_client")]
+            state["candidate_render"] = evidence
             session.signoff_state["pending_visual"] = {"receipt": capture, "frames": evidence}
             if scope.get("adaptive_play"):
                 documents = read_frozen_requirements(Catalog(session.runner.ledger).read(), scope["project_id"],
@@ -1645,6 +1652,15 @@ def _review_and_verify(session, count, key, diff, status):
             session.check_image()
             if capture["source_sha256"] != session.source():
                 raise Blocked("Saved visual candidate changed")
+    paired = _render_pair(baseline, state.get("candidate_render", ()), session.source()) if render_required else []
+    if paired:
+        evidence = paired + [frame for frame in evidence if frame["id"].startswith("P")][:visual.MAX_FRAMES - 2]
+        state["pending_visual"]["frames"] = evidence
+        prompt += ("\nCompare the baseline and candidate renders of the same scene. State the visible change, "
+                   "including icons, gauges, readability and interaction where relevant. "
+                   "Use UNAVAILABLE if either image does not depict the affected UI.")
+    elif render_required:
+        evidence = []
     changed = session.signoff_state.get("changed", ())
     files = ", ".join(changed[:4]) or "변경 파일 목록 없음"
     _handoff(session, count, "reviewer", f"Developer 변경 {len(changed)}개 · {files}. "
@@ -1732,6 +1748,13 @@ def _review_and_verify(session, count, key, diff, status):
                        status="MODEL_ANALYSIS_REPORTED", **provenance)
         session.phases.append({"cycle": count, "phase": "visual-review", "outcome": "MODEL_ANALYSIS_REPORTED",
                                "verdict": review, "finding_count": len(findings)})
+    elif render_required:
+        review = "REWORK"
+        finding = "Before/after renders are missing or do not show the affected interface."
+        decision = f"{review} · {finding}"
+        raw = ""
+        session.record("native_inspection_render_gate_blocked", cycle=count, target=key,
+                       reason="RENDER_COMPARISON_REQUIRED", source_sha256=session.source())
     else:
         if session.signoff_state.get("visual_unavailable"):
             prompt += "\nThe visual review found insufficient image evidence. Review the code only. Visual quality is NOT_VERIFIED."
@@ -1777,9 +1800,18 @@ def _verify_signoff(session, count, key, status):
     if attachment:
         session.check()
         session.check_image()
-        if any(frame["source_sha256"] != session.source() for frame in attachment["frames"]):
+        baseline = session.signoff_state.get("render_baseline", ())
+        if any(frame["source_sha256"] != session.source() and not any(
+                frame == {**before, "id": "BASELINE"} for before in baseline) for frame in attachment["frames"]):
             raise Blocked("Visual candidate changed after Reviewer")
         visual.read_frames(session.runner.ledger, attachment["frames"])
+    if (scope.get("render_review_gate") and session.signoff_state["review"] == "ACCEPT"
+            and (session.signoff_state.get("render_required")
+                 or any(map(_render_path, session.signoff_state.get("changed", ()))))):
+        pair = _render_pair(session.signoff_state.get("render_baseline", ()),
+                            session.signoff_state.get("candidate_render", ()), session.source())
+        if not pair or not attachment or attachment["frames"][:2] != pair:
+            raise Blocked("Accepted GUI changes require a verified baseline/candidate render comparison")
     checked = session.verify_registered(count)
     tool = scope["verifier"]
     if tool.get("package"):
@@ -1824,7 +1856,9 @@ def _verify_signoff(session, count, key, status):
                 raise Blocked("Adaptive play evidence belongs to another execution")
             count_verified = adaptive_play.verify_action_chain(frames, played, session.source(),
                                                                policy=scope["adaptive_play"])
-            if adaptive_play.review_frames(frames) != attachment["frames"]:
+            if (adaptive_play.review_frames(frames) != attachment["frames"]
+                    and not (attachment["frames"][0]["id"] == "BASELINE"
+                             and all(frame in frames for frame in attachment["frames"][2:]))):
                 raise Blocked("Reviewer frames do not match the approved play recording")
             for offset in range(0, len(frames), visual.MAX_FRAMES):
                 visual.read_frames(session.runner.ledger, frames[offset:offset + visual.MAX_FRAMES])
@@ -1842,10 +1876,15 @@ def _verify_signoff(session, count, key, status):
             comparison["criteria"][item] = "NOT_STARTED"
     if unavailable := session.signoff_state.get("visual_unavailable"):
         comparison["visual_unavailable_sha256"] = unavailable
-        if comparison["criteria"][key] == "VERIFIED":
-            comparison["criteria"][key] = "USER_TEST_REQUIRED"
-            if key in comparison["newly_verified"]:
-                comparison["newly_verified"].remove(key)
+    changed = session.signoff_state.get("changed", ())
+    non_product = bool(changed) and all(_documentation_path(name) or _test_path(name) for name in changed)
+    play_missing = scope.get("adaptive_play") and not comparison.get("adaptive_play_actions")
+    missing_required_evidence = (unavailable or (scope.get("render_review_gate")
+                                 and (non_product or play_missing or session.signoff_state["review"] != "ACCEPT")))
+    if missing_required_evidence and comparison["criteria"][key] == "VERIFIED":
+        comparison["criteria"][key] = "USER_TEST_REQUIRED"
+        if key in comparison["newly_verified"]:
+            comparison["newly_verified"].remove(key)
     if approved is not None:
         comparison["criteria"] = {**status, **comparison["criteria"]}
     session.progress = comparison["criteria"]
@@ -2136,6 +2175,9 @@ def _expected_final(scope, key, comparison, review):
     status = comparison["criteria"]
     if review != "ACCEPT" or comparison["regressed"]:
         return "REWORK"
+    if scope.get("render_review_gate") and any(comparison.get("delivery", {}).get(flag) for flag in (
+            "document_only", "test_changes_only")):
+        return "USER_TEST_REQUIRED"
     if comparison.get("documentation_progress") and status[key] != "VERIFIED":
         return "CONTINUE"
     if scope.get("project_evidence_contract") and status[key] == "NOT_VERIFIED":
@@ -2168,6 +2210,25 @@ def _test_path(name):
     path = Path(name)
     return (any(part.casefold() in {"test", "tests", "qa", "__tests__"} for part in path.parts[:-1])
             or bool(re.search(r"(^qa$|^(test|qa)[_.-]|[_.-](test|tests|spec)$)", path.stem.casefold())))
+
+
+def _render_path(name):
+    path = Path(name)
+    return (not _documentation_path(name) and not _test_path(name) and (
+        path.suffix.casefold() in {".tscn", ".xaml", ".ui", ".css", ".svg", ".png", ".webp", ".html"}
+        or any(part.casefold() in {"ui", "gui", "hud", "tutorial"} for part in path.parts[:-1])
+        or bool(re.search(r"(?:^|[_.-])(gui|ui|hud|tutorial)(?:$|[_.-])", path.stem, re.I))))
+
+
+def _render_pair(baseline, candidate, source):
+    for before in baseline:
+        for after in candidate:
+            if (before["source_sha256"] != source == after["source_sha256"]
+                    and not (before.get("uniform_client") or after.get("uniform_client"))
+                    and all(before.get(field) == after.get(field) for field in ("scenario", "step", "client"))
+                    and before.get("client_sha256", before["sha256"]) != after.get("client_sha256", after["sha256"])):
+                return [{**before, "id": "BASELINE"}, after]
+    return []
 
 
 def _product_plan_block(scope, plan, paths, check):
@@ -2569,6 +2630,13 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         tool = scope["verifier"]
         check = tool.get("checks", {}).get(key)
         reason = _product_plan_block(scope, plan, planned_files, check)
+        render_required = bool(scope.get("render_review_gate") and plan.get("mode", "edit") == "edit" and (
+            any(map(_render_path, planned_files)) or re.search(
+                r"\b(?:GUI|HUD|tutorial|upgrade (?:screen|card)|user interface)\b|튜토리얼|강화\s*(?:화면|카드)|결과\s*화면",
+                f"{plan['plan']} {plan.get('components', '')}", re.I)))
+        render_baseline = []
+        if render_required and not scope.get("visual_review"):
+            reason = reason or "GUI work requires approved rendering and an image Reviewer."
         if reason:
             defer(count, key, "PREREQUISITE", reason)
             return stop(count, outcome=NEEDS_INPUT, feedback={"target": key, "instruction": reason})
@@ -2609,6 +2677,19 @@ def _cycles(session, initial_plan=None, *, continuation=None):
             if "graceful_stop" in scope and _FixtureSession.model_calls_exhausted(session):
                 session.request_stop("MODEL_CALL_LIMIT", "developer")
                 return stop(count - 1, outcome="GRACEFUL_STOP", feedback=feedback)
+            if scope.get("render_review_gate") and scope.get("visual_review") and not documentation:
+                if visual_capture_configured(tool):
+                    baseline_cycle = f"{count}-baseline"
+                    baseline_capture = session.verify_registered(baseline_cycle, capture_only=True, criterion=key)
+                    render_baseline = [frame for frame in visual.frames(
+                        session.runner.ledger, baseline_capture, session.fields["run_id"], baseline_cycle,
+                        session.source(), allow_empty=True) if not frame.get("uniform_client")]
+                    session.record("native_inspection_render_baseline", cycle=count, target=key,
+                                   source_sha256=session.source(), frames=render_baseline)
+                if render_required and not render_baseline:
+                    reason = "GUI work requires a verified before-change render from the approved capture tool."
+                    defer(count, key, "PREREQUISITE", reason)
+                    return stop(count, outcome=NEEDS_INPUT, feedback={"target": key, "instruction": reason})
             tool_context = (f"Approved offline verification tool: {tool['executable']}. "
                             f"Test arguments for this criterion: {verification_args}. " if "executable" in tool else
                             "The independent Verifier checks replica integrity. Functional evidence is still required. ")
@@ -2619,6 +2700,9 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 visual_feedback += ("Work contract: " + json.dumps({
                     field: plan[field] for field in ("deliverable", "components", "verification", "evidence")},
                     ensure_ascii=False) + "\n")
+            if render_required:
+                visual_feedback += ("Run the approved real GUI renderer on the changed scene. "
+                                    "The Controller will require matched before/after captures for acceptance.\n")
             if same_rework and feedback.get("verification"):
                 visual_feedback += ("Previous independent evidence: " + json.dumps(
                     feedback["verification"], ensure_ascii=False) + "\n")
@@ -2683,6 +2767,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 documentation = all(_documentation_path(name) for name in files)
         session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
                                  "changed": files, "diff": diff, "documentation": documentation,
+                                 **({"render_baseline": render_baseline} if render_baseline else {}),
+                                 **({"render_required": True} if render_required else {}),
                                  "continuation": {"known": sorted(known), "reviewed": sorted(reviewed),
                                                   "failures": sorted(failures), "stagnant": stagnant,
                                                   "deferred_criteria": dict(deferred),
@@ -3170,6 +3256,7 @@ def _resume_signoff_contract(runner, events, head, rows, expires, seconds, token
         resume["pending_visual"] = checkpoint["pending_visual"]
     if checkpoint.get("play_report"):
         resume["play_report"] = checkpoint["play_report"]
+    resume.update({name: checkpoint[name] for name in RENDER_FIELDS if name in checkpoint})
     if preview := checkpoint.get("saved_preview"):
         if preview.get("directory") != f"registered-preview-{start['run_id']}":
             raise Blocked("Windows 미리보기 보존 경로가 일치하지 않습니다.")
@@ -3714,7 +3801,7 @@ def _resume_postprocess_contract(runner, events, head, rows, expires, seconds, t
             raise Blocked("판정이 유효하지 않습니다. 같은 후보에서 이 검토 역할을 다시 실행하려면 새 예산이 필요합니다.")
     resume = {key: checkpoint[key] for key in ("cycle", "criterion", "criteria_status", "changed", "continuation",
                                                "review", "review_feedback", "play_report", "comparison", "verification", "documentation",
-                                               "visual", "pending_visual", "visual_unavailable")
+                                               "visual", "pending_visual", "visual_unavailable", *RENDER_FIELDS)
               if key in checkpoint}
     resume.update(mode="postprocess", parent_run_id=start["run_id"], saved_response=ref,
                   parent_reported_tokens=end["known_reported_tokens"], changed_total=end["changed"])
@@ -3925,7 +4012,8 @@ def _resume_remaining(session, diff):
     session.changes = resume.get("changed_total", session.scope["files"])
     session.signoff_state = {"cycle": count, "criterion": key, "criteria_status": status,
                              "changed": resume["changed"], "diff": diff,
-                             "documentation": bool(resume.get("documentation"))}
+                             "documentation": bool(resume.get("documentation")),
+                             **{name: resume[name] for name in RENDER_FIELDS if name in resume}}
     if resume.get("pending_visual"):
         session.signoff_state["pending_visual"] = resume["pending_visual"]
     if resume.get("mode") == "partial-candidate":
@@ -3952,7 +4040,9 @@ def _resume_remaining(session, diff):
                        reason="Saved response failed the approved verdict contract")
     if resume.get("visual"):
         attachment = session.signoff_state["visual"] = resume["visual"]
-        if any(frame["source_sha256"] != session.source() for frame in attachment["frames"]):
+        if any(frame["source_sha256"] != session.source() and not any(
+                frame == {**before, "id": "BASELINE"} for before in resume.get("render_baseline", ()))
+                for frame in attachment["frames"]):
             raise Blocked("Saved visual candidate changed")
         visual.read_frames(session.runner.ledger, attachment["frames"])
     review = resume.get("review")

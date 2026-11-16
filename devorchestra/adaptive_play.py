@@ -459,6 +459,7 @@ def run(session, cycle, key, verification, context):
                     outcome = "NO_VISIBLE_CLIENT"
                     return
                 paths = visual.stage(ledger, [frame], session.logs(f"{cycle}-play-input-{step}"))
+                decision_started = monotonic()
                 prompt = (f"{context}\nUse the attached real frame {frame['id']} to choose ONE next action. "
                           f"Recent action receipts: {json.dumps(actions[-4:])}. "
                           f"Remaining: {input_limit - input_count} inputs and {policy['steps'] - step + 1} decisions. "
@@ -524,6 +525,7 @@ def run(session, cycle, key, verification, context):
                         action["text_length"] = len(value)
                 session.record("native_inspection_play_action_intent", cycle=cycle, target=key, step=step,
                                frame_sha256=frame["sha256"], response_sha256=digest(raw), action=action,
+                               decision_ms=round((monotonic() - decision_started) * 1000),
                                observation=visual.safe_unverified([proposed["observed"]])[0],
                                **({"ready": ready} if foreground else {}))
                 session.soft_boundary("reviewer")
@@ -547,6 +549,7 @@ def run(session, cycle, key, verification, context):
                         path = staging / f"P{len(frames)}.png"
                         receipt = {}
                         if desktop is not None and action["action"] in {"keys", "click"}:
+                            session.check()
                             if window.client_in_image() != client:
                                 raise Blocked("Desktop input target geometry changed")
                             cleanup = "RELEASE_ATTEMPTED"
@@ -555,6 +558,7 @@ def run(session, cycle, key, verification, context):
                             else:
                                 desktop.click(action["x"], action["y"])
                             cleanup = "CONFIRMED"
+                            session.check()
                             receipt.update(input_backend="SEND_INPUT", input_cleanup="CONFIRMED")
                         else:
                             apply(window, proposed, client, foreground=foreground)
@@ -592,7 +596,9 @@ def run(session, cycle, key, verification, context):
                     return
 
         inspect_owned_window(api, job, deadline, session.check, None, workers, play=play, executable=binary,
-                             capture_fps=policy.get("capture_fps"), desktop_hold_ms=desktop_hold_ms)
+                             capture_fps=policy.get("capture_fps"), desktop_hold_ms=desktop_hold_ms,
+                             activate_foreground=desktop_hold_ms is not None,
+                             hold_check=session.check_live if desktop_hold_ms is not None else None)
 
     argv = [*trial_flags(session.work, writable=False, tool_root=directory, shell_tools=False, runtime_root=runtime_root),
             *_args(binary, *args, profile=PROFILE)]

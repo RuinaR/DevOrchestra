@@ -271,10 +271,15 @@ class _FixtureSession:
 
     def check(self):
         events, tail = self.runner.ledger.snapshot()
-        if shutdown_state(events)["state"] in HELD or self.cancelled():
+        if shutdown_state(events)["state"] in HELD:
             raise Blocked("CANCELLED")
         if (len(events), tail) != (self.count, self.fence):
             raise Blocked("Execution fence changed")
+        return self.check_live()
+
+    def check_live(self):
+        if self.cancelled():
+            raise Blocked("CANCELLED")
         if "graceful_stop" not in self.scope:
             self.seconds()
         elif time() >= self.scope["expires"]:
