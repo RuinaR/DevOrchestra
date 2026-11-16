@@ -1,13 +1,16 @@
 """Project hints and bounded, disposable Windows preview handoff."""
 import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from shutil import copyfile
 
 from .lease import Blocked
 from .ledger import check_path
 from .project_onboarding import _relative
 from .role_contract import _unique_object
+from .replica_evidence import fingerprint, snapshot
 
 PREVIEW_MANIFEST = "preview.json"
+GUI_BUNDLE_LIMIT = 256 * 1024**2
 BUILD_FILES = {
     "project.godot": "Godot", "pyproject.toml": "Python", "requirements.txt": "Python",
     "package.json": "Node.js", "package-lock.json": "npm", "pnpm-lock.yaml": "pnpm",
@@ -65,3 +68,40 @@ def preview_entry(directory, files, *, legacy=False):
         return name
     except (Blocked, ValueError, RecursionError) as error:
         raise Blocked("Invalid Windows preview manifest") from error
+
+
+def approved_preview(directory, checkout, *, identity, args=()):
+    """Bind a prebuilt Windows GUI to the approved Git head or local snapshot."""
+    if not directory.is_absolute():
+        raise Blocked("Select an absolute preview bundle folder")
+    check_path(directory)
+    if (directory.resolve() != directory or directory.is_relative_to(checkout)
+            or checkout.is_relative_to(directory)):
+        raise Blocked("Select a separate preview folder outside the registered checkout")
+    if (type(args) not in (list, tuple) or len(args) > 16 or any(type(arg) is not str
+            or not 1 <= len(arg) <= 256 or any(ord(ch) < 32 for ch in arg) for arg in args)):
+        raise Blocked("Preview launch arguments are invalid")
+    bundle = snapshot(directory, max_file_bytes=GUI_BUNDLE_LIMIT, long_local=True)
+    name = preview_entry(directory, bundle["files"])
+    if not name or bundle["git"] or sum(file["bytes"] for file in bundle["files"].values()) > GUI_BUNDLE_LIMIT:
+        raise Blocked("Invalid or oversized Windows preview bundle")
+    metadata = directory.parent / "build.json"
+    fingerprint(metadata, 65536)
+    build = json.loads(metadata.read_bytes(), object_pairs_hook=_unique_object)
+    if not isinstance(build, dict) or any(build.get(key) != value for key, value in identity.items()) \
+            or build.get("files") != bundle["files"]:
+        raise Blocked("The preview build record does not match the approved source")
+    return {"bundle": str(directory), "inventory": bundle, "entry": name, "args": list(args)}
+
+
+def stage_preview(target, destination, check=lambda: None):
+    for name in target["inventory"]["files"]:
+        relative = _relative(name)
+        source, output = Path(target["bundle"]) / relative, destination / relative
+        check()
+        check_path(source)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        copyfile(source, output)
+    if snapshot(destination, max_file_bytes=GUI_BUNDLE_LIMIT, long_local=True)["files"] != target["inventory"]["files"]:
+        raise Blocked("Staged preview differs from the approved bundle")
+    return destination / _relative(target["entry"])

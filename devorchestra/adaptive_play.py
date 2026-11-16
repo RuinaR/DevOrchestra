@@ -2,7 +2,6 @@
 import json
 from contextlib import contextmanager
 from pathlib import Path
-from shutil import copyfile
 from tempfile import mkdtemp
 from time import monotonic, sleep
 
@@ -13,7 +12,8 @@ from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_owned_gui import NO_CLIENT_FRAME, inspect_owned_window, optional_capture_stop
 from .native_developer_trial import PROFILE, trial_flags
 from .owned_artifacts import _remove_owned_tree
-from .replica_evidence import fingerprint, snapshot
+from .project_evidence import stage_preview
+from .replica_evidence import snapshot
 from .role_contract import _unique_object
 from . import windows_key_input
 
@@ -32,7 +32,6 @@ FIRST_FRAME_SECONDS = 8
 GAME_EXECUTABLE_LIMIT = 256 * 1024**2
 PLAY_EVIDENCE_MIB = 64
 FRAME_PNG_LIMIT = 4 * 1024**2
-GODOT_PLAY_OVERRIDE = b"[display]\nwindow/size/no_focus=true\n"
 KEYS = {**{name: ord(name) for name in "WASDQEZXRFCV"},
         "UP": 0x26, "DOWN": 0x28, "LEFT": 0x25, "RIGHT": 0x27,
         "SPACE": 0x20, "ENTER": 0x0D, "ESC": 0x1B}
@@ -296,13 +295,18 @@ def _budget(session):
 
 
 def _candidate(session, cycle, verification):
+    if approved := session.scope.get("gui_preview"):
+        if session.source() != approved["source_sha256"]:
+            raise Blocked("Prebuilt preview belongs to another source snapshot")
+        directory = session.logs(f"{cycle}-approved-gui")
+        stage_preview(approved, directory, session.check)
+        name = approved["entry"]
+        return directory, name, approved["inventory"]["files"][name]["sha256"], approved["args"]
     game = verification.get("game", {})
     if game.get("artifact_directory") and game.get("outcome") == "PASS":
-        suffix = "-review" if verification.get("phase") == "review-capture" else ""
-        if game["artifact_directory"] != f"godot-windows-export-{session.fields['run_id']}-cycle-{cycle}{suffix}":
-            raise Blocked("Game executable is outside the approved play attempt")
-        directory = session.runner.ledger.local_directory("recovery") / game["artifact_directory"]
-        return directory, "GamePilot.exe", game["executable"]["sha256"], ["--resolution", "800x540"]
+        from .game_pilot import stage_adaptive_export
+
+        return stage_adaptive_export(session, cycle, verification, foreground=session.scope["adaptive_play"].get("foreground"))
     preview = verification.get("visual_preview", {})
     if preview.get("status") == "CAPTURED":
         return session.scratch / f"{cycle}-gui-build", preview.get("entry", "app.exe"), preview["executable_sha256"], []
@@ -317,31 +321,17 @@ def run(session, cycle, key, verification, context):
     validate_policy(policy)
     foreground = policy.get("foreground") is True
     desktop_hold_ms = policy.get("desktop_hold_ms")
-    target = _candidate(session, cycle, verification)
-    if target is None or not _budget(session):
-        outcome = "NO_PLAYABLE_CANDIDATE" if target is None else "PLAY_BUDGET"
+    budget = _budget(session)
+    target = _candidate(session, cycle, verification) if budget else None
+    if target is None:
+        outcome = "NO_PLAYABLE_CANDIDATE" if budget else "PLAY_BUDGET"
         session.record("native_inspection_play_finished", cycle=cycle, target=key, outcome=outcome,
                        source_sha256=session.source(), actions=0, inputs=0)
         return [], [], outcome
     directory, name, expected, args = target
-    game_export = verification.get("game", {}).get("outcome") == "PASS"
     binary = directory / name
     check_path(binary)
-    bundle_options = {}
-    if game_export:
-        if fingerprint(binary, GAME_EXECUTABLE_LIMIT)["sha256"] != expected:
-            raise Blocked("Approved game executable changed")
-        directory = session.logs(f"{cycle}-play-game")
-        copyfile(binary, directory / name)
-        binary = directory / name
-        # Godot otherwise requests foreground focus while showing the exported game.
-        # The override belongs to this play bundle only, never to the retained export.
-        if not foreground:
-            with (directory / "override.cfg").open("xb") as config:
-                config.write(GODOT_PLAY_OVERRIDE)
-        bundle_options = {"max_file_bytes": GAME_EXECUTABLE_LIMIT}
-    if not game_export:
-        bundle_options = {"max_file_bytes": 256 * 1024**2, "long_local": True}
+    bundle_options = {"max_file_bytes": GAME_EXECUTABLE_LIMIT, "long_local": True}
     bundle = snapshot(directory, **bundle_options)
     if bundle["files"].get(name, {}).get("sha256") != expected:
         raise Blocked("Approved play executable changed")

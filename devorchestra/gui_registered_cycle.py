@@ -622,6 +622,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
         if not directory:
             return
         if render_only:
+            value.pop("preview", None)
             write_spec({**value, "renderer": {**godot_verifier, "tools_root": str(Path(directory))}})
             use_images.set(True)
             state.set("독립 검증은 유지하고 별도 Godot 렌더 도구를 검토합니다.")
@@ -640,6 +641,21 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                                      "stdout": "Hello", "inputs": []} for key in criteria}})
         state.set("텍스트 읽기 예제를 불러왔습니다. 프로젝트에 맞는 검증 도구, 인자와 기대 출력으로 바꾸세요.")
 
+    def select_prebuilt():
+        try:
+            value = read_spec()
+        except ValueError as error:
+            state.set(str(error))
+            return
+        directory = filedialog.askdirectory(parent=panel, mustexist=True,
+                                            title="preview.json이 있는 Windows 실행 묶음 폴더")
+        if directory:
+            value.pop("renderer", None)
+            write_spec({**value, "preview": {"directory": str(Path(directory)), "args": []}})
+            use_images.set(True)
+            use_play.set(True)
+            state.set("별도 EXE로 기존 후보를 검증합니다. 독립 검증 계약은 유지합니다.")
+
     center.action_grid(verifier_actions, (("검증 도구 선택", choose_verifier),
                                          ("기본 검증 사용", lambda: write_spec(
                                              godot_verifier if is_godot else default_verifier)),
@@ -648,6 +664,7 @@ def show(center, project, *, resume_only=False, continue_progress=False):
     if is_godot:
         ttk.Button(advanced, text="별도 Godot 렌더 도구 선택",
                    command=lambda: select_godot(render_only=True)).pack(anchor="w")
+    ttk.Button(advanced, text="기존 Windows 실행 묶음 선택", command=select_prebuilt).pack(anchor="w")
     detail = center.editor_box(body, height=8, state="disabled")
     cancelled = Event()
     future = None
@@ -937,6 +954,11 @@ def show(center, project, *, resume_only=False, continue_progress=False):
                     summary += (f"\n별도 Godot 렌더 · {renderer['executable']}\n"
                                 f"렌더 도구 승인 SHA-256 · {digest(renderer)}\n"
                                 "독립 기능 검사는 기존 검증 계약을 사용합니다. GUI 변경은 전후 화면이 필요합니다.")
+                if preview := result.get("gui_preview"):
+                    summary += (f"\n기존 Windows 실행 묶음 · {preview['bundle']}\\{preview['entry']}\n"
+                                f"바이트 목록 SHA-256 · {digest(preview['inventory'])}\n"
+                                f"실행 인자 · {json.dumps(preview['args'], ensure_ascii=False)}\n"
+                                "현재 후보의 검증 전용입니다. Developer 수정과 Git 게시는 수행하지 않습니다.")
                 if result.get("visual_preview"):
                     summary += ("\nDeveloper가 세션 임시 폴더에 빌드한 Windows 앱을 오프라인 샌드박스에서 실행해 "
                                 "시작 화면을 캡처합니다. 화면이 필요한 GUI 작업에는 전후 캡처가 필요합니다.")

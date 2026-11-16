@@ -521,6 +521,24 @@ def _export_release(ledger, run_id, replica, data, lab, observe, check, workers,
                          else "SPACE_MESSAGES_SENT_RESPONSE_NOT_VALIDATED"))
 
 
+def stage_adaptive_export(session, cycle, verification, *, foreground):
+    game = verification["game"]
+    suffix = "-review" if verification.get("phase") == "review-capture" else ""
+    artifact = f"godot-windows-export-{session.fields['run_id']}-cycle-{cycle}{suffix}"
+    if game["artifact_directory"] != artifact:
+        raise Blocked("Godot executable is outside the approved play attempt")
+    name = "GamePilot.exe"
+    source = session.runner.ledger.local_directory("recovery") / artifact / name
+    if fingerprint(source, 256 * 1024**2) != game["executable"]:
+        raise Blocked("Approved Godot executable changed")
+    directory = session.logs(f"{cycle}-play-game")
+    copyfile(source, directory / name)
+    if not foreground:
+        with (directory / "override.cfg").open("xb") as config:
+            config.write(b"[display]\nwindow/size/no_focus=true\n")
+    return directory, name, game["executable"]["sha256"], ["--resolution", "800x540"]
+
+
 def verify_development(session, cycle, *, capture_only=False):
     """Build the reviewed candidate under the session fence and preserve independent EXE evidence."""
     scope = session.scope

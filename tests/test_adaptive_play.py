@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from devorchestra import adaptive_play, gui_exe, registered_cycle
 from devorchestra.lease import Blocked, execution_slot
 from devorchestra.ledger import digest
+from devorchestra.project_evidence import approved_preview
 from devorchestra.replica_evidence import fingerprint, snapshot
 
 
@@ -218,6 +219,9 @@ class Fixture : Form {
                 data = gui_exe.compile_exe(root, compiler, lambda: None, 20)
             executable = build / "app.exe"
             executable.write_bytes(data)
+            (build / "preview.json").write_text(json.dumps({"kind": "windows-gui", "entry": executable.name}))
+            (scratch / "build.json").write_text(json.dumps({"source_sha256": "source", "files": snapshot(build)["files"]}))
+            approved = approved_preview(build, work, identity={"source_sha256": "source"})
 
             def logs(label):
                 path = scratch / label
@@ -229,7 +233,8 @@ class Fixture : Form {
                 fields={"run_id": "b" * 32, "project_id": "gui-fixture"},
                 scope={"role_tokens": {"reviewer": 100, "manager-final": 100},
                                                    "tokens": 1000, "model_calls_max": 5,
-                                                   "adaptive_play": adaptive_play.approval()},
+                                                   "adaptive_play": adaptive_play.approval(),
+                                                   "gui_preview": {**approved, "source_sha256": "source"}},
                 owned_verified=True, stop_reason=None, calls=0, usage=0, scratch=scratch, work=work, logs=logs,
                 source=lambda: "source", record=Mock(), check=Mock(), check_image=Mock(),
                 binary=executable, verify_env=os.environ.copy(), soft_boundary=Mock(),
@@ -258,12 +263,9 @@ class Fixture : Form {
                 launch = nullcontext()
             else:
                 launch = patch.object(adaptive_play, "_observe", side_effect=lambda _binary, _argv, *args, **kwargs:
-                                      _observe(executable, [], *args, **kwargs))
+                                      _observe(scratch / "1-approved-gui" / executable.name, [], *args, **kwargs))
             with launch:
-                frames, actions, result = adaptive_play.run(session, 1, "C1", {
-                    "visual_preview": {"status": "CAPTURED", "executable_sha256": fingerprint(executable)["sha256"],
-                                       "bundle_sha256": digest(snapshot(build))}},
-                    "Exercise the owned test fixture")
+                frames, actions, result = adaptive_play.run(session, 1, "C1", {}, "Exercise the owned test fixture")
             self.assertEqual("INPUT_LIMIT", result)
             self.assertEqual(4, len({frame["sha256"] for frame in frames}))
             self.assertEqual(["SCREEN_CHANGED"] * 3, [row["result"] for row in actions])

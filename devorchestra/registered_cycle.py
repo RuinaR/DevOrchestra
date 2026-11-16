@@ -31,7 +31,7 @@ from .native_developer_trial import (
 from .owned_artifacts import _remove_owned_tree
 from .project_onboarding import _protected, _relative
 from .local_folder import MODE as LOCAL_MODE, protected as local_protected, require_candidate
-from .project_evidence import discovery, preview_entry
+from .project_evidence import approved_preview, discovery, preview_entry
 from .replica_evidence import EVIDENCE_SIZE_LIMIT, EvidenceSizeLimit, fingerprint, snapshot
 from .replica_readiness import baseline, original_matches, require_original_inventory
 from .role_contract import _unique_object
@@ -256,7 +256,8 @@ def godot_verifier_spec(spec):
 
 
 def visual_capture_configured(verifier):
-    if godot_verifier_spec(verifier.get("renderer")) or verifier.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI):
+    if ("preview" in verifier or godot_verifier_spec(verifier.get("renderer"))
+            or verifier.get("mode") in ("godot-game", game_pilot.REGISTERED_GUI)):
         return True
     checks = verifier.get("checks")
     return isinstance(checks, dict) and any(isinstance(row, dict) and type(row.get("screen_changed")) is bool
@@ -558,6 +559,22 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
     project_edit = not game and files == []
     is_godot = any(name.casefold() == "project.godot" for name in image["files"])
     renderer = None
+    gui_preview = None
+    if isinstance(spec, dict) and "preview" in spec:
+        spec = dict(spec)
+        preview = spec.pop("preview")
+        if (game or type(preview) is not dict or not {"directory"} <= preview.keys() <= {"directory", "args"}
+                or type(preview["directory"]) is not str or "renderer" in spec):
+            raise Blocked("Use one approved prebuilt preview or one render tool")
+        if visual_review:
+            if play is False:
+                raise Blocked("Prebuilt GUI preview requires AI play approval")
+            identity = {"commit": direct["head"]} if direct else {"source_sha256": digest(image)}
+            directory = Path(preview["directory"])
+            if directory.is_relative_to(replica) or replica.is_relative_to(directory):
+                raise Blocked("Separate the approved preview from the development replica")
+            gui_preview = {**approved_preview(directory, source, identity=identity, args=preview.get("args", ())),
+                           "source_sha256": digest(image)}
     if isinstance(spec, dict) and "renderer" in spec:
         spec = dict(spec)
         render_spec = spec.pop("renderer")
@@ -675,8 +692,9 @@ def _contract(runner, events, head, project, archive, expires, seconds, tokens, 
             **({"visual_review": True, "replica_head": onboarding["replica_head"]} if visual_review else {}),
             **({"adaptive_play": play_policy} if play_policy else {}),
             **({"renderer": renderer} if renderer else {}),
+            **({"gui_preview": gui_preview} if gui_preview else {}),
             **({"visual_preview": "scratch-windows-exe"}
-               if visual_review and not renderer and not visual_capture_configured(verifier) else {}),
+               if visual_review and not (renderer or gui_preview) and not visual_capture_configured(verifier) else {}),
             "project_evidence_contract": 1,
             "render_review_gate": 1,
             "onboarding_sha256": digest(onboarding), "original_head": direct["head"] if direct else frozen["head"],
@@ -1634,9 +1652,12 @@ def _review_and_verify(session, count, key, diff, status):
         if pending is None:
             if "graceful_stop" in scope:
                 session.admit_graceful("reviewer", scope["role_tokens"]["reviewer"] or 0)
-            capture = session.capture_review(count)
-            evidence = visual.frames(session.runner.ledger, capture, session.fields["run_id"], count,
-                                     session.source(), allow_empty=True)
+            if scope.get("gui_preview"):
+                capture = {"observations": [], "source_sha256": session.source()}
+            else:
+                capture = session.capture_review(count)
+                evidence = visual.frames(session.runner.ledger, capture, session.fields["run_id"], count,
+                                         session.source(), allow_empty=True)
             if evidence and all(frame.get("uniform_client") for frame in evidence):
                 capture = {**capture, "visual_preview": {
                     **capture.get("visual_preview", {}), "reason": "NO_VISIBLE_CLIENT"}}
@@ -2500,7 +2521,7 @@ def _cycles(session, initial_plan=None, *, continuation=None):
                 and verification_target in pending and verification_target in scope["verifier"].get("checks", {})):
             pending = [verification_target]
         brief = scope["verifier"].get("manager_brief")
-        play_current = bool(scope.get("renderer") and scope.get("adaptive_play"))
+        play_current = bool((scope.get("renderer") or scope.get("gui_preview")) and scope.get("adaptive_play"))
         game_context = f"Game brief (project data): {brief}\n" if brief else ""
         if approved is not None:
             game_context += ("Plan only for the owner-approved criterion. Make implementation choices within "
@@ -2649,6 +2670,8 @@ def _cycles(session, initial_plan=None, *, continuation=None):
         tool = scope["verifier"]
         check = tool.get("checks", {}).get(key)
         reason = _product_plan_block(scope, plan, planned_files, check)
+        if scope.get("gui_preview") and plan.get("mode") != "verify":
+            reason = "The approved prebuilt executable is verification-only. Select verify or approve a new build after edits."
         render_required = bool(scope.get("render_review_gate") and plan.get("mode", "edit") == "edit" and (
             any(map(_render_path, planned_files)) or re.search(
                 r"\b(?:GUI|HUD|tutorial|upgrade (?:screen|card)|user interface)\b|튜토리얼|강화\s*(?:화면|카드)|결과\s*화면",

@@ -4,9 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from devorchestra import development_profiles, preview_play
+from devorchestra import adaptive_play, development_profiles, preview_play
 from devorchestra.ledger import digest
 from devorchestra.lease import Blocked
+from devorchestra.project_evidence import approved_preview
+from devorchestra.replica_evidence import snapshot
 
 
 LIMITS = dict(steps=6, seconds=60, hold=1000, fps=30, evidence=4)
@@ -47,3 +49,25 @@ class PreviewPlayTests(unittest.TestCase):
             development_profiles.save(ledger, "sample", preferences)
             self.assertEqual(preferences, development_profiles.read(ledger, "sample"))
             self.assertIsNone(development_profiles.read(ledger, "another"))
+
+    def test_prebuilt_binding_and_staging_are_shared_by_ai_play(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            checkout, bundle, staging = (root / name for name in ("source", "bundle", "stage"))
+            for folder in (checkout, bundle, staging):
+                folder.mkdir()
+            binary = bundle / "fixture.exe"
+            binary.write_bytes(b"MZ" + bytes(58) + (64).to_bytes(4, "little") + b"PE\0\0")
+            (bundle / "preview.json").write_text(json.dumps({"kind": "windows-gui", "entry": binary.name}))
+            (root / "build.json").write_text(json.dumps({"commit": "approved-head", "files": snapshot(bundle)["files"]}))
+            with self.assertRaisesRegex(Blocked, "approved source"):
+                approved_preview(bundle, checkout, identity={"commit": "wrong-head"})
+            target = approved_preview(bundle, checkout, identity={"commit": "approved-head"}, args=["--demo"])
+            session = SimpleNamespace(scope={"gui_preview": {**target, "source_sha256": "approved-source"}},
+                                      source=lambda: "approved-source", logs=lambda _: staging, check=lambda: None)
+            directory, name, sha, args = adaptive_play._candidate(session, 1, {})
+            self.assertEqual((staging, binary.name, target["inventory"]["files"][binary.name]["sha256"], ["--demo"]),
+                             (directory, name, sha, args))
+            session.source = lambda: "different-source"
+            with self.assertRaisesRegex(Blocked, "source snapshot"):
+                adaptive_play._candidate(session, 1, {})

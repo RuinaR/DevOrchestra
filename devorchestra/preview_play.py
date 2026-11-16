@@ -5,22 +5,20 @@ from shutil import copyfile
 from time import monotonic, sleep, time
 from uuid import uuid4
 
-from . import adaptive_play, codex_setup, direct_git, registered_cycle, replica_readiness
+from . import adaptive_play, codex_setup, direct_git, replica_readiness
 from .lease import Blocked, execution_slot
-from .ledger import check_path, digest
+from .ledger import digest
 from .mxc_host_probe import OwnedMxcStopped, _args, _observe
 from .mxc_launcher import _known_folder
 from .mxc_owned_gui import inspect_owned_window
 from .native_command_probe import _stage_release, _staging
 from .native_cycle import _FixtureSession
 from .native_developer_trial import PROFILE, trial_flags
-from .project_evidence import preview_entry
-from .replica_evidence import fingerprint, snapshot
+from .project_evidence import approved_preview, stage_preview
 from .role_contract import _unique_object
 from .windows_key_input import ReleaseUnconfirmed, SCAN_CODES
 
 
-MAX_BUNDLE_BYTES = registered_cycle.GUI_PREVIEW_MAX_BYTES
 KIND = "REGISTERED_PREVIEW_PLAY"
 
 
@@ -63,24 +61,13 @@ def _scope(runner, scratch, project, directory, raw, run_id, expires, *, steps, 
         raise Blocked("Preview approval expired")
     actions = input_plan(raw, steps=steps, seconds=seconds, hold=hold, fps=fps, evidence=evidence)
     original, _, _, _ = replica_readiness.baseline(runner.ledger, project)
-    check_path(directory)
-    if directory.resolve() != directory or directory.is_relative_to(original):
-        raise Blocked("Select a separate preview folder outside the registered checkout")
-    bundle = snapshot(directory, max_file_bytes=MAX_BUNDLE_BYTES, long_local=True)
-    entry = preview_entry(directory, bundle["files"])
-    if not entry or bundle["git"] or sum(item["bytes"] for item in bundle["files"].values()) > MAX_BUNDLE_BYTES:
-        raise Blocked("Invalid or oversized Windows preview bundle")
-    metadata = directory.parent / "build.json"
-    fingerprint(metadata, 65536)
-    build = json.loads(metadata.read_bytes(), object_pairs_hook=_unique_object)
     binding = direct_git.binding(original, scratch, lambda: None)
-    if (not isinstance(build, dict) or build.get("commit") != binding["head"]
-            or build.get("files") != bundle["files"]
-            or direct_git._command(original, scratch, lambda: None, "status",
-                                   "--porcelain=v1", "-z", "--untracked-files=all")):
+    if direct_git._command(original, scratch, lambda: None, "status", "--porcelain=v1", "-z", "--untracked-files=all"):
         raise Blocked("The preview build record does not match the clean registered checkout")
+    target = approved_preview(directory, original, identity={"commit": binding["head"]})
+    target.pop("args")
     return {"project_id": project, "run_id": run_id, "expires": expires, "source": str(original),
-            "git": binding, "bundle": str(directory), "inventory": bundle, "entry": entry,
+            "git": binding, **target,
             "window": "only foreground HWND of the exact staged executable in its owned Job",
             "actions": actions, "steps": steps, "seconds": seconds, "hold_ms": hold, "fps": fps,
             "evidence_mib": evidence, "model_calls": 0}
@@ -113,15 +100,7 @@ def run(runner, scope, approval, *, cancelled):
             bundle, logs, data, home = (lab / name for name in ("bundle", "logs", "data", "config"))
             for folder in (bundle, logs, data, home):
                 folder.mkdir()
-            files = frozen["inventory"]["files"]
-            for name in files:
-                source, target = Path(scope["bundle"]) / name, bundle / name
-                check_path(source)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                copyfile(source, target)
-            if snapshot(bundle, max_file_bytes=MAX_BUNDLE_BYTES, long_local=True)["files"] != files:
-                raise Blocked("Staged preview differs from the approved bundle")
-            executable = bundle / scope["entry"]
+            executable = stage_preview(frozen, bundle)
             launcher = _stage_release(codex_setup.archive_path(ledger), lab / "codex")
             windows = _known_folder(0x24)
             environment = _FixtureSession.runtime_environment(
