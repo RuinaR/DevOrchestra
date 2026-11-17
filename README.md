@@ -1,5 +1,7 @@
 # DevOrchestra
 
+[현재 상태와 재개 방법](docs/handoff/CURRENT.md)
+
 DevOrchestra는 Windows에서 Codex 개발을 관리하는 Command Center입니다. 사용자가 목표, 완료 기준, 독립 Git 복제본, 허용 작업과 예산을 승인하면 Manager 계획 → Developer → 독립 Reviewer → 결정적 Verifier → 최종 Manager를 순서대로 실행합니다. 승인 범위 안에서 다음 사이클을 시작하고, 완료 또는 정해진 중단 조건에 도달하면 원장에 결과를 남깁니다.
 
 ## Windows x64 릴리스 후보
