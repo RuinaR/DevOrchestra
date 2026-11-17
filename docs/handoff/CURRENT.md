@@ -1,3 +1,18 @@
+# DevOrchestra 동결 및 재개 안내
+
+2026-11-18 소유자 결정으로 MRGame은 Codex 직접 개발로 전환했다. DevOrchestra는 소스, 승인·원장·복구 기록과 검증 근거를 보존하고 신규 자동 역할 실행을 동결한다.
+
+- 로컬 두 원장에서 신규 실행 진입 차단을 검증했다. 운영 원장은 `RECOVERY_REQUIRED`로 유지한다. 종료 요청의 대기 한도가 만료됐으며, 별도 진단에서 소유 실행 미결 항목과 보류 Git 게시가 없음을 확인했다. 기존 UNKNOWN 기록을 보존한다. 로컬 체크아웃 원장은 `READY`다.
+- 공개 제품 코드 기준은 [cd78d85](https://github.com/RuinaR/DevOrchestra/commit/cd78d85886bd4802a0232c81248db28d9544311e), 동결 전 공개 인수인계 기준은 [81c5766](https://github.com/RuinaR/DevOrchestra/commit/81c5766b7c4786edf3b16b0f3d1dad4346006ac9)이다. 로컬 개발 `8379c0056dff9` 및 운영 소스 `a6f91d4d5641`에는 별도 미게시 변경이 있다.
+- 소스·패치·Git 번들·운영 지침 `public-v12`·원장 사본과 고유 자료는 비공개 보관을 검증했다. 배포 상태와 통합 회귀를 입증하지 못한 로컬 변경은 공개 main에 병합하지 않았다. 로컬의 시각 응답 줄 분할 및 게시 계보 인수 개선과 공개 제품 기능을 구분한다.
+- MRGame의 경로 전환으로 동결된 등록 경로에는 이전 절대 경로가 남아 있다. 원장과 승인 원본은 그대로 보존한다. 자동 개발 복귀에는 소유자 명시 결정, 작업 트리 독점 확인, 로컬 보관 검증, 현재 경로로 별도 등록·승인, 운영 원장 복구와 실제 소유 Job 검증이 필요하다. 과거 경로 또는 승인으로 자동 재실행하지 않는다.
+- [MRGame 직접 개발 인수인계](https://github.com/RuinaR/MRGame/blob/main/docs/handoff/CURRENT.md)에서 제품 상태와 다음 작업을 확인한다.
+
+[동결 전 운영 기준](CURRENT.md#동결-전-운영-기준) · [전체 구조 및 이력](HISTORY.md) · [시각 검토](DESIGN-REVIEW.md) · [안전 정책](../GLOBAL-SAFETY-POLICY.md) · [Windows 검증](../WINDOWS-RELEASE-QA.md)
+
+## 동결 전 운영 기준
+
+
 # DevOrchestra 인수인계
 
 2026-11-17 운영 기준선. 이 문서의 게시 커밋은 문서 변경이다. 제품 코드는 [공개 기준점 cd78d85](https://github.com/RuinaR/DevOrchestra/commit/cd78d85886bd4802a0232c81248db28d9544311e)를 따른다.
